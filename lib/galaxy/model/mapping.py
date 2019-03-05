@@ -554,10 +554,13 @@ model.Job.table = Table(
     Column("copied_from_job_id", Integer, nullable=True),
     Column("command_line", TEXT),
     Column("dependencies", JSONType, nullable=True),
+    Column("job_messages", JSONType, nullable=True),
     Column("param_filename", String(1024)),
     Column("runner_name", String(255)),
-    Column("stdout", TEXT),
-    Column("stderr", TEXT),
+    Column("job_stdout", TEXT),
+    Column("job_stderr", TEXT),
+    Column("tool_stdout", TEXT),
+    Column("tool_stderr", TEXT),
     Column("exit_code", Integer, nullable=True),
     Column("traceback", TEXT),
     Column("session_id", Integer, ForeignKey("galaxy_session.id"), index=True, nullable=True),
@@ -683,9 +686,7 @@ model.JobExportHistoryArchive.table = Table(
     Column("history_id", Integer, ForeignKey("history.id"), index=True),
     Column("dataset_id", Integer, ForeignKey("dataset.id"), index=True),
     Column("compressed", Boolean, index=True, default=False),
-    Column("history_attrs_filename", TEXT),
-    Column("datasets_attrs_filename", TEXT),
-    Column("jobs_attrs_filename", TEXT))
+    Column("history_attrs_filename", TEXT))
 
 model.JobImportHistoryArchive.table = Table(
     "job_import_history_archive", metadata,
@@ -750,9 +751,12 @@ model.Task.table = Table(
     Column("command_line", TEXT),
     Column("param_filename", String(1024)),
     Column("runner_name", String(255)),
-    Column("stdout", TEXT),
-    Column("stderr", TEXT),
+    Column("job_stdout", TEXT),  # job_stdout makes sense here because it is short for job script standard out.
+    Column("job_stderr", TEXT),
+    Column("tool_stdout", TEXT),
+    Column("tool_stderr", TEXT),
     Column("exit_code", Integer, nullable=True),
+    Column("job_messages", JSONType, nullable=True),
     Column("info", TrimmedString(255)),
     Column("traceback", TEXT),
     Column("job_id", Integer, ForeignKey("job.id"), index=True, nullable=False),
