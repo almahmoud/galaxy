@@ -3042,8 +3042,6 @@ class HistoryDatasetAssociation(DatasetInstance, HasTags, Dictifiable, UsesAnnot
     def set_file_name(self, filename):
         return self.dataset.set_file_name(filename)
 
-    file_name = property(get_file_name, set_file_name)
-
 
 class HistoryDatasetAssociationHistory(RepresentById):
     def __init__(self,
