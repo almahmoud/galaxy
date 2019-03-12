@@ -128,11 +128,6 @@ class PluggedMediaController(BaseAPIController):
                 except exceptions.MalformedId as e:
                     return "Invalid `authz_id`. {}".format(e)
 
-                try:
-                    trans.app.authnz_manager.can_user_assume_authz(trans, authz_id)
-                except Exception:
-                    return "Invalid or inaccessible authorization record with given id."
-
         try:
             new_plugged_media = self.plugged_media_manager.create(
                 user_id=trans.user.id,
