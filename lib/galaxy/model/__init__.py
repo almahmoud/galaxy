@@ -3014,34 +3014,6 @@ class HistoryDatasetAssociation(DatasetInstance, HasTags, Dictifiable, UsesAnnot
         return ((type_coerce(cls.content_type, types.Unicode) + u'-' +
                  type_coerce(cls.id, types.Unicode)).label('type_id'))
 
-    def get_file_name(self):
-        user = self.history.user if self.history else None
-        return self.dataset.get_file_name(user)
-
-    def get_size(self, nice_size=False):
-        """Returns the size of the data on disk"""
-        user = self.history.user if self.history else None
-        if nice_size:
-            return galaxy.util.nice_size(self.dataset.get_size(user))
-        return self.dataset.get_size(user)
-
-    def set_size(self, **kwargs):
-        """Sets the size of the data on disk"""
-        user = self.history.user if self.history else None
-        self.dataset.set_size(user=user, **kwargs)
-
-    def get_total_size(self):
-        user = self.history.user if self.history else None
-        return self.dataset.get_total_size(user)
-
-    def has_data(self):
-        """Detects whether there is any data"""
-        user = self.history.user if self.history else None
-        return self.dataset.has_data(user)
-
-    def set_file_name(self, filename):
-        return self.dataset.set_file_name(filename)
-
 
 class HistoryDatasetAssociationHistory(RepresentById):
     def __init__(self,
