@@ -20,5 +20,6 @@ def main():
         for content in bgzipped:
             vcf_output.write(content + "\n")
 
+
 if __name__ == "__main__":
     main()
