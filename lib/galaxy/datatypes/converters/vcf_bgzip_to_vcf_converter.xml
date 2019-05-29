@@ -1,5 +1,9 @@
 <tool id="CONVERTER_vcf_bgzip_to_vcf_0" name="Convert VCF_BGZIP to VCF" version="1.0.0" hidden="true">
     <!-- <description>__NOT_USED_CURRENTLY_FOR_CONVERTERS__</description> -->
+    <requirements>
+        <requirement type="package" version="0.15.2">pysam</requirement>
+        <requirement type="package" version="3.7">python</requirement>
+    </requirements>
     <command>python '$__tool_directory__/vcf_bgzip_to_vcf.py' '$input1' '$output1'</command>
     <inputs>
         <param format="vcf_bgzip" name="input1" type="data" label="Choose VCF BGZip file"/>
@@ -7,6 +11,12 @@
     <outputs>
         <data format="vcf" name="output1"/>
     </outputs>
+    <tests>
+      <test>
+        <param name="input1" ftype="vcf_bgzip" value="test.vcf.gz"/>
+        <output name="output1" file="test.vcf"/>
+      </test>
+    </tests>
     <help>
     </help>
 </tool>
