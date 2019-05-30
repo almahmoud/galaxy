@@ -6,6 +6,7 @@ Uses pysam to read a bgzip'd vcf file's contents and write them to an uncompress
 usage: %prog in_file out_file
 """
 import argparse
+
 import pysam
 
 
