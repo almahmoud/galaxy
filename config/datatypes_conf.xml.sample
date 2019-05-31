@@ -377,6 +377,7 @@
     <datatype extension="vcf_bgzip" type="galaxy.datatypes.tabular:VcfGz" display_in_upload="true">
       <display file="igv/vcf.xml"/>
       <converter file="vcf_bgzip_to_tabix_converter.xml" target_datatype="tabix"/>
+      <converter file="vcf_bgzip_to_vcf_converter.xml" target_datatype="vcf"/>
     </datatype>
     <!-- Phylogenetic tree datatypes -->
     <datatype extension="phyloxml" type="galaxy.datatypes.xml:Phyloxml" display_in_upload="true"/>
