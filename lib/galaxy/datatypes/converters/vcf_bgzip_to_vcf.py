@@ -21,7 +21,7 @@ def main():
     bgzipped = pysam.BGZFile(input_fname)
     with open(output_fname, 'w') as vcf_output:
         for content in bgzipped:
-            vcf_output.write(content + "\n")
+            vcf_output.write(str(content) + "\n")
 
 
 if __name__ == "__main__":
