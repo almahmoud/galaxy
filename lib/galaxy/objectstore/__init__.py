@@ -25,6 +25,7 @@ from galaxy.util import (
     force_symlink,
     umask_fix_perms,
 )
+from galaxy.util.bunch import Bunch
 from galaxy.util.odict import odict
 from galaxy.util.path import (
     safe_makedirs,
@@ -270,7 +271,12 @@ class ObjectStore(object):
         }
 
     def _get_object_id(self, obj):
-        return getattr(obj, self.store_by)
+        if hasattr(obj, self.store_by):
+            return getattr(obj, self.store_by)
+        else:
+            # job's don't have uuids, so always use ID in this case when creating
+            # job working directories.
+            return obj.id
 
 
 class DiskObjectStore(ObjectStore):
@@ -387,6 +393,7 @@ class DiskObjectStore(ObjectStore):
         if alt_name and not safe_relpath(alt_name):
             log.warning('alt_name would locate path outside dir: %s', alt_name)
             raise ObjectInvalid("The requested object is invalid")
+        obj_id = self._get_object_id(obj)
         if old_style:
             if extra_dir is not None:
                 path = os.path.join(base, extra_dir)
@@ -394,7 +401,6 @@ class DiskObjectStore(ObjectStore):
                 path = base
         else:
             # Construct hashed path
-            obj_id = self._get_object_id(obj)
             rel_path = os.path.join(*directory_hash_id(obj_id))
             # Create a subdirectory for the object ID
             if obj_dir:
@@ -407,6 +413,7 @@ class DiskObjectStore(ObjectStore):
                     rel_path = os.path.join(rel_path, extra_dir)
             path = os.path.join(base, rel_path)
         if not dir_only:
+            assert obj_id is not None, "The effective dataset identifier consumed by object store [%s] must be set before a path can be constructed." % (self.store_by)
             path = os.path.join(path, alt_name if alt_name else "dataset_%s.dat" % obj_id)
         return os.path.abspath(path)
 
@@ -494,7 +501,10 @@ class DiskObjectStore(ObjectStore):
             # construct and return hashed path
             if os.path.exists(path):
                 return path
-        return self._construct_path(obj, **kwargs)
+        path = self._construct_path(obj, **kwargs)
+        if not os.path.exists(path):
+            raise ObjectNotFound
+        return path
 
     def update_from_file(self, obj, file_name=None, create=False, **kwargs):
         """`create` parameter is not used in this implementation."""
@@ -985,6 +995,12 @@ def build_object_store_from_config(config, fsmon=False, config_xml=None, config_
     'hierarchical', 'irods', and 'pulsar' are supported values.
     """
     from_object = 'xml'
+
+    if config is None and config_dict is not None and 'config' in config_dict:
+        # Build a config object from to_dict of an ObjectStore.
+        config = Bunch(**config_dict["config"])
+    elif config is None:
+        raise Exception("build_object_store_from_config sent None as config parameter and one cannot be recovered from config_dict")
 
     if config_xml is None and config_dict is None:
         config_file = config.object_store_config_file

@@ -17,7 +17,7 @@ import axios from "axios";
 
 export default FormBase.extend({
     initialize: function(options) {
-        let Galaxy = getGalaxyInstance();
+        const Galaxy = getGalaxyInstance();
         var self = this;
         this.deferred = new Deferred();
         FormBase.prototype.initialize.call(this, options);
@@ -26,7 +26,7 @@ export default FormBase.extend({
         this._update(this.model.get("initialmodel"));
 
         // listen to history panel
-        if (this.model.get("listen_to_history") && Galaxy && Galaxy.currHistoryPanel) {
+        if (this.model.get("listen_to_history") && Galaxy.currHistoryPanel) {
             this.listenTo(Galaxy.currHistoryPanel.collection, "change", () => {
                 self.model.get("onchange")();
             });
@@ -60,7 +60,7 @@ export default FormBase.extend({
         this.$el.off().hide();
         this.deferred.execute(() => {
             FormBase.prototype.remove.call(self);
-            let Galaxy = getGalaxyInstance();
+            const Galaxy = getGalaxyInstance();
             Galaxy.emit.debug("tool-form-base::_destroy()", "Destroy view.");
         });
     },
@@ -75,15 +75,9 @@ export default FormBase.extend({
                 `<b>${options.name}</b> ${options.description} (Galaxy Version ${options.version})`,
             operations: !options.hide_operations && this._operations(),
             onchange: function() {
-                let Galaxy = getGalaxyInstance();
                 self.deferred.reset();
                 self.deferred.execute(process => {
                     self.model.get("postchange")(process, self);
-                    if (self.model.get("listen_to_history")) {
-                        process.then(() => {
-                            self.stopListening(Galaxy.currHistoryPanel.collection);
-                        });
-                    }
                 });
             }
         });
@@ -114,13 +108,13 @@ export default FormBase.extend({
     _operations: function() {
         var self = this;
         var options = this.model.attributes;
-        let Galaxy = getGalaxyInstance();
+        const Galaxy = getGalaxyInstance();
 
         // Buttons for adding and removing favorite.
-        let in_favorites = Galaxy.user.getFavorites().tools.indexOf(options.id) >= 0;
+        const in_favorites = Galaxy.user.getFavorites().tools.indexOf(options.id) >= 0;
         var favorite_button = new Ui.Button({
             icon: "fa-star-o",
-            title: "Favorite",
+            title: options.narrow ? null : "Favorite",
             tooltip: "Add to favorites",
             visible: !Galaxy.user.isAnonymous() && !in_favorites,
             onclick: () => {
@@ -136,7 +130,7 @@ export default FormBase.extend({
 
         var remove_favorite_button = new Ui.Button({
             icon: "fa-star",
-            title: "Added",
+            title: options.narrow ? null : "Added",
             tooltip: "Remove from favorites",
             visible: !Galaxy.user.isAnonymous() && in_favorites,
             onclick: () => {
@@ -155,7 +149,7 @@ export default FormBase.extend({
         // button for version selection
         var versions_button = new Ui.ButtonMenu({
             icon: "fa-cubes",
-            title: (!options.narrow && "Versions") || null,
+            title: options.narrow ? null : "Versions",
             tooltip: "Select another tool version"
         });
 
@@ -184,25 +178,9 @@ export default FormBase.extend({
         var menu_button = new Ui.ButtonMenu({
             id: "options",
             icon: "fa-caret-down",
-            title: (!options.narrow && "Options") || null,
+            title: options.narrow ? null : "Options",
             tooltip: "View available options"
         });
-        if (options.biostar_url) {
-            menu_button.addMenu({
-                icon: "fa-question-circle",
-                title: "Question?",
-                onclick: function() {
-                    window.open(`${options.biostar_url}/p/new/post/`);
-                }
-            });
-            menu_button.addMenu({
-                icon: "fa-search",
-                title: _l("Search"),
-                onclick: function() {
-                    window.open(`${options.biostar_url}/local/search/page/?q=${options.name}`);
-                }
-            });
-        }
         menu_button.addMenu({
             icon: "fa-share",
             title: _l("Share"),
@@ -307,8 +285,7 @@ export default FormBase.extend({
     /** Templates */
     _templateHelp: function(options) {
         var $tmpl = $("<div/>")
-            .addClass("form-help")
-            .addClass("form-text")
+            .addClass("form-help form-text mt-4")
             .append(options.help);
         $tmpl.find("a").attr("target", "_blank");
         $tmpl.find("img").each(function() {

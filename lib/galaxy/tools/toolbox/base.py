@@ -11,13 +11,14 @@ from six import iteritems
 from six.moves.urllib.parse import urlparse
 
 from galaxy.exceptions import MessageException, ObjectNotFound
-from galaxy.tools.deps import build_dependency_manager
+from galaxy.tool_util.deps import build_dependency_manager
 from galaxy.tools.loader_directory import looks_like_a_tool
 from galaxy.util import (
     ExecutionTimer,
     listify,
     parse_xml,
-    string_as_bool
+    string_as_bool,
+    unicodify,
 )
 from galaxy.util.bunch import Bunch
 from galaxy.util.dictifiable import Dictifiable
@@ -62,6 +63,7 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
         # shed_tool_conf.xml file.
         self._dynamic_tool_confs = []
         self._tools_by_id = {}
+        self._tools_by_uuid = {}
         self._integrated_section_by_tool = {}
         # Tool lineages can contain chains of related tools with different ids
         # so each will be present once in the above dictionary. The following
@@ -97,14 +99,10 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
             self._load_tool_panel()
         self._save_integrated_tool_panel()
 
-    def handle_panel_update(self, section_dict):
-        """Extension-point for Galaxy-app specific reload logic.
-
-        This abstract representation of the toolbox shouldn't have details about
-        interacting with the rest of the Galaxy app or message queues, etc....
-        """
-
     def create_tool(self, config_file, tool_shed_repository=None, guid=None, **kwds):
+        raise NotImplementedError()
+
+    def create_dynamic_tool(self, dynamic_tool):
         raise NotImplementedError()
 
     def _init_tools_from_configs(self, config_filenames):
@@ -185,6 +183,25 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
                                        config_elems=config_elems)
             self._dynamic_tool_confs.append(shed_tool_conf_dict)
 
+    def _get_tool_by_uuid(self, tool_uuid):
+        if tool_uuid in self._tools_by_uuid:
+            return self._tools_by_uuid[tool_uuid]
+
+        dynamic_tool = self.app.dynamic_tool_manager.get_tool_by_uuid(tool_uuid)
+        if dynamic_tool:
+            return self.load_dynamic_tool(dynamic_tool)
+
+        return None
+
+    def load_dynamic_tool(self, dynamic_tool):
+        if not dynamic_tool.active:
+            return None
+
+        tool = self.create_dynamic_tool(dynamic_tool)
+        self.register_tool(tool)
+        self._tools_by_uuid[dynamic_tool.uuid] = tool
+        return tool
+
     def load_item(self, item, tool_path, panel_dict=None, integrated_panel_dict=None, load_panel_dict=True, guid=None, index=None, internal=False):
         with self.app._toolbox_lock:
             item = ensure_tool_conf_item(item)
@@ -231,6 +248,9 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
             # Appending a tool to an existing section in toolbox._tool_panel
             tool_section = self._tool_panel[tool_panel_section_key]
             log.debug("Appending to tool panel section: %s" % str(tool_section.name))
+        elif new_label and self._tool_panel.get_label(new_label):
+            tool_section = self._tool_panel.get_label(new_label)
+            tool_panel_section_key = tool_section.id
         elif create_if_needed:
             # Appending a new section to toolbox._tool_panel
             if new_label is None:
@@ -241,7 +261,7 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
                 'id': section_id,
                 'version': '',
             }
-            self.handle_panel_update(section_dict)
+            self.create_section(section_dict)
             tool_section = self._tool_panel[tool_panel_section_key]
             self._save_integrated_tool_panel()
         else:
@@ -412,13 +432,22 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
             elif elem.tag == 'label':
                 self._integrated_tool_panel.stub_label(key)
 
-    def get_tool(self, tool_id, tool_version=None, get_all_versions=False, exact=False):
+    def get_tool(self, tool_id, tool_version=None, get_all_versions=False, exact=False, tool_uuid=None):
         """Attempt to locate a tool in the tool box. Note that `exact` only refers to the `tool_id`, not the `tool_version`."""
         if tool_version:
             tool_version = str(tool_version)
 
         if get_all_versions and exact:
             raise AssertionError("Cannot specify get_tool with both get_all_versions and exact as True")
+
+        if tool_id is None:
+            if tool_uuid is not None:
+                tool_from_uuid = self._get_tool_by_uuid(tool_uuid)
+                if tool_from_uuid is None:
+                    raise ObjectNotFound("Failed to find a tool with uuid [%s]" % tool_uuid)
+                tool_id = tool_from_uuid.id
+            if tool_id is None:
+                raise AssertionError("get_tool called with tool_id as None")
 
         if "/repos/" in tool_id:  # test if tool came from a toolshed
             tool_id_without_tool_shed = tool_id.split("/repos/")[1]
@@ -601,7 +630,7 @@ class AbstractToolBox(Dictifiable, ManagesIntegratedToolPanelMixin):
             if labels is not None:
                 tool.labels = labels
         except (IOError, OSError) as exc:
-            log.error("Error reading tool configuration file from path '%s': %s", path, exc)
+            log.error("Error reading tool configuration file from path '%s': %s", path, unicodify(exc))
         except Exception:
             log.exception("Error reading tool from path: %s", path)
 
@@ -1034,7 +1063,7 @@ def _filter_for_panel(item, item_type, filters, context):
                 if not filter_method(context, filter_item):
                     return False
             except Exception as e:
-                raise MessageException("Toolbox filter exception from '%s': %s." % (filter_method.__name__, e))
+                raise MessageException("Toolbox filter exception from '%s': %s." % (filter_method.__name__, unicodify(e)))
         return True
     if item_type == panel_item_types.TOOL:
         if _apply_filter(item, filters['tool']):
