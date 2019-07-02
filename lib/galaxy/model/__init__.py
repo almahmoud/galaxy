@@ -602,6 +602,7 @@ class PluggedMedia(object):
     def refresh_credentials(self, authnz_manager=None, sa_session=None):
         if self.category == self.categories.LOCAL:
             self._credentials = None
+            return
 
         if authnz_manager is None or sa_session is None:
             raise Exception("Both `authnz_manager` and `sa_session` are required "
