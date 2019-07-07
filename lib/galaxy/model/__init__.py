@@ -658,6 +658,20 @@ class PluggedMedia(object):
     def set_usage(self, amount):
         self.usage = amount
 
+    def get_config(self, cache_path, jobs_directory):
+        config = Bunch(
+            object_store_store_by="uuid",
+            object_store_config_file=None,
+            object_store_check_old_style=False,
+            object_store_cache_path=cache_path,
+            jobs_directory=jobs_directory,
+            file_path=self.path,
+            new_file_path=self.path,
+            umask=os.umask(0o77),
+            gid=os.getgid(),
+        )
+        return config
+
     def refresh_credentials(self, authnz_manager=None, sa_session=None):
         if self.category == self.categories.LOCAL:
             self._credentials = None
@@ -2241,15 +2255,19 @@ class Dataset(StorableObject, RepresentById):
         self.sources = []
         self.hashes = []
 
+        # The value of the following properties will be set when
+        # passing this instance to ObjectStore.
+        self.media = None
+        self.authnz_manager = None
+
     def in_ready_state(self):
         return self.state in self.ready_states
 
-    def get_file_name(self, user=None, plugged_media=None):
+    def get_file_name(self):
         if not self.external_filename:
             assert self.object_store is not None, "Object Store has not been initialized for dataset %s" % self.id
-            plugged_media = self.get_plugged_media(user, plugged_media)
-            if self.object_store.exists(self, user=user, plugged_media=plugged_media):
-                return self.object_store.get_filename(self, user=user, plugged_media=plugged_media)
+            if self.object_store.exists(self):
+                return self.object_store.get_filename(self)
             else:
                 return ''
         else:
@@ -2294,17 +2312,16 @@ class Dataset(StorableObject, RepresentById):
         store_by = getattr(self.object_store, "store_by", "id")
         return self._extra_files_path or "dataset_%s_files" % getattr(self, store_by)
 
-    def _calculate_size(self, user=None, plugged_media=None):
+    def _calculate_size(self):
         if self.external_filename:
             try:
                 return os.path.getsize(self.external_filename)
             except OSError:
                 return 0
         else:
-            plugged_media = self.get_plugged_media(user, plugged_media)
-            return self.object_store.size(self, user=user, plugged_media=plugged_media)
+            return self.object_store.size(self)
 
-    def get_size(self, user=None, plugged_media=None, nice_size=False):
+    def get_size(self, nice_size=False):
         """Returns the size of the data on disk"""
         if self.file_size:
             if nice_size:
@@ -2312,13 +2329,12 @@ class Dataset(StorableObject, RepresentById):
             else:
                 return self.file_size
         else:
-            plugged_media = self.get_plugged_media(user, plugged_media)
             if nice_size:
-                return galaxy.util.nice_size(self._calculate_size(user=user, plugged_media=plugged_media))
+                return galaxy.util.nice_size(self._calculate_size())
             else:
-                return self._calculate_size(user=user, plugged_media=plugged_media)
+                return self._calculate_size()
 
-    def set_size(self, no_extra_files=False, user=None, plugged_media=None):
+    def set_size(self, no_extra_files=False):
         """Sets the size of the data on disk.
 
         If the caller is sure there are no extra files, pass no_extra_files as True to optimize subsequent
@@ -2326,45 +2342,39 @@ class Dataset(StorableObject, RepresentById):
         the file system.
         """
         if not self.file_size:
-            plugged_media = self.get_plugged_media(user, plugged_media)
-            self.file_size = self._calculate_size(user=user, plugged_media=plugged_media)
+            self.file_size = self._calculate_size()
             if no_extra_files:
                 self.total_size = self.file_size
 
-    def get_total_size(self, user=None, plugged_media=None):
+    def get_total_size(self):
         if self.total_size is not None:
             return self.total_size
         # for backwards compatibility, set if unset
-        plugged_media = self.get_plugged_media(user, plugged_media)
-        self.set_total_size(user=user, plugged_media=plugged_media)
+        self.set_total_size()
         db_session = object_session(self)
         db_session.flush()
         return self.total_size
 
-    def set_total_size(self, user=None, plugged_media=None):
-        plugged_media = self.get_plugged_media(user, plugged_media)
+    def set_total_size(self):
         if self.file_size is None:
-            self.set_size(user=user, plugged_media=plugged_media)
+            self.set_size()
         self.total_size = self.file_size or 0
-        if self.object_store.exists(self, user=user, plugged_media=plugged_media,
-                                    extra_dir=self._extra_files_rel_path, dir_only=True):
+        if self.object_store.exists(self, extra_dir=self._extra_files_rel_path, dir_only=True):
             for root, dirs, files in os.walk(self.extra_files_path):
                 self.total_size += sum([os.path.getsize(os.path.join(root, file)) for file in files if os.path.exists(os.path.join(root, file))])
 
-    def has_data(self, user=None, plugged_media=None):
+    def has_data(self):
         """Detects whether there is any data"""
-        plugged_media = self.get_plugged_media(user, plugged_media)
-        return self.get_size(user=user, plugged_media=plugged_media) > 0
+        return self.get_size() > 0
 
     def mark_deleted(self):
         self.deleted = True
         self.plugged_media_associations.deleted = True
 
     # FIXME: sqlalchemy will replace this
-    def _delete(self, user=None, plugged_media=None):
+    def _delete(self):
         """Remove the file that corresponds to this data"""
-        plugged_media = self.get_plugged_media(user, plugged_media)
-        self.object_store.delete(self, user=user, plugged_media=plugged_media)
+        self.object_store.delete(self)
 
     @property
     def user_can_purge(self):
@@ -2372,16 +2382,15 @@ class Dataset(StorableObject, RepresentById):
             and not bool(self.library_associations) \
             and len(self.history_associations) == len(self.purged_history_associations)
 
-    def full_delete(self, user=None, plugged_media=None):
+    def full_delete(self):
         """Remove the file and extra files, marks deleted and purged"""
         # os.unlink( self.file_name )
-        plugged_media = self.get_plugged_media(user, plugged_media)
         try:
-            self.object_store.delete(self, user=user, plugged_media=plugged_media)
+            self.object_store.delete(self)
         except galaxy.exceptions.ObjectNotFound:
             pass
-        if self.object_store.exists(self, user=user, plugged_media=plugged_media, extra_dir=self._extra_files_rel_path, dir_only=True):
-            self.object_store.delete(self, user=user, plugged_media=plugged_media, entire_dir=True, extra_dir=self._extra_files_rel_path, dir_only=True)
+        if self.object_store.exists(self, extra_dir=self._extra_files_rel_path, dir_only=True):
+            self.object_store.delete(self, entire_dir=True, extra_dir=self._extra_files_rel_path, dir_only=True)
         # TODO: purge metadata files
         self.deleted = True
         self.purged = True
@@ -2431,7 +2440,7 @@ class Dataset(StorableObject, RepresentById):
         serialization_options.attach_identifier(id_encoder, self, rval)
         return rval
 
-    def get_plugged_media(self, user, plugged_media=None):
+    def get_plugged_media(self, user, plugged_media=None, authnz_manager=None):
         """
         Encapsulates plugged media available/defined for the user in a list
         of plugged media. The list may contain (a) the plugged media passed to
@@ -2463,7 +2472,29 @@ class Dataset(StorableObject, RepresentById):
         for assoc in self.active_plugged_media_associations:
             if assoc.plugged_media.user_id == user.id:
                 plugged_media.append(assoc.plugged_media)
-        return None if len(plugged_media) == 0 else plugged_media
+        plugged_media = None if len(plugged_media) == 0 else plugged_media
+        if plugged_media is None:
+            plugged_media = user.active_plugged_media if user else None
+        if plugged_media is not None:
+            for pm in plugged_media:
+                if pm.category == PluggedMedia.categories.LOCAL:
+                    continue
+                if not authnz_manager:
+                    log.debug("Cannot refresh credentials for media with ID {}, "
+                              "because authnz_manager is not provided.".format(pm.id))
+                    continue
+                pm.refresh_credentials(authnz_manager=self.app.authnz_manager, sa_session=self.sa_session)
+        return plugged_media
+
+    def assign_media(self, user, authnz_manager=None):
+        plugged_media = self.get_plugged_media(user, authnz_manager=authnz_manager)
+        # rtv = copy.deepcopy(self)
+        # rtv.media = plugged_media
+        # return rtv
+        self.media = plugged_media
+        # self.user_id = user.id
+        self.authnz_manager = authnz_manager
+        return self
 
 
 class DatasetSource(RepresentById):
@@ -2574,10 +2605,10 @@ class DatasetInstance(object):
                 object_session(self).flush()  # flush here, because hda.flush() won't flush the Dataset object
     state = property(get_dataset_state, set_dataset_state)
 
-    def get_file_name(self, user=None):
+    def get_file_name(self):
         if self.dataset.purged:
             return ""
-        return self.dataset.get_file_name(user)
+        return self.dataset.get_file_name()
 
     def set_file_name(self, filename):
         return self.dataset.set_file_name(filename)
@@ -2645,25 +2676,25 @@ class DatasetInstance(object):
         self.clear_associated_files()
         _get_datatypes_registry().change_datatype(self, new_ext)
 
-    def get_size(self, user=None, nice_size=False):
+    def get_size(self, nice_size=False):
         """Returns the size of the data on disk"""
         if nice_size:
-            return galaxy.util.nice_size(self.dataset.get_size(user))
-        return self.dataset.get_size(user)
+            return galaxy.util.nice_size(self.dataset.get_size())
+        return self.dataset.get_size()
 
-    def set_size(self, user=None, **kwds):
+    def set_size(self, **kwds):
         """Sets the size of the data on disk"""
-        self.dataset.set_size(user=user, **kwds)
+        self.dataset.set_size(**kwds)
 
-    def get_total_size(self, user=None):
-        return self.dataset.get_total_size(user)
+    def get_total_size(self):
+        return self.dataset.get_total_size()
 
     def set_total_size(self):
         return self.dataset.set_total_size()
 
-    def has_data(self, user=None):
+    def has_data(self):
         """Detects whether there is any data"""
-        return self.dataset.has_data(user)
+        return self.dataset.has_data()
 
     def get_created_from_basename(self):
         return self.dataset.created_from_basename

@@ -114,6 +114,7 @@ class DataManager(BaseUIController):
                                                     action='show_params',
                                                     dataset_id=trans.security.encode_id(hda.id))})
             try:
+                hda.dataset.assign_media(user=trans.user, authnz_manager=trans.app.authnz_manager)
                 data_manager_json = loads(open(hda.get_file_name()).read())
             except Exception as e:
                 data_manager_json = {}

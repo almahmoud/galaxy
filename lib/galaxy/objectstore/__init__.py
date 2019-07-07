@@ -144,7 +144,7 @@ class ObjectStore(object):
         """Close any connections for this ObjectStore."""
         self.running = False
 
-    def exists(self, obj, user=None, plugged_media=None, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None):
+    def exists(self, obj, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None):
         """Return True if the object identified by `obj` exists, False otherwise."""
         raise NotImplementedError()
 
@@ -156,7 +156,7 @@ class ObjectStore(object):
         """
         return True
 
-    def create(self, obj, user=None, plugged_media=None, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
+    def create(self, obj, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
         """
         Mark the object (`obj`) as existing in the store, but with no content.
 
@@ -173,7 +173,7 @@ class ObjectStore(object):
         """
         raise NotImplementedError()
 
-    def size(self, obj, user=None, plugged_media=None, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
+    def size(self, obj, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
         """
         Return size of the object identified by `obj`.
 
@@ -181,7 +181,7 @@ class ObjectStore(object):
         """
         raise NotImplementedError()
 
-    def delete(self, obj, user=None, plugged_media=None, entire_dir=False, base_dir=None, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
+    def delete(self, obj, entire_dir=False, base_dir=None, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
         """
         Delete the object identified by `obj`.
 
@@ -207,7 +207,7 @@ class ObjectStore(object):
         """
         raise NotImplementedError()
 
-    def get_filename(self, obj, user=None, plugged_media=None, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
+    def get_filename(self, obj, base_dir=None, dir_only=False, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False):
         """
         Get the expected filename with absolute path for object with id `obj.id`.
 
@@ -215,7 +215,7 @@ class ObjectStore(object):
         """
         raise NotImplementedError()
 
-    def update_from_file(self, obj, user=None, plugged_media=None, base_dir=None, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False, file_name=None, create=False):
+    def update_from_file(self, obj, base_dir=None, extra_dir=None, extra_dir_at_root=False, alt_name=None, obj_dir=False, file_name=None, create=False):
         """
         Inform the store that the file associated with `obj.id` has been updated.
 
@@ -561,43 +561,76 @@ class NestedObjectStore(ObjectStore):
 
     def exists(self, obj, **kwargs):
         """Determine if the `obj` exists in any of the backends."""
-        return self._call_method('exists', obj, False, False, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("exists", obj, **kwargs)
+        else:
+            return self._call_method('exists', obj, False, False, **kwargs)
 
     def file_ready(self, obj, **kwargs):
         """Determine if the file for `obj` is ready to be used by any of the backends."""
-        return self._call_method('file_ready', obj, False, False, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("file_ready", obj, **kwargs)
+        else:
+            return self._call_method('file_ready', obj, False, False, **kwargs)
 
     def create(self, obj, **kwargs):
         """Create a backing file in a random backend."""
-        plugged_media = pick_a_plugged_media(
-            kwargs.get('plugged_media', None),
-            enough_quota_on_instance_level_media=kwargs.get("enough_quota_on_instance_level_media", False))
-        if plugged_media is not None:
-            store = get_user_objectstore(self.config, plugged_media)
-            store.create(obj, **kwargs)
-            plugged_media.association_with_dataset(obj)
+        # TODO: check if the following is needed.
+        # plugged_media = pick_a_plugged_media(
+        #     kwargs.get('plugged_media', None),
+        #     enough_quota_on_instance_level_media=kwargs.get("enough_quota_on_instance_level_media", False))
+        # if plugged_media is not None:
+        #     store = get_user_objectstore(self.config, plugged_media)
+        #     store.create(obj, **kwargs)
+        #     plugged_media.association_with_dataset(obj)
+        # else:
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("create", obj, **kwargs)
         else:
             random.choice(list(self.backends.values())).create(obj, **kwargs)
 
     def empty(self, obj, **kwargs):
         """For the first backend that has this `obj`, determine if it is empty."""
-        return self._call_method('empty', obj, True, False, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("empty", obj, **kwargs)
+        else:
+            return self._call_method('empty', obj, True, False, **kwargs)
 
     def size(self, obj, **kwargs):
         """For the first backend that has this `obj`, return its size."""
-        return self._call_method('size', obj, 0, False, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("size", obj, **kwargs)
+        else:
+            return self._call_method('size', obj, 0, False, **kwargs)
 
     def delete(self, obj, **kwargs):
         """For the first backend that has this `obj`, delete it."""
-        return self._call_method('delete', obj, False, False, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("delete", obj, **kwargs)
+        else:
+            return self._call_method('delete', obj, False, False, **kwargs)
 
     def get_data(self, obj, **kwargs):
         """For the first backend that has this `obj`, get data from it."""
-        return self._call_method('get_data', obj, ObjectNotFound, True, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("get_data", obj, **kwargs)
+        else:
+            return self._call_method('get_data', obj, ObjectNotFound, True, **kwargs)
 
     def get_filename(self, obj, **kwargs):
         """For the first backend that has this `obj`, get its filename."""
-        return self._call_method('get_filename', obj, ObjectNotFound, True, **kwargs)
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("get_filename", obj, **kwargs)
+        else:
+            return self._call_method('get_filename', obj, ObjectNotFound, True, **kwargs)
 
     def update_from_file(self, obj, **kwargs):
         """For the first backend that has this `obj`, update it from the given file."""
@@ -629,16 +662,10 @@ class NestedObjectStore(ObjectStore):
         return None
 
     def _call_method(self, method, obj, default, default_is_exception, **kwargs):
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call(method, obj, **kwargs)
         backend = self._get_backend(obj, **kwargs)
-        plugged_media = pick_a_plugged_media(
-            kwargs.get('plugged_media', None),
-            enough_quota_on_instance_level_media=kwargs.get("enough_quota_on_instance_level_media", False))
-        if plugged_media is not None:
-            user_backend = get_user_objectstore(self.config, plugged_media)
-            user_backend.dataset_staging_path = backend.get_filename(obj) if backend is not None else None
-            if user_backend.exists(obj, **kwargs):
-                backend = user_backend
-
         if backend is not None:
             return backend.__getattribute__(method)(obj, **kwargs)
         if default_is_exception:
@@ -891,59 +918,101 @@ class HierarchicalObjectStore(NestedObjectStore):
 
     def exists(self, obj, **kwargs):
         """Check all child object stores."""
-        plugged_media = kwargs.get('plugged_media', None)
-        if plugged_media is not None:
-            for pm in plugged_media:
-                store = get_user_objectstore(self.config, pm)
-                for s in self.backends.values():
-                    if s.exists(obj, **kwargs):
-                        store.dataset_staging_path = s.get_filename(obj)
-                if store.exists(obj, **kwargs):
-                    return True
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("exists", obj, **kwargs)
         for store in self.backends.values():
             if store.exists(obj, **kwargs):
                 return True
         return False
 
-    def create(self, obj, user=None, plugged_media=None, **kwargs):
+    def create(self, obj, **kwargs):
         """Call the primary object store."""
-        if plugged_media is not None:
-            # Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
-            # the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
-            # be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
-            # access and secret are invalid).
-            from_order = None
-            i = 1 + len(plugged_media)
-            while i > 0:
-                i -= 1
+        # very confusing why job is passed here, hence
+        # the following check is necessary because the
+        # `obj` object can be of either of the following
+        # types:
+        # - `galaxy.model.Dataset`
+        # - `galaxy.model.Job`
+        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
+            media = UserObjectStore(obj.media)
+            return media._method_call("create", obj, **kwargs)
+        else:
+            self.backends[0].create(obj, **kwargs)
+
+
+class UserObjectStore(ObjectStore):
+    # TODO: define a common cache and jobs directory for user-based objectstore per backend in config and pass it here.
+    def __init__(self, media, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
+        self.media = media
+        self.backends = {}
+        self.cache_path = cache_path
+        self.jobs_directory = jobs_directory
+        self.__configure_store()
+
+    def __configure_store(self):
+        for m in self.media:
+            categories = m.__class__.categories
+            if m.category == categories.LOCAL:
+                config = m.get_config(cache_path=self.cache_path, jobs_directory=self.jobs_directory)
+                self.backends[m.id] = DiskObjectStore(config=config, config_dict={"files_dir": m.path})
+            elif m.category == categories.S3 or m.category == categories.AZURE:
+                from .cloud import Cloud
+                self.backends[m.id] = Cloud(config=self.media.get_config(), config_dict={})
+            else:
+                raise Exception("Received a plugged media with a un-recognized category type ({}). "
+                                "The category type should match either of the following categories: {}"
+                                .format(self.media.category, categories))
+
+    def _method_call(self, method, obj, enough_quota_on_instance_level_media=False, **kwargs):
+        # Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
+        # the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
+        # be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
+        # access and secret are invalid).
+        from_order = None
+        i = 1 + len(obj.media)
+        rtv = None
+        while i > 0:
+            i -= 1
+            try:
+                # The following check is necessary because the `obj` object can be
+                # of either of following types:
+                # - `galaxy.model.Dataset`
+                # - `galaxy.model.Job`
+                # dataset_size = obj.get_size(obj.user, obj.authnz_manager) if hasattr(obj, 'get_size') else 0
+                # TODO: following is temp, because the previous call is infinite recursive call.
+                dataset_size = 0
+                picked_media = pick_a_plugged_media(
+                    self.media, from_order, dataset_size,
+                    enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
+            except Exception as e:
+                log.exception("Failed to choose a plugged media. Error: {}".format(e))
+            else:
                 try:
-                    # The following check is necessary because the `obj` object can be
-                    # of either of following types:
-                    # - `galaxy.model.Dataset`
-                    # - `galaxy.model.Job`
-                    dataset_size = obj.get_size() if hasattr(obj, 'get_size') else 0
-                    chosen_plugged_media = pick_a_plugged_media(
-                        plugged_media, from_order, dataset_size,
-                        enough_quota_on_instance_level_media=kwargs.get("enough_quota_on_instance_level_media", False))
-                    if chosen_plugged_media is not None:
-                        chosen_plugged_media.dataset_staging_path = self.backends[0].get_filename(obj)
-                        from_order = chosen_plugged_media.order
-                        store = get_user_objectstore(self.config, chosen_plugged_media)
-                        store.create(obj, **kwargs)
-                        chosen_plugged_media.association_with_dataset(obj)
-                        chosen_plugged_media.set_usage(chosen_plugged_media.usage + dataset_size)
+                    if picked_media is not None:
+                        # picked_media.dataset_staging_path = self.backends[picked_media.id].get_filename(obj)
+                        from_order = picked_media.order
+                        backend = self.backends[picked_media.id]
+                        rtv = backend.__getattribute__(method)(obj, **kwargs)
+
+                        # TODO: do the following only if the method is create
+                        # picked_media.association_with_dataset(obj)
+                        # picked_media.set_usage(picked_media.usage + dataset_size)
                     else:
+                        # TODO: the following should be updated.
                         from_order = 0
                         self.backends[0].create(obj, **kwargs)
                     break
                 except Exception as e:
-                    log.exception("Failed to persist the `{}` with ID `{}` on `{}` with the following error;"
+                    log.exception("Failed to persist dataset with ID `{}` on {} with the following error;"
                                   "now trying another persistence option, if any available. Error: {}"
-                                  .format(obj, obj.id, "{} with ID {}".format(plugged_media.category, plugged_media.id)
-                                          if plugged_media is not None else "the default storage of this instance", str(e)))
-            # TODO: User should be notified if this operation has failed.
-        else:
-            self.backends[0].create(obj, **kwargs)
+                                  .format(obj.id,
+                                          "{} with ID {}".format(picked_media.category, picked_media.id)
+                                          if obj.media is not None else "the instance-wide storage", e))
+        # TODO: User should be notified if this operation has failed.
+        return rtv
+
+    # TODO: check exist, this method should be implemented differently as it checks for the existence of data in all the backends.
 
 
 def type_to_object_store_class(store, fsmon=False):
@@ -1084,22 +1153,6 @@ def pick_a_plugged_media(plugged_media, from_order=None, dataset_size=0, enough_
     elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
         # TODO: replace the following exception with a better approach.
         raise Exception("User does not have enough quota to persist the dataset.")
-
-
-def get_user_objectstore(config, plugged_media):
-    categories = plugged_media.__class__.categories
-    if plugged_media.category == categories.LOCAL:
-        return DiskObjectStore(config=config, config_dict={"files_dir": plugged_media.path})
-    elif plugged_media.category == categories.S3:
-        from .cloud import Cloud
-        return Cloud(config=config, config_dict={}, plugged_media=plugged_media)
-    elif plugged_media.category == categories.AZURE:
-        raise NotImplementedError()
-    else:
-        raise Exception("Received a plugged media with a un-recognized category type ({}). "
-                        "The category type should match either of the following categories: {}"
-                        .format(plugged_media.category, categories))
-        pass
 
 
 def local_extra_dirs(func):
