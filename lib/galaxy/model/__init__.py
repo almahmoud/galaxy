@@ -2443,13 +2443,29 @@ class Dataset(StorableObject, RepresentById):
     def get_plugged_media(self, user, plugged_media=None, authnz_manager=None):
         """
         Encapsulates plugged media available/defined for the user in a list
-        of plugged media. The list may contain (a) the plugged media passed to
-        function, or (b) the plugged media on which this dataseet is persisted
-        on and available to the user. Note, a dataset can be persisted on
-        multiple plugged media, but not necessary all are accessible to all
-        the users.
+        of plugged media, and refreshes their access credentials if required,
+        or returns None if:
+            (a) user is not given (anonymous user);
+            (b) user has not defined any media;
+            (c) none of the media associated with this dataset, belongs to the given user.
+
+        The encapsulated list of media may contain:
+        1- the list of plugged media passed to this function, with their
+        credentials refreshed;
+        2- the plugged media on which this dataset is persisted and the media
+        belongs to the given user;
+        3- the list of active media the user has defined.
+
+        Note, a dataset can be persisted on multiple plugged media, but not
+        necessary all are accessible to every user, hence this method returns
+        only the media that are defined by the given user.
+
         :param user: Galaxy user.
-        :param plugged_media: A list of plugged media or a single instance.
+
+        :param plugged_media: A list of plugged media or a single instance of PluggedMedia.
+
+        :param authnz_manager: The authnz manager to be used for refreshing credetials.
+
         :return: None or a list of plugged media.
         """
         if user is None:
@@ -2459,23 +2475,27 @@ class Dataset(StorableObject, RepresentById):
         if plugged_media is not None:
             # If user has explicitly specified a plugged media to be used.
             if isinstance(plugged_media, PluggedMedia):
-                return [plugged_media] if plugged_media.user_id == user.id else None
+                plugged_media = [plugged_media] if plugged_media.user_id == user.id else None
             # If user's explicit selection is already put in a list, or the list
             # of available plugged media of the user is already determined.
             elif hasattr(plugged_media, '__len__') and len(plugged_media) > 0:
-                return [x for x in plugged_media if x.user_id != user.id]
+                plugged_media = [x for x in plugged_media if x.user_id != user.id]
             # If an empty list is passed.
             elif hasattr(plugged_media, '__len__') and len(plugged_media) == 0:
                 log.exception("An empty list as plugged media is an unexpected value.")
-        plugged_media = []
+        else:
+            plugged_media = []
+            for assoc in self.active_plugged_media_associations:
+                if assoc.plugged_media.user_id == user.id:
+                    plugged_media.append(assoc.plugged_media)
+            if len(plugged_media) == 0:
+                plugged_media = user.active_plugged_media if user else None
 
-        for assoc in self.active_plugged_media_associations:
-            if assoc.plugged_media.user_id == user.id:
-                plugged_media.append(assoc.plugged_media)
-        plugged_media = None if len(plugged_media) == 0 else plugged_media
-        if plugged_media is None:
-            plugged_media = user.active_plugged_media if user else None
-        if plugged_media is not None:
+        # The following condition is satisfied when a given user
+        # has not plugged any media.
+        if len(plugged_media) == 0 or plugged_media is None:
+            return None
+        else:
             for pm in plugged_media:
                 if pm.category == PluggedMedia.categories.LOCAL:
                     continue
@@ -2484,16 +2504,19 @@ class Dataset(StorableObject, RepresentById):
                               "because authnz_manager is not provided.".format(pm.id))
                     continue
                 pm.refresh_credentials(authnz_manager=self.app.authnz_manager, sa_session=self.sa_session)
-        return plugged_media
+            return plugged_media
 
     def assign_media(self, user, authnz_manager=None):
         plugged_media = self.get_plugged_media(user, authnz_manager=authnz_manager)
-        # rtv = copy.deepcopy(self)
-        # rtv.media = plugged_media
-        # return rtv
         self.media = plugged_media
-        # self.user_id = user.id
-        self.authnz_manager = authnz_manager
+        if self.media is None:
+            self.authnz_manager = None
+        else:
+            self.authnz_manager = authnz_manager
+        # Ideally, in order to ensure immutability of a dataset, this method should
+        # return a deepcopy of the dataset. However, currencly it does not seem
+        # multiple processes concurrently read/write a dataset instance, hence its
+        # immutability does not seem crucial.
         return self
 
 
