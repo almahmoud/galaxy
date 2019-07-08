@@ -563,7 +563,7 @@ class NestedObjectStore(ObjectStore):
         """Determine if the `obj` exists in any of the backends."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("exists", obj, **kwargs)
+            return media._call_method("exists", obj, **kwargs)
         else:
             return self._call_method('exists', obj, False, False, **kwargs)
 
@@ -571,7 +571,7 @@ class NestedObjectStore(ObjectStore):
         """Determine if the file for `obj` is ready to be used by any of the backends."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("file_ready", obj, **kwargs)
+            return media._call_method("file_ready", obj, **kwargs)
         else:
             return self._call_method('file_ready', obj, False, False, **kwargs)
 
@@ -579,7 +579,7 @@ class NestedObjectStore(ObjectStore):
         """Create a backing file in a random backend."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("create", obj, **kwargs)
+            return media._call_method("create", obj, **kwargs)
         else:
             random.choice(list(self.backends.values())).create(obj, **kwargs)
 
@@ -587,7 +587,7 @@ class NestedObjectStore(ObjectStore):
         """For the first backend that has this `obj`, determine if it is empty."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("empty", obj, **kwargs)
+            return media._call_method("empty", obj, **kwargs)
         else:
             return self._call_method('empty', obj, True, False, **kwargs)
 
@@ -595,7 +595,7 @@ class NestedObjectStore(ObjectStore):
         """For the first backend that has this `obj`, return its size."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("size", obj, **kwargs)
+            return media._call_method("size", obj, **kwargs)
         else:
             return self._call_method('size', obj, 0, False, **kwargs)
 
@@ -603,7 +603,7 @@ class NestedObjectStore(ObjectStore):
         """For the first backend that has this `obj`, delete it."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("delete", obj, **kwargs)
+            return media._call_method("delete", obj, **kwargs)
         else:
             return self._call_method('delete', obj, False, False, **kwargs)
 
@@ -611,7 +611,7 @@ class NestedObjectStore(ObjectStore):
         """For the first backend that has this `obj`, get data from it."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("get_data", obj, **kwargs)
+            return media._call_method("get_data", obj, **kwargs)
         else:
             return self._call_method('get_data', obj, ObjectNotFound, True, **kwargs)
 
@@ -619,7 +619,7 @@ class NestedObjectStore(ObjectStore):
         """For the first backend that has this `obj`, get its filename."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("get_filename", obj, **kwargs)
+            return media._call_method("get_filename", obj, **kwargs)
         else:
             return self._call_method('get_filename', obj, ObjectNotFound, True, **kwargs)
 
@@ -655,7 +655,7 @@ class NestedObjectStore(ObjectStore):
     def _call_method(self, method, obj, default, default_is_exception, **kwargs):
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call(method, obj, **kwargs)
+            return media._call_method(method, obj, **kwargs)
         backend = self._get_backend(obj, **kwargs)
         if backend is not None:
             return backend.__getattribute__(method)(obj, **kwargs)
@@ -911,7 +911,7 @@ class HierarchicalObjectStore(NestedObjectStore):
         """Check all child object stores."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("exists", obj, **kwargs)
+            return media._call_method("exists", obj, **kwargs)
         for store in self.backends.values():
             if store.exists(obj, **kwargs):
                 return True
@@ -927,7 +927,7 @@ class HierarchicalObjectStore(NestedObjectStore):
         # - `galaxy.model.Job`
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
-            return media._method_call("create", obj, **kwargs)
+            return media._call_method("create", obj, **kwargs)
         else:
             self.backends[0].create(obj, **kwargs)
 
@@ -955,7 +955,7 @@ class UserObjectStore(ObjectStore):
                                 "The category type should match either of the following categories: {}"
                                 .format(self.media.category, categories))
 
-    def _method_call(self, method, obj, enough_quota_on_instance_level_media=False, **kwargs):
+    def _call_method(self, method, obj, enough_quota_on_instance_level_media=False, **kwargs):
         # Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
         # the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
         # be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
@@ -1003,7 +1003,8 @@ class UserObjectStore(ObjectStore):
         # TODO: User should be notified if this operation has failed.
         return rtv
 
-    def pick_a_plugged_media(self, plugged_media, from_order=None, dataset_size=0,
+    @staticmethod
+    def pick_a_plugged_media(plugged_media, from_order=None, dataset_size=0,
                              enough_quota_on_instance_level_media=False):
         """
         This function receives a list of plugged media, and decides which one to be
