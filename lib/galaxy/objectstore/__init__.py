@@ -577,15 +577,6 @@ class NestedObjectStore(ObjectStore):
 
     def create(self, obj, **kwargs):
         """Create a backing file in a random backend."""
-        # TODO: check if the following is needed.
-        # plugged_media = pick_a_plugged_media(
-        #     kwargs.get('plugged_media', None),
-        #     enough_quota_on_instance_level_media=kwargs.get("enough_quota_on_instance_level_media", False))
-        # if plugged_media is not None:
-        #     store = get_user_objectstore(self.config, plugged_media)
-        #     store.create(obj, **kwargs)
-        #     plugged_media.association_with_dataset(obj)
-        # else:
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
             media = UserObjectStore(obj.media)
             return media._method_call("create", obj, **kwargs)
@@ -982,7 +973,7 @@ class UserObjectStore(ObjectStore):
                 # dataset_size = obj.get_size(obj.user, obj.authnz_manager) if hasattr(obj, 'get_size') else 0
                 # TODO: following is temp, because the previous call is infinite recursive call.
                 dataset_size = 0
-                picked_media = pick_a_plugged_media(
+                picked_media = self.pick_a_plugged_media(
                     self.media, from_order, dataset_size,
                     enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
             except Exception as e:
@@ -1011,6 +1002,58 @@ class UserObjectStore(ObjectStore):
                                           if obj.media is not None else "the instance-wide storage", e))
         # TODO: User should be notified if this operation has failed.
         return rtv
+
+    def pick_a_plugged_media(self, plugged_media, from_order=None, dataset_size=0,
+                             enough_quota_on_instance_level_media=False):
+        """
+        This function receives a list of plugged media, and decides which one to be
+        used for the object store operations. If a single plugged media is given
+        (i.e., only one available/defined for the user, or user has explicitly
+        chosen a plugged media), it returns that single option. However, if multiple
+        plugged media are available, then it uses the `order`, and `quota` attributes of
+        the plugged media to decide which one to be used.
+        NOTE: do not associate a dataset with a plugged media before the dataset is
+        successfully persisted on the media.
+        :param plugged_media: A list of plugged media defined/available for the user.
+        :param from_order: is the order of a previously returned and failed plugged media,
+        which this function should determine a plugged media in a lower order to that.
+        :param dataset_size: is the file size of the dataset.
+        :param enough_quota_on_instance_level_media: Sets if user has enough quota on
+        the default media (i.e., the instance-level persistence media) to persist the dataset.
+        :return: A single plugged media, or None (if no plugged media is available, or
+        if object store should use instance-level config).
+        """
+        if plugged_media is None:
+            return None
+        if not hasattr(plugged_media, '__len__'):
+            log.exception("Expected a list of PluggedMedia, but received an object of type `%s`." % type(plugged_media))
+            return None
+        if len(plugged_media) == 0:
+            return None
+
+        # The following is the procedure of choosing a plugged media from a list of available options
+        # including instance-level object store configuration. This operation iterates from the highest
+        # to lowest order plugged media  (i.e., biggest positive and smallest negative order respectively)
+        # with `0` being the instance-level object store configuration. It falls from one plugged media to
+        # another, if the available space on that media is not sufficient to store the given dataset.
+        plugged_media.sort(key=lambda p: p.order)
+        from_order = from_order - 1 if from_order is not None else plugged_media[-1].order
+        i = len(plugged_media) - 1
+        while i >= 0:
+            if from_order >= plugged_media[i].order > 0 or from_order <= plugged_media[i].order < -1:
+                if plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
+                    return plugged_media[i]
+            else:
+                if enough_quota_on_instance_level_media:
+                    return None
+                elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
+                    return plugged_media[i]
+            i -= 1
+        if enough_quota_on_instance_level_media:
+            return None
+        elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
+            # TODO: replace the following exception with a better approach.
+            raise Exception("User does not have enough quota to persist the dataset.")
 
     # TODO: check exist, this method should be implemented differently as it checks for the existence of data in all the backends.
 
@@ -1101,58 +1144,6 @@ def build_object_store_from_config(config, fsmon=False, config_xml=None, config_
         return objectstore_class.from_xml(config=config, config_xml=config_xml, **objectstore_constructor_kwds)
     else:
         return objectstore_class(config=config, config_dict=config_dict, **objectstore_constructor_kwds)
-
-
-def pick_a_plugged_media(plugged_media, from_order=None, dataset_size=0, enough_quota_on_instance_level_media=False):
-    """
-    This function receives a list of plugged media, and decides which one to be
-    used for the object store operations. If a single plugged media is given
-    (i.e., only one available/defined for the user, or user has explicitly
-    chosen a plugged media), it returns that single option. However, if multiple
-    plugged media are available, then it uses the `order`, and `quota` attributes of
-    the plugged media to decide which one to be used.
-    NOTE: do not associate a dataset with a plugged media before the dataset is
-    successfully persisted on the media.
-    :param plugged_media: A list of plugged media defined/available for the user.
-    :param from_order: is the order of a previously returned and failed plugged media,
-    which this function should determine a plugged media in a lower order to that.
-    :param dataset_size: is the file size of the dataset.
-    :param enough_quota_on_instance_level_media: Sets if user has enough quota on
-    the default media (i.e., the instance-level persistence media) to persist the dataset.
-    :return: A single plugged media, or None (if no plugged media is available, or
-    if object store should use instance-level config).
-    """
-    if plugged_media is None:
-        return None
-    if not hasattr(plugged_media, '__len__'):
-        log.exception("Expected a list of PluggedMedia, but received an object of type `%s`." % type(plugged_media))
-        return None
-    if len(plugged_media) == 0:
-        return None
-
-    # The following is the procedure of choosing a plugged media from a list of available options
-    # including instance-level object store configuration. This operation iterates from the highest
-    # to lowest order plugged media  (i.e., biggest positive and smallest negative order respectively)
-    # with `0` being the instance-level object store configuration. It falls from one plugged media to
-    # another, if the available space on that media is not sufficient to store the given dataset.
-    plugged_media.sort(key=lambda p: p.order)
-    from_order = from_order - 1 if from_order is not None else plugged_media[-1].order
-    i = len(plugged_media) - 1
-    while i >= 0:
-        if from_order >= plugged_media[i].order > 0 or from_order <= plugged_media[i].order < -1:
-            if plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
-                return plugged_media[i]
-        else:
-            if enough_quota_on_instance_level_media:
-                return None
-            elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
-                return plugged_media[i]
-        i -= 1
-    if enough_quota_on_instance_level_media:
-        return None
-    elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
-        # TODO: replace the following exception with a better approach.
-        raise Exception("User does not have enough quota to persist the dataset.")
 
 
 def local_extra_dirs(func):
