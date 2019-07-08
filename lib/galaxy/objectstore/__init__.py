@@ -1034,7 +1034,7 @@ class UserObjectStore(ObjectStore):
 
         # The following is the procedure of choosing a plugged media from a list of available options
         # including instance-level object store configuration. This operation iterates from the highest
-        # to lowest order plugged media  (i.e., biggest positive and smallest negative order respectively)
+        # to lowest order plugged media (i.e., biggest positive and smallest negative order respectively)
         # with `0` being the instance-level object store configuration. It falls from one plugged media to
         # another, if the available space on that media is not sufficient to store the given dataset.
         plugged_media.sort(key=lambda p: p.order)

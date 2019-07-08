@@ -2,6 +2,7 @@
 
 """
 
+import json
 import os
 import string
 
@@ -9,6 +10,10 @@ from base import integration_util  # noqa: I202
 from base.populators import (
     DatasetPopulator,
 )
+
+from test_jobs import _get_datasets_files_in_path
+
+TEST_INPUT_FILES_CONTENT = "abc def 123 456"
 
 
 class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
@@ -68,9 +73,7 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
             "usage": usage
         }
         response = self._post(path="plugged_media/create", data=payload)
-        # Content contains the info of the plugged media
-        # in JSON format.
-        return response.content
+        return json.loads(response.content)
 
 
 class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
@@ -79,23 +82,21 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         super(DataPersistedOnUserMedia, self).setUp()
 
     def test_files_count_and_content_in_user_media(self):
-        user, api_key = self._setup_user_get_key(email="vahid@test.com")
-        self.galaxy_interactor.api_key = api_key
-        user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
-        plugged_media = self.plug_user_media("local", user_media_path, "1")
+        with self._different_user("vahid@test.com"):
+            user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
+            plugged_media = self.plug_user_media("local", user_media_path, "1")
 
-        # No file should be in the instance-wide storage before
-        # execution of any tool.
-        assert self.get_files_count(self.files_default_path) == 0
+            # No file should be in the instance-wide storage before
+            # execution of any tool.
+            assert self.get_files_count(self.files_default_path) == 0
 
-        # No file should be in user's plugged media before
-        # execution of any tool.
-        assert self.get_files_count(user_media_path) == 0
+            # No file should be in user's plugged media before
+            # execution of any tool.
+            assert self.get_files_count(plugged_media.get("path")) == 0
 
-        with self._different_user(user["email"]):
             self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
             with self.dataset_populator.test_history() as history_id:
-                hda1 = self.dataset_populator.new_dataset(history_id, content="1 2 3")
+                hda1 = self.dataset_populator.new_dataset(history_id, content=TEST_INPUT_FILES_CONTENT)
                 self.dataset_populator.wait_for_history(history_id)
                 hda1_input = {"src": "hda", "id": hda1["id"]}
                 create_10_inputs = {
@@ -105,10 +106,15 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
                 self.run_tool("create_10", history_id, create_10_inputs)
 
                 assert self.get_files_count(self.files_default_path) == 0
-                assert self.get_files_count(user_media_path) == 1
+                assert self.get_files_count(plugged_media.get("path")) == 11
 
-                # should create two files in static object store.
-                self.run_tool("multi_data_param", {"f1": hda1_input, "f2": hda1_input})
-                self._assert_file_counts(1, 2, 0, 0)
-
-                # should create two files in ebs object store.
+                # Assert content
+                files = _get_datasets_files_in_path(plugged_media.get("path"))
+                expected_content = [str(x) for x in range(1, 11)] + [TEST_INPUT_FILES_CONTENT]
+                for filename in files:
+                    with open(filename) as f:
+                        content = f.read().strip()
+                        assert content in expected_content
+                        expected_content.remove(content)
+                # This confirms that no two (or more) files had same content.
+                assert len(expected_content) == 0
