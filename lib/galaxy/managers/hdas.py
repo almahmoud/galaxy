@@ -138,6 +138,7 @@ class HDAManager(datasets.DatasetAssociationManager,
         Purge this HDA and the dataset underlying it.
         """
         user = hda.history.user or None
+        hda.dataset.assign_media(user, self.app.authnz_manager)
         quota_amount_reduction = 0
         if user:
             quota_amount_reduction = hda.quota_amount(user)

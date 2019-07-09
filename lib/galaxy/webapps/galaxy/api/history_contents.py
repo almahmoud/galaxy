@@ -774,6 +774,7 @@ class HistoryContentsController(BaseAPIController, UsesLibraryMixin, UsesLibrary
         hda = self.hda_manager.get_owned(self.decode_id(id), trans.user, current_history=trans.history)
         self.hda_manager.error_if_uploading(hda)
 
+        hda.dataset.assign_media(trans.user, trans.app.authnz_manager)
         if purge:
             self.hda_manager.purge(hda)
         else:
