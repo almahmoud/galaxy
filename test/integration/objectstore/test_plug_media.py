@@ -4,7 +4,6 @@
 
 import json
 import os
-import requests
 import string
 
 from base import integration_util  # noqa: I202
@@ -60,23 +59,6 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         )
         self.dataset_populator.wait_for_history(history_id)
 
-    def purge_datasets(self, history_id, dataset_id):
-        """
-        Using this method instead of the galaxy_interactor delete method
-        because that method assumes all paths are API paths, hence adds
-        `api/` to the beginning of the path, which fails when using
-        Galaxy controllers such as history.
-        :return:
-        """
-        data = {
-            "purge": True,
-            "key": self.galaxy_interactor.api_key
-        }
-        controller_url = "{}/{}".format(
-            self.galaxy_interactor.api_url,
-            "histories/{}/contents/{}".format(history_id, dataset_id))
-        return requests.delete(controller_url, params=data)
-
     @staticmethod
     def get_files_count(directory):
         return sum(len(files) for _, _, files in os.walk(directory))
@@ -100,6 +82,16 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         super(DataPersistedOnUserMedia, self).setUp()
 
     def test_files_count_and_content_in_user_media(self):
+        # This test check if tool execution results are correctly stored
+        # in user media, and deleted (purged) when asked. In general, this
+        # test does the following:
+        # 1- plugs a media for the user;
+        # 2- check if both instance-wide and user media are empty;
+        # 3- runs a tool that creates 10 output, and checks:
+        #   a- if all the output of the tool are stored in user media,
+        #   b- if the content of the files matches the expected content;
+        # 4- purges all the newly created datasets, and check if their
+        # files are deleted from the user media.
         with self._different_user("vahid@test.com"):
             user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
             plugged_media = self.plug_user_media("local", user_media_path, "1")
@@ -142,8 +134,14 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
 
                 assert len(datasets) == 11
 
+                data = {
+                    "purge": True
+                }
                 for dataset_id in datasets:
-                    self.purge_datasets(history_id, dataset_id)
+                    self._delete("histories/{}/contents/{}".format(history_id, dataset_id), data=data)
 
                 files = _get_datasets_files_in_path(plugged_media.get("path"))
+
+                # After purging, all the files in the user media should be deleted.
+                assert len(files) == 0
 
