@@ -173,7 +173,21 @@ class ModelManager(object):
 
         self.session().add(item)
         if flush:
-            self.session().flush()
+            # The attributes of an object that are not persisted in
+            # database (i.e. attributes without a corresponding column),
+            # are lost after that object is flushed to database.
+            # This is because SQLAlchemy reinitialise the object
+            # after it is flushed, based on its information in database
+            # **without calling the __init__ method**. The following
+            # is a hackish approach to ensure an instance of Dataset
+            # type will have the `media` attribute after the instance
+            # is flushed, if it had one.
+            if hasattr(item.dataset, "media"):
+                media = item.dataset.media
+                self.session().flush()
+                item.dataset.media = media
+            else:
+                self.session().flush()
         return item
 
     # .... query foundation wrapper
