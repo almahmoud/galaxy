@@ -561,19 +561,11 @@ class NestedObjectStore(ObjectStore):
 
     def exists(self, obj, **kwargs):
         """Determine if the `obj` exists in any of the backends."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("exists", obj, **kwargs)
-        else:
-            return self._call_method('exists', obj, False, False, **kwargs)
+        return self._call_method('exists', obj, False, False, **kwargs)
 
     def file_ready(self, obj, **kwargs):
         """Determine if the file for `obj` is ready to be used by any of the backends."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("file_ready", obj, **kwargs)
-        else:
-            return self._call_method('file_ready', obj, False, False, **kwargs)
+        return self._call_method('file_ready', obj, False, False, **kwargs)
 
     def create(self, obj, **kwargs):
         """Create a backing file in a random backend."""
@@ -585,43 +577,23 @@ class NestedObjectStore(ObjectStore):
 
     def empty(self, obj, **kwargs):
         """For the first backend that has this `obj`, determine if it is empty."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("empty", obj, **kwargs)
-        else:
-            return self._call_method('empty', obj, True, False, **kwargs)
+        return self._call_method('empty', obj, True, False, **kwargs)
 
     def size(self, obj, **kwargs):
         """For the first backend that has this `obj`, return its size."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("size", obj, **kwargs)
-        else:
-            return self._call_method('size', obj, 0, False, **kwargs)
+        return self._call_method('size', obj, 0, False, **kwargs)
 
     def delete(self, obj, **kwargs):
         """For the first backend that has this `obj`, delete it."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("delete", obj, **kwargs)
-        else:
-            return self._call_method('delete', obj, False, False, **kwargs)
+        return self._call_method('delete', obj, False, False, **kwargs)
 
     def get_data(self, obj, **kwargs):
         """For the first backend that has this `obj`, get data from it."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("get_data", obj, **kwargs)
-        else:
-            return self._call_method('get_data', obj, ObjectNotFound, True, **kwargs)
+        return self._call_method('get_data', obj, ObjectNotFound, True, **kwargs)
 
     def get_filename(self, obj, **kwargs):
         """For the first backend that has this `obj`, get its filename."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("get_filename", obj, **kwargs)
-        else:
-            return self._call_method('get_filename', obj, ObjectNotFound, True, **kwargs)
+        return self._call_method('get_filename', obj, ObjectNotFound, True, **kwargs)
 
     def update_from_file(self, obj, **kwargs):
         """For the first backend that has this `obj`, update it from the given file."""
