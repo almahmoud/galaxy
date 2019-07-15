@@ -1997,8 +1997,10 @@ class JobWrapper(HasResourceParameters):
             purged = dataset.purged
             if not purged and not clean_only:
                 quota = self.app.quota_agent.get_quota(job.user)
-                usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
-                eqi = usage < quota
+                eqi = True
+                if quota is not None:
+                    usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
+                    eqi = usage < quota
                 dataset.assign_media(job.user, self.app.authnz_manager)
                 self.object_store.update_from_file(dataset, create=True, enough_quota_on_instance_level_media=eqi)
             else:

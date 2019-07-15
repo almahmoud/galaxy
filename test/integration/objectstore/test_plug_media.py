@@ -57,6 +57,9 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
     def _rnd_str_generator(length=2, chars=string.ascii_uppercase + string.digits):
         return ''.join(random.choice(chars) for _ in range(length))
 
+    def _create_content_of_size(self, size=1024):
+        return self._rnd_str_generator(length=size)
+
     def run_tool(self, history_id, content=TEST_INPUT_FILES_CONTENT):
         hda1 = self.dataset_populator.new_dataset(history_id, content=content)
         self.dataset_populator.wait_for_history(history_id)
@@ -292,3 +295,50 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
 
                     # After purging, all the files in the user media should be deleted.
                     assert len(files) == EXPECTED_FILES_COUNT_IN_OUTPUT
+
+
+class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTestCase):
+
+    def setUp(self):
+        super(DataDistributionAcrossUserAndInstanceWideMedia, self).setUp()
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
+
+    def test_media_selection_based_on_dataset_size(self):
+        with self._different_user("vahid@test.com"):
+            media_1 = self.plug_user_media(
+                category="local",
+                path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_1/"),
+                order="1",
+                quota="1000.0"
+            )
+
+            media_2 = self.plug_user_media(
+                category="local",
+                path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
+                order="-1",
+                quota="10.0"
+            )
+
+            # No file should be in the instance-wide storage before
+            # execution of any tool.
+            assert self.get_files_count(self.files_default_path) == 0
+
+            # No file should be in user's plugged media before
+            # execution of any tool.
+            assert self.get_files_count(media_1.get("path")) == 0
+            assert self.get_files_count(media_2.get("path")) == 0
+
+            with self.dataset_populator.test_history() as history_id:
+                hda1 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 0
+                assert self.get_files_count(media_2.get("path")) == 0
+
+                hda1 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_files_count(media_2.get("path")) == 0

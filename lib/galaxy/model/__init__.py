@@ -655,8 +655,8 @@ class PluggedMedia(object):
                 return False
         return True
 
-    def set_usage(self, amount):
-        self.usage = amount
+    def add_usage(self, amount):
+        self.usage = self.usage + amount
 
     def get_config(self, cache_path, jobs_directory):
         config = Bunch(

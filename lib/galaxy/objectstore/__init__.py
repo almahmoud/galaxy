@@ -570,8 +570,8 @@ class NestedObjectStore(ObjectStore):
     def create(self, obj, **kwargs):
         """Create a backing file in a random backend."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("create", obj, **kwargs)
+            media = UserObjectStore(obj.media, self)
+            return media.call_method("create", obj, **kwargs)
         else:
             random.choice(list(self.backends.values())).create(obj, **kwargs)
 
@@ -626,8 +626,9 @@ class NestedObjectStore(ObjectStore):
 
     def _call_method(self, method, obj, default, default_is_exception, **kwargs):
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method(method, obj, **kwargs)
+            media = UserObjectStore(obj.media, self)
+            return media.call_method(method, obj, default, default_is_exception, **kwargs)
+
         backend = self._get_backend(obj, **kwargs)
         if backend is not None:
             return backend.__getattribute__(method)(obj, **kwargs)
@@ -882,8 +883,8 @@ class HierarchicalObjectStore(NestedObjectStore):
     def exists(self, obj, **kwargs):
         """Check all child object stores."""
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("exists", obj, **kwargs)
+            media = UserObjectStore(obj.media, self)
+            return media.call_method("exists", obj, **kwargs)
         for store in self.backends.values():
             if store.exists(obj, **kwargs):
                 return True
@@ -898,20 +899,21 @@ class HierarchicalObjectStore(NestedObjectStore):
         # - `galaxy.model.Dataset`
         # - `galaxy.model.Job`
         if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media)
-            return media._call_method("create", obj, **kwargs)
+            media = UserObjectStore(obj.media, self)
+            return media.call_method("create", obj, **kwargs)
         else:
             self.backends[0].create(obj, **kwargs)
 
 
 class UserObjectStore(ObjectStore):
     # TODO: define a common cache and jobs directory for user-based objectstore per backend in config and pass it here.
-    def __init__(self, media, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
+    def __init__(self, media, instance_wide_objectstore, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
         self.media = media
         self.backends = {}
         self.cache_path = cache_path
         self.jobs_directory = jobs_directory
         self.__configure_store()
+        self.instance_wide_objectstore = instance_wide_objectstore
 
     def __configure_store(self):
         for m in self.media:
@@ -927,24 +929,51 @@ class UserObjectStore(ObjectStore):
                                 "The category type should match either of the following categories: {}"
                                 .format(self.media.category, categories))
 
-    def _call_method(self, method, obj, enough_quota_on_instance_level_media=False, **kwargs):
-        # Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
-        # the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
-        # be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
-        # access and secret are invalid).
+    def __get_containing_media(self, obj, media, **kwargs):
+        """
+        Returns the first plugged media that contains the object.
+        """
+        if media is None:
+            for key, backend in self.backends.items():
+                if backend.exists(obj, **kwargs):
+                    return backend
+        if hasattr(media, '__len__'):
+            if len(media) == 1 and self.backends[media[0].id].exists(obj, **kwargs):
+                return self.backends[media[0].id]
+            elif len(media) > 1:
+                for m in media:
+                    if self.backends[m.id].exists(obj, **kwargs):
+                        return self.backends[m.id]
+        return None
+
+    def exists(self, obj, **kwargs):
+        for backend in self.backends.values():
+            if backend.exists(obj, **kwargs):
+                return True
+        return False
+
+    def size(self, obj, media=None, **kwargs):
+        backend = self.__get_containing_media(obj, media, **kwargs)
+        if backend is None:
+            return 0
+        else:
+            return backend.size(obj, **kwargs)
+
+    def call_method(self, method, obj, default=None, default_is_exception=False, enough_quota_on_instance_level_media=True, **kwargs):
+        """
+        Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
+        the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
+        be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
+        access and secret are invalid).
+        """
         from_order = None
         i = 1 + len(obj.media)
-        rtv = None
+        rtv = default
         while i > 0:
             i -= 1
             try:
-                # The following check is necessary because the `obj` object can be
-                # of either of following types:
-                # - `galaxy.model.Dataset`
-                # - `galaxy.model.Job`
-                # dataset_size = obj.get_size(obj.user, obj.authnz_manager) if hasattr(obj, 'get_size') else 0
-                # TODO: following is temp, because the previous call is infinite recursive call.
-                dataset_size = 0
+                # TODO: should not the following be required only if the operation is create?
+                dataset_size = self.size(obj, obj.media, **kwargs)
                 picked_media = self.pick_a_plugged_media(
                     self.media, from_order, dataset_size,
                     enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
@@ -958,26 +987,38 @@ class UserObjectStore(ObjectStore):
                         backend = self.backends[picked_media.id]
                         rtv = backend.__getattribute__(method)(obj, **kwargs)
 
-                        # TODO: do the following only if the method is create
-                        # picked_media.association_with_dataset(obj)
-                        # picked_media.set_usage(picked_media.usage + dataset_size)
+                        if method == "create":
+                            picked_media.association_with_dataset(obj)
+                            # TODO: should not call get_size() because obj is not created yet (this is create method).
+                            dataset_size = obj.get_size()
+                            picked_media.add_usage(dataset_size)
                     else:
                         # TODO: the following should be updated.
-                        from_order = 0
-                        self.backends[0].create(obj, **kwargs)
+                        media = obj.media
+                        obj.media = None
+                        # TODO: there should be a better way than the following :(
+                        if method == "create":
+                            rtv = self.instance_wide_objectstore.create(obj, **kwargs)
+                        elif method == "exists":
+                            rtv = self.instance_wide_objectstore.exists(obj, **kwargs)
+                        else:
+                            rtv = self.instance_wide_objectstore._call_method(method, obj, default, default_is_exception, **kwargs)
+                        obj.media = media
+                        # from_order = 0
+                        # self.backends[0].create(obj, **kwargs)
                     break
                 except Exception as e:
-                    log.exception("Failed to persist dataset with ID `{}` on {} with the following error;"
-                                  "now trying another persistence option, if any available. Error: {}"
-                                  .format(obj.id,
-                                          "{} with ID {}".format(picked_media.category, picked_media.id)
-                                          if obj.media is not None else "the instance-wide storage", e))
+                    log.exception("Failed to persist dataset with ID `{}` on media category `{}` with the "
+                                  "following error; now trying another persistence option, if any available. "
+                                  "Error: {}".format(obj.id,
+                                                     "{} with ID {}".format(picked_media.category, picked_media.id)
+                                                     if obj.media is not None else "the instance-wide storage", e))
         # TODO: User should be notified if this operation has failed.
         return rtv
 
     @staticmethod
     def pick_a_plugged_media(plugged_media, from_order=None, dataset_size=0,
-                             enough_quota_on_instance_level_media=False):
+                             enough_quota_on_instance_level_media=True):
         """
         This function receives a list of plugged media, and decides which one to be
         used for the object store operations. If a single plugged media is given
@@ -1003,6 +1044,10 @@ class UserObjectStore(ObjectStore):
             return None
         if len(plugged_media) == 0:
             return None
+        # The following condition is met when a media is already chosen
+        # (e.g., override or associated) for the dataset.
+        if len(plugged_media) == 1:
+            return plugged_media[0]
 
         # The following is the procedure of choosing a plugged media from a list of available options
         # including instance-level object store configuration. This operation iterates from the highest
