@@ -925,6 +925,19 @@ class JobWrapper(HasResourceParameters):
     def use_metadata_binary(self):
         return util.asbool(self.get_destination_configuration('use_metadata_binary', "False"))
 
+    def __assign_user_media(self, job, dataset):
+        if job.user:
+            quota = self.app.quota_agent.get_quota(job.user)
+            eqi = True
+            if quota is not None:
+                usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
+                eqi = usage < quota
+            all_user_media = job.user.active_plugged_media
+            selected_media = model.PluggedMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
+            if selected_media is not None:
+                selected_media.association_with_dataset(dataset)
+                dataset.assign_media(job.user, self.app.authnz_manager)
+
     def can_split(self):
         # Should the job handler split this job up?
         return self.app.config.use_tasked_jobs and self.tool.parallelism
@@ -1405,13 +1418,14 @@ class JobWrapper(HasResourceParameters):
         # afterward. State below needs to happen the same way.
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
             dataset = dataset_assoc.dataset
-            dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+            self.__assign_user_media(job, dataset.dataset)
             object_store_populator.set_object_store_id(dataset)
 
         job.object_store_id = object_store_populator.object_store_id
         self._setup_working_directory(job=job)
 
     def _finish_dataset(self, output_name, dataset, job, context, final_job_state, remote_metadata_directory):
+        self.__assign_user_media(job, dataset.dataset)
         implicit_collection_jobs = job.implicit_collection_jobs_association
         purged = dataset.dataset.purged
         if not purged and dataset.dataset.external_filename is None:
@@ -1580,7 +1594,6 @@ class JobWrapper(HasResourceParameters):
 
         job_context = ExpressionContext(dict(stdout=job.stdout, stderr=job.stderr))
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
-            dataset_assoc.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
             context = self.get_dataset_finish_context(job_context, dataset_assoc)
             # should this also be checking library associations? - can a library item be added from a history before the job has ended? -
             # lets not allow this to occur
@@ -1636,7 +1649,8 @@ class JobWrapper(HasResourceParameters):
             if not dataset_assoc.dataset.dataset.purged:
                 dataset_assoc.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
                 dataset_assoc.dataset.dataset.set_total_size()
-                collected_bytes += dataset_assoc.dataset.dataset.get_total_size()
+                if dataset_assoc.dataset.dataset.media is None:
+                    collected_bytes += dataset_assoc.dataset.dataset.get_total_size()
 
         if job.user:
             job.user.adjust_total_disk_usage(collected_bytes)
@@ -1996,13 +2010,7 @@ class JobWrapper(HasResourceParameters):
         if dataset not in job.output_library_datasets:
             purged = dataset.purged
             if not purged and not clean_only:
-                quota = self.app.quota_agent.get_quota(job.user)
-                eqi = True
-                if quota is not None:
-                    usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
-                    eqi = usage < quota
-                dataset.assign_media(job.user, self.app.authnz_manager)
-                self.object_store.update_from_file(dataset, create=True, enough_quota_on_instance_level_media=eqi)
+                self.object_store.update_from_file(dataset, create=True)
             else:
                 # If the dataset is purged and Galaxy is configured to write directly
                 # to the object store from jobs - be sure that file is cleaned up. This

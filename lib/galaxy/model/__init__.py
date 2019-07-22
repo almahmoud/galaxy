@@ -694,6 +694,30 @@ class PluggedMedia(object):
         except NameError:
             return None
 
+    @staticmethod
+    def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True):
+        if media is None:
+            return None
+
+        i = len(media) - 1
+        media.sort(key=lambda p: p.order)
+        n = False
+        while i >= 0:
+            if n:
+                n = False
+                if enough_quota_on_instance_level_media:
+                    return None
+            if media[i].order == 1:
+                n = True
+            elif media[i].order == -1 and enough_quota_on_instance_level_media:
+                return None
+            if media[i].usage + dataset_size <= media[i].quota:
+                return media[i]
+            i -= 1
+        # TODO: instead of returning None, this should raise an exception saying
+        # that user does not have enough quota on any of its media.
+        return None
+
 
 class PluggedMediaDatasetAssociation(object):
     def __init__(self, dataset, plugged_media, deleted=False, purged=False):
@@ -1701,7 +1725,7 @@ class History(HasTags, Dictifiable, UsesAnnotations, HasName, RepresentById):
         else:
             if set_hid:
                 dataset.hid = self._next_hid()
-        if quota and self.user:
+        if quota and self.user and hasattr(self, "media") and self.media is not None:
             self.user.adjust_total_disk_usage(dataset.quota_amount(self.user))
         dataset.history = self
         if genome_build not in [None, '?']:
@@ -2472,39 +2496,25 @@ class Dataset(StorableObject, RepresentById):
             # The only time this condition would be met is during an anonymous access, and anonymous users
             # cannot define/access a plugged media, theoretically.
             return None
-        if plugged_media is not None:
-            # If user has explicitly specified a plugged media to be used.
-            if isinstance(plugged_media, PluggedMedia):
-                plugged_media = [plugged_media] if plugged_media.user_id == user.id else None
-            # If user's explicit selection is already put in a list, or the list
-            # of available plugged media of the user is already determined.
-            elif hasattr(plugged_media, '__len__') and len(plugged_media) > 0:
-                plugged_media = [x for x in plugged_media if x.user_id != user.id]
-            # If an empty list is passed.
-            elif hasattr(plugged_media, '__len__') and len(plugged_media) == 0:
-                log.exception("An empty list as plugged media is an unexpected value.")
-        else:
+
+        if plugged_media is None or len(plugged_media) == 0:
             plugged_media = []
             for assoc in self.active_plugged_media_associations:
                 if assoc.plugged_media.user_id == user.id:
                     plugged_media.append(assoc.plugged_media)
-            if len(plugged_media) == 0:
-                plugged_media = user.active_plugged_media if user else None
 
-        # The following condition is satisfied when a given user
-        # has not plugged any media.
-        if len(plugged_media) == 0 or plugged_media is None:
+        if len(plugged_media) == 0:
             return None
-        else:
-            for pm in plugged_media:
-                if pm.category == PluggedMedia.categories.LOCAL:
-                    continue
-                if not authnz_manager:
-                    log.debug("Cannot refresh credentials for media with ID {}, "
-                              "because authnz_manager is not provided.".format(pm.id))
-                    continue
-                pm.refresh_credentials(authnz_manager=self.app.authnz_manager, sa_session=self.sa_session)
-            return plugged_media
+
+        for pm in plugged_media:
+            if pm.category == PluggedMedia.categories.LOCAL:
+                continue
+            if not authnz_manager:
+                log.debug("Cannot refresh credentials for media with ID {}, "
+                          "because authnz_manager is not provided.".format(pm.id))
+                continue
+            pm.refresh_credentials(authnz_manager=self.app.authnz_manager, sa_session=self.sa_session)
+        return plugged_media
 
     def assign_media(self, user, authnz_manager=None):
         plugged_media = self.get_plugged_media(user, authnz_manager=authnz_manager)
@@ -3249,6 +3259,7 @@ class HistoryDatasetAssociation(DatasetInstance, HasTags, Dictifiable, UsesAnnot
         # Gets an HDA disk usage, if the user does not already
         #   have an association of the same dataset
         if not self.dataset.library_associations and not self.purged and not self.dataset.purged:
+            # FIXME: check the active plugged media association of this dataset, and add to rval only if dataset is not stored on user's media.
             for hda in self.dataset.history_associations:
                 if hda.id == self.id:
                     continue

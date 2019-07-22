@@ -18,6 +18,8 @@ TEST_INPUT_FILES_CONTENT = "abc def 123 456"
 
 EXPECTED_FILES_COUNT_IN_OUTPUT = 11
 
+ADMIN_USER_EMAIL = "vahid@test.com"
+
 
 class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
     framework_tool_and_types = True
@@ -45,6 +47,8 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         with open(config_path, "w") as f:
             f.write(template.safe_substitute({"temp_directory": temp_directory}))
         config["object_store_config_file"] = config_path
+        config["enable_quotas"] = True
+        config["admin_users"] = ADMIN_USER_EMAIL
 
     @classmethod
     def setup_objectstore(cls):
@@ -304,7 +308,18 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
         self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
     def test_media_selection_based_on_dataset_size(self):
-        with self._different_user("vahid@test.com"):
+        with self._different_user(ADMIN_USER_EMAIL):
+            self._post(
+                path="quotas",
+                data={
+                    "name": "test",
+                    "description": "testdesc",
+                    "operation": "=",
+                    "default": "registered",
+                    "amount": "1KB"
+                }
+            )
+
             media_1 = self.plug_user_media(
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_1/"),
@@ -316,7 +331,7 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
                 order="-1",
-                quota="10.0"
+                quota="10240"
             )
 
             # No file should be in the instance-wide storage before
