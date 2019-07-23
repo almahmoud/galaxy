@@ -65,12 +65,12 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         return self._rnd_str_generator(length=size)
 
     def run_tool(self, history_id, content=TEST_INPUT_FILES_CONTENT):
-        hda1 = self.dataset_populator.new_dataset(history_id, content=content)
+        hda = self.dataset_populator.new_dataset(history_id, content=content)
         self.dataset_populator.wait_for_history(history_id)
-        hda1_input = {"src": "hda", "id": hda1["id"]}
+        hda_input = {"src": "hda", "id": hda["id"]}
         inputs = {
-            "input1": hda1_input,
-            "input2": hda1_input,
+            "input1": hda_input,
+            "input2": hda_input,
         }
 
         self.dataset_populator.run_tool(
@@ -308,6 +308,32 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
         self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
     def test_media_selection_based_on_dataset_size(self):
+        """
+        This test asserts if Galaxy can switch between user and
+        the instance-wide storage based on the quota on user media
+        and instance wide, and based on the dataset size.
+
+        Accordingly, this test creates two media for user:
+        media_1 that has higher priority than the instance-wide storage, and
+        media_2 that has lower priority than the instance-wide storage,
+        hence any new dataset shall be persisted on media_1 until
+        it's defined quota is exhausted, then should persist any
+        new dataset on the instance-wide storage until it reaches
+        user's quota (if any defined), and then uses media_2.
+
+        To make this assertion, the test creates a dataset, and
+        checks if this dataset is persisted on media_1, that also
+        consumes all the quota on media_1. The important point at
+        this point is that the dataset size should be accounted
+        against media_1 quota, and NOT consume user's instance-wide
+        quota. Then the test creates a second dataset, and asserts
+        if it is persisted on the instance-wide storage, which
+        consumes all the storage available on the instance-wide
+        storage. Similarly, an important point here is that dataset
+        size should be accounted against default storage and not
+        any of their media. Then the test creates a third dataset,
+        and asserts if it is persisted on the media_2.
+        """
         with self._different_user(ADMIN_USER_EMAIL):
             self._post(
                 path="quotas",
@@ -331,7 +357,7 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
                 order="-1",
-                quota="10240"
+                quota="102400"
             )
 
             # No file should be in the instance-wide storage before
@@ -351,9 +377,70 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
                 assert self.get_files_count(self.files_default_path) == 0
                 assert self.get_files_count(media_2.get("path")) == 0
 
-                hda1 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                hda2 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
                 self.dataset_populator.wait_for_history(history_id)
 
                 assert self.get_files_count(media_1.get("path")) == 1
                 assert self.get_files_count(self.files_default_path) == 1
                 assert self.get_files_count(media_2.get("path")) == 0
+
+                hda3 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_files_count(media_2.get("path")) == 1
+
+                hda_input = {"src": "hda", "id": hda1["id"]}
+                inputs = {
+                    "input1": hda_input,
+                    "input2": hda_input,
+                }
+
+                self.dataset_populator.run_tool(
+                    "create_10",
+                    inputs,
+                    history_id,
+                    assert_ok=True,
+                )
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_files_count(media_2.get("path")) == 11
+
+                hda_input = {"src": "hda", "id": hda2["id"]}
+                inputs = {
+                    "input1": hda_input,
+                    "input2": hda_input,
+                }
+
+                self.dataset_populator.run_tool(
+                    "create_10",
+                    inputs,
+                    history_id,
+                    assert_ok=True,
+                )
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_files_count(media_2.get("path")) == 21
+
+                hda_input = {"src": "hda", "id": hda3["id"]}
+                inputs = {
+                    "input1": hda_input,
+                    "input2": hda_input,
+                }
+
+                self.dataset_populator.run_tool(
+                    "create_10",
+                    inputs,
+                    history_id,
+                    assert_ok=True,
+                )
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media_1.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_files_count(media_2.get("path")) == 31
