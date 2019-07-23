@@ -339,7 +339,7 @@ class ToolEvaluator(object):
         for name, hda in output_datasets.items():
             # Write outputs to the working directory (for security purposes)
             # if desired.
-            hda.dataset.assign_media(self.job.user, self.app.authnz_manager)
+            model.PluggedMedia.refresh_all_media_credentials(hda.dataset.active_plugged_media_associations, self.app.authnz_manager)
             real_path = hda.file_name
             if real_path in output_dataset_paths:
                 dataset_path = output_dataset_paths[real_path]

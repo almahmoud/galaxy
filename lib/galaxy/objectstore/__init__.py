@@ -567,10 +567,10 @@ class NestedObjectStore(ObjectStore):
         """Determine if the file for `obj` is ready to be used by any of the backends."""
         return self._call_method('file_ready', obj, False, False, **kwargs)
 
-    def create(self, obj, **kwargs):
+    def create(self, obj, ignore_media=False, **kwargs):
         """Create a backing file in a random backend."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media, self)
+        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_plugged_media_associations, self)
             return media.call_method("create", obj, **kwargs)
         else:
             random.choice(list(self.backends.values())).create(obj, **kwargs)
@@ -624,9 +624,9 @@ class NestedObjectStore(ObjectStore):
                 return backend
         return None
 
-    def _call_method(self, method, obj, default, default_is_exception, **kwargs):
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media, self)
+    def _call_method(self, method, obj, default, default_is_exception, ignore_media=False, **kwargs):
+        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_plugged_media_associations, self)
             return media.call_method(method, obj, default, default_is_exception, **kwargs)
 
         backend = self._get_backend(obj, **kwargs)
@@ -880,17 +880,17 @@ class HierarchicalObjectStore(NestedObjectStore):
         as_dict["backends"] = backends
         return as_dict
 
-    def exists(self, obj, **kwargs):
+    def exists(self, obj, ignore_media=False, **kwargs):
         """Check all child object stores."""
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media, self)
+        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_plugged_media_associations, self)
             return media.call_method("exists", obj, **kwargs)
         for store in self.backends.values():
             if store.exists(obj, **kwargs):
                 return True
         return False
 
-    def create(self, obj, **kwargs):
+    def create(self, obj, ignore_media=False, **kwargs):
         """Call the primary object store."""
         # very confusing why job is passed here, hence
         # the following check is necessary because the
@@ -898,8 +898,8 @@ class HierarchicalObjectStore(NestedObjectStore):
         # types:
         # - `galaxy.model.Dataset`
         # - `galaxy.model.Job`
-        if (not hasattr(obj, "job") and hasattr(obj, "media")) and obj.media is not None:
-            media = UserObjectStore(obj.media, self)
+        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_plugged_media_associations, self)
             return media.call_method("create", obj, **kwargs)
         else:
             self.backends[0].create(obj, **kwargs)
@@ -907,8 +907,8 @@ class HierarchicalObjectStore(NestedObjectStore):
 
 class UserObjectStore(ObjectStore):
     # TODO: define a common cache and jobs directory for user-based objectstore per backend in config and pass it here.
-    def __init__(self, media, instance_wide_objectstore, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
-        self.media = media
+    def __init__(self, media_associations, instance_wide_objectstore, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
+        self.media_associations = media_associations
         self.backends = {}
         self.cache_path = cache_path
         self.jobs_directory = jobs_directory
@@ -916,14 +916,15 @@ class UserObjectStore(ObjectStore):
         self.instance_wide_objectstore = instance_wide_objectstore
 
     def __configure_store(self):
-        for m in self.media:
+        for association in self.media_associations:
+            m = association.plugged_media
             categories = m.__class__.categories
             if m.category == categories.LOCAL:
                 config = m.get_config(cache_path=self.cache_path, jobs_directory=self.jobs_directory)
                 self.backends[m.id] = DiskObjectStore(config=config, config_dict={"files_dir": m.path})
             elif m.category == categories.S3 or m.category == categories.AZURE:
                 from .cloud import Cloud
-                self.backends[m.id] = Cloud(config=self.media.get_config(), config_dict={})
+                self.backends[m.id] = Cloud(config=m.get_config(), config_dict={})
             else:
                 raise Exception("Received a plugged media with a un-recognized category type ({}). "
                                 "The category type should match either of the following categories: {}"
@@ -967,16 +968,19 @@ class UserObjectStore(ObjectStore):
         access and secret are invalid).
         """
         from_order = None
-        i = 1 + len(obj.media)
+        i = len(obj.active_plugged_media_associations)
         rtv = default
         while i > 0:
             i -= 1
             try:
                 # TODO: should not the following be required only if the operation is create?
-                dataset_size = self.size(obj, obj.media, **kwargs)
-                picked_media = self.pick_a_plugged_media(
-                    self.media, from_order, dataset_size,
-                    enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
+                dataset_size = self.size(obj, obj.active_plugged_media_associations[i].plugged_media, **kwargs)
+
+                # TODO: should not try different media, because at this point a media is already chosen for the dataset, hence just use it regardless of the actions success.
+                # picked_media = self.pick_a_plugged_media(
+                #     obj.active_plugged_media_associations, from_order, dataset_size,
+                #     enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
+                picked_media = obj.active_plugged_media_associations[i].plugged_media
             except Exception as e:
                 log.exception("Failed to choose a plugged media. Error: {}".format(e))
             else:
@@ -988,22 +992,17 @@ class UserObjectStore(ObjectStore):
                         rtv = backend.__getattribute__(method)(obj, **kwargs)
 
                         if method == "create":
-                            picked_media.association_with_dataset(obj)
+                            # picked_media.association_with_dataset(obj)
                             # TODO: should not call get_size() because obj is not created yet (this is create method).
                             dataset_size = obj.get_size()
                             picked_media.add_usage(dataset_size)
                     else:
-                        # TODO: the following should be updated.
-                        media = obj.media
-                        obj.media = None
-                        # TODO: there should be a better way than the following :(
                         if method == "create":
-                            rtv = self.instance_wide_objectstore.create(obj, **kwargs)
+                            rtv = self.instance_wide_objectstore.create(obj, ignore_media=True, **kwargs)
                         elif method == "exists":
-                            rtv = self.instance_wide_objectstore.exists(obj, **kwargs)
+                            rtv = self.instance_wide_objectstore.exists(obj, ignore_media=True, **kwargs)
                         else:
-                            rtv = self.instance_wide_objectstore._call_method(method, obj, default, default_is_exception, **kwargs)
-                        obj.media = media
+                            rtv = self.instance_wide_objectstore._call_method(method, obj, default, default_is_exception, ignore_media=True, **kwargs)
                         # from_order = 0
                         # self.backends[0].create(obj, **kwargs)
                     break
@@ -1012,7 +1011,7 @@ class UserObjectStore(ObjectStore):
                                   "following error; now trying another persistence option, if any available. "
                                   "Error: {}".format(obj.id,
                                                      "{} with ID {}".format(picked_media.category, picked_media.id)
-                                                     if obj.media is not None else "the instance-wide storage", e))
+                                                     if obj.active_plugged_media_associations[i] is not None else "the instance-wide storage", e))
         # TODO: User should be notified if this operation has failed.
         return rtv
 

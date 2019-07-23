@@ -925,7 +925,7 @@ class JobWrapper(HasResourceParameters):
     def use_metadata_binary(self):
         return util.asbool(self.get_destination_configuration('use_metadata_binary', "False"))
 
-    def __assign_user_media(self, job, dataset):
+    def __assign_media(self, job, dataset):
         if job.user:
             quota = self.app.quota_agent.get_quota(job.user)
             eqi = True
@@ -936,7 +936,6 @@ class JobWrapper(HasResourceParameters):
             selected_media = model.PluggedMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
             if selected_media is not None:
                 selected_media.association_with_dataset(dataset)
-                dataset.assign_media(job.user, self.app.authnz_manager)
 
     def can_split(self):
         # Should the job handler split this job up?
@@ -1223,7 +1222,7 @@ class JobWrapper(HasResourceParameters):
                         log.error("fail(): Missing output file in working directory: %s", unicodify(e))
             for dataset_assoc in job.output_datasets + job.output_library_datasets:
                 dataset = dataset_assoc.dataset
-                dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+                model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
                 self.sa_session.refresh(dataset)
                 dataset.state = dataset.states.ERROR
                 dataset.blurb = 'tool error'
@@ -1254,7 +1253,7 @@ class JobWrapper(HasResourceParameters):
         else:
             for dataset_assoc in job.output_datasets:
                 dataset = dataset_assoc.dataset
-                dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+                model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
                 # Any reason for clean_only here? We should probably be more consistent and transfer
                 # the partial files to the object store regardless of whether job.state == DELETED
                 self.__update_output(job, dataset, clean_only=True)
@@ -1322,7 +1321,7 @@ class JobWrapper(HasResourceParameters):
             return
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
             dataset = dataset_assoc.dataset
-            dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+            model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
             if not job_supplied:
                 self.sa_session.refresh(dataset)
             state_changed = dataset.raw_set_dataset_state(state)
@@ -1418,14 +1417,13 @@ class JobWrapper(HasResourceParameters):
         # afterward. State below needs to happen the same way.
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
             dataset = dataset_assoc.dataset
-            self.__assign_user_media(job, dataset.dataset)
+            self.__assign_media(job, dataset.dataset)
             object_store_populator.set_object_store_id(dataset)
 
         job.object_store_id = object_store_populator.object_store_id
         self._setup_working_directory(job=job)
 
     def _finish_dataset(self, output_name, dataset, job, context, final_job_state, remote_metadata_directory):
-        self.__assign_user_media(job, dataset.dataset)
         implicit_collection_jobs = job.implicit_collection_jobs_association
         purged = dataset.dataset.purged
         if not purged and dataset.dataset.external_filename is None:
@@ -1647,9 +1645,9 @@ class JobWrapper(HasResourceParameters):
         # Once datasets are collected, set the total dataset size (includes extra files)
         for dataset_assoc in job.output_datasets:
             if not dataset_assoc.dataset.dataset.purged:
-                dataset_assoc.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+                model.PluggedMedia.refresh_all_media_credentials(dataset_assoc.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
                 dataset_assoc.dataset.dataset.set_total_size()
-                if dataset_assoc.dataset.dataset.media is None:
+                if len(dataset_assoc.dataset.dataset.active_plugged_media_associations) == 0:
                     collected_bytes += dataset_assoc.dataset.dataset.get_total_size()
 
         if job.user:
@@ -1845,7 +1843,7 @@ class JobWrapper(HasResourceParameters):
 
         results = []
         for da in job.output_datasets + job.output_library_datasets:
-            da.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+            model.PluggedMedia.refresh_all_media_credentials(da.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
             da_false_path = dataset_path_rewriter.rewrite_dataset_path(da.dataset, 'output')
             mutable = da.dataset.dataset.external_filename is None
             dataset_path = DatasetPath(da.dataset.dataset.id, da.dataset.file_name, false_path=da_false_path, mutable=mutable)
@@ -1939,7 +1937,7 @@ class JobWrapper(HasResourceParameters):
         if set_extension:
             for output_dataset_assoc in job.output_datasets:
                 if output_dataset_assoc.dataset.ext == 'auto':
-                    output_dataset_assoc.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+                    model.PluggedMedia.refresh_all_media_credentials(output_dataset_assoc.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
                     context = self.get_dataset_finish_context(dict(), output_dataset_assoc)
                     output_dataset_assoc.dataset.extension = context.get('ext', 'data')
             self.sa_session.flush()
@@ -2097,7 +2095,7 @@ class JobWrapper(HasResourceParameters):
         job = self.get_job()
         tool = self.app.toolbox.get_tool(job.tool_id, tool_version=job.tool_version) or None
         for dataset in job.output_datasets:
-            dataset.dataset.dataset.assign_media(job.user, self.app.authnz_manager)
+            model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
             self.app.error_reports.default_error_plugin.submit_report(dataset, job, tool, user_submission=False)
 
 

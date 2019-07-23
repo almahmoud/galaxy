@@ -677,9 +677,11 @@ class PluggedMedia(object):
             self._credentials = None
             return
 
-        if authnz_manager is None or sa_session is None:
-            raise Exception("Both `authnz_manager` and `sa_session` are required "
-                            "to obtain credentials to sign requests to the PluggedMedia.")
+        if authnz_manager is None:
+            raise Exception("`authnz_manager` is required to obtain credentials to sign requests to the PluggedMedia.")
+
+        if sa_session is None:
+            sa_session = object_session(self)
 
         # A possible improvement:
         # The tokens returned by the following method are usually valid for
@@ -693,6 +695,11 @@ class PluggedMedia(object):
             return self._credentials
         except NameError:
             return None
+
+    @staticmethod
+    def refresh_all_media_credentials(active_associations, authnz_manager, sa_session=None):
+        for association in active_associations:
+            association.plugged_media.refresh_credentials(authnz_manager, sa_session)
 
     @staticmethod
     def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True):
@@ -1725,7 +1732,7 @@ class History(HasTags, Dictifiable, UsesAnnotations, HasName, RepresentById):
         else:
             if set_hid:
                 dataset.hid = self._next_hid()
-        if quota and self.user and hasattr(self, "media") and self.media is not None:
+        if quota and self.user and len(dataset.dataset.active_plugged_media_associations) == 0:
             self.user.adjust_total_disk_usage(dataset.quota_amount(self.user))
         dataset.history = self
         if genome_build not in [None, '?']:
@@ -2279,11 +2286,6 @@ class Dataset(StorableObject, RepresentById):
         self.sources = []
         self.hashes = []
 
-        # The value of the following properties will be set when
-        # passing this instance to ObjectStore.
-        self.media = None
-        self.authnz_manager = None
-
     def in_ready_state(self):
         return self.state in self.ready_states
 
@@ -2463,71 +2465,6 @@ class Dataset(StorableObject, RepresentById):
         )
         serialization_options.attach_identifier(id_encoder, self, rval)
         return rval
-
-    def get_plugged_media(self, user, plugged_media=None, authnz_manager=None):
-        """
-        Encapsulates plugged media available/defined for the user in a list
-        of plugged media, and refreshes their access credentials if required,
-        or returns None if:
-            (a) user is not given (anonymous user);
-            (b) user has not defined any media;
-            (c) none of the media associated with this dataset, belongs to the given user.
-
-        The encapsulated list of media may contain:
-        1- the list of plugged media passed to this function, with their
-        credentials refreshed;
-        2- the plugged media on which this dataset is persisted and the media
-        belongs to the given user;
-        3- the list of active media the user has defined.
-
-        Note, a dataset can be persisted on multiple plugged media, but not
-        necessary all are accessible to every user, hence this method returns
-        only the media that are defined by the given user.
-
-        :param user: Galaxy user.
-
-        :param plugged_media: A list of plugged media or a single instance of PluggedMedia.
-
-        :param authnz_manager: The authnz manager to be used for refreshing credetials.
-
-        :return: None or a list of plugged media.
-        """
-        if user is None:
-            # The only time this condition would be met is during an anonymous access, and anonymous users
-            # cannot define/access a plugged media, theoretically.
-            return None
-
-        if plugged_media is None or len(plugged_media) == 0:
-            plugged_media = []
-            for assoc in self.active_plugged_media_associations:
-                if assoc.plugged_media.user_id == user.id:
-                    plugged_media.append(assoc.plugged_media)
-
-        if len(plugged_media) == 0:
-            return None
-
-        for pm in plugged_media:
-            if pm.category == PluggedMedia.categories.LOCAL:
-                continue
-            if not authnz_manager:
-                log.debug("Cannot refresh credentials for media with ID {}, "
-                          "because authnz_manager is not provided.".format(pm.id))
-                continue
-            pm.refresh_credentials(authnz_manager=self.app.authnz_manager, sa_session=self.sa_session)
-        return plugged_media
-
-    def assign_media(self, user, authnz_manager=None):
-        plugged_media = self.get_plugged_media(user, authnz_manager=authnz_manager)
-        self.media = plugged_media
-        if self.media is None:
-            self.authnz_manager = None
-        else:
-            self.authnz_manager = authnz_manager
-        # Ideally, in order to ensure immutability of a dataset, this method should
-        # return a deepcopy of the dataset. However, currencly it does not seem
-        # multiple processes concurrently read/write a dataset instance, hence its
-        # immutability does not seem crucial.
-        return self
 
 
 class DatasetSource(RepresentById):

@@ -7,6 +7,7 @@ import re
 
 from galaxy import (
     exceptions,
+    model,
     util
 )
 from galaxy.managers import (
@@ -774,7 +775,7 @@ class HistoryContentsController(BaseAPIController, UsesLibraryMixin, UsesLibrary
         hda = self.hda_manager.get_owned(self.decode_id(id), trans.user, current_history=trans.history)
         self.hda_manager.error_if_uploading(hda)
 
-        hda.dataset.assign_media(trans.user, trans.app.authnz_manager)
+        model.PluggedMedia.refresh_all_media_credentials(hda.dataset.active_plugged_media_associations, trans.app.authnz_manager, trans.sa_session)
         if purge:
             self.hda_manager.purge(hda)
         else:

@@ -1250,7 +1250,7 @@ class ColumnListParameter(SelectToolParameter):
         if self.usecolnames:  # read first row - assume is a header with metadata useful for making good choices
             dataset = other_values.get(self.data_ref, None)
             try:
-                dataset.assign_media(user=trans.user, authnz_manager=trans.app.authnz_manager)
+                PluggedMedia.refresh_all_media_credentials(dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
                 with open(dataset.get_file_name(), 'r') as f:
                     head = f.readline()
                 cnames = head.rstrip().split('\t')
