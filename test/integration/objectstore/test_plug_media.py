@@ -133,7 +133,7 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         """
         with self._different_user("vahid@test.com"):
             user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
-            plugged_media = self.plug_user_media("local", user_media_path, "1")
+            plugged_media = self.plug_user_media("local", user_media_path, "1", quota="10240")
 
             # No file should be in the instance-wide storage before
             # execution of any tool.
@@ -232,9 +232,10 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         users_count = 11
         users_data = {}
         for i in range(1, users_count):
+            rnd_user_id = self._rnd_str_generator()
             users_data[i] = {
-                "email": "vahid_{}@test.com".format(i),
-                "path":  "user_{}/media/path/".format(self._rnd_str_generator()),
+                "email": "vahid_{}@test.com".format(rnd_user_id),
+                "path":  "user_{}/media/path/".format(rnd_user_id),
                 "content": self._rnd_str_generator(10)
             }
 
@@ -309,7 +310,7 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
         super(DataDistributionAcrossUserAndInstanceWideMedia, self).setUp()
         self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
-    def test_media_selection_based_on_dataset_size(self):
+    def t__est_media_selection_based_on_dataset_size(self):
         """
         This test asserts if Galaxy can switch between user and
         the instance-wide storage based on the quota on user media
