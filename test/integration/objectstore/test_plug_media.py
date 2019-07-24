@@ -210,9 +210,9 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         """
         Asserts if the media of different users are isolated from each other.
 
-        In general, it asserts if the data of one user is not persisted in a
-        media of another user, and when purging user data, only their data is
-        purged and other users data is intact. For this, this test asserts the
+        More specifically, it asserts if the data of one user is not persisted
+        in a media of another user, and when purging user data, only their data
+        is purged and other users data is intact. For this, this test asserts the
         following:
 
         1- creates 10 users, plugs separate media for each, and asserts if
@@ -240,11 +240,13 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
 
             with self._different_user(users_data[i]["email"]):
                 user_media_path = os.path.join(self._test_driver.mkdtemp(), users_data[i]["path"])
-                plugged_media = self.plug_user_media("local", user_media_path, "1")
+                plugged_media = self.plug_user_media("local", user_media_path, "1", quota="10240.0")
                 users_data[i].update({"media": plugged_media})
 
                 # No file should be in the instance-wide storage before
-                # execution of any tool.
+                # execution of any tool, this can also guarantee that user's
+                # data is not persisted on the default storage as a result
+                # of this iteration.
                 assert self.get_files_count(self.files_default_path) == 0
 
                 # No file should be in user's plugged media before

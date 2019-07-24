@@ -703,7 +703,7 @@ class PluggedMedia(object):
 
     @staticmethod
     def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True):
-        if media is None:
+        if media is None or len(media) == 0:
             return None
 
         i = len(media) - 1
@@ -721,6 +721,9 @@ class PluggedMedia(object):
             if media[i].usage + dataset_size <= media[i].quota:
                 return media[i]
             i -= 1
+        if n and enough_quota_on_instance_level_media:
+            return None
+
         # TODO: instead of returning None, this should raise an exception saying
         # that user does not have enough quota on any of its media.
         return None
