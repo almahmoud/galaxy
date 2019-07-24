@@ -13,7 +13,8 @@ from galaxy.managers import (
     users
 )
 from galaxy.util import (
-    string_as_bool
+    string_as_bool,
+    unicodify
 )
 from galaxy.web import expose_api
 from galaxy.webapps.base.controller import BaseAPIController
@@ -31,6 +32,7 @@ class PluggedMediaController(BaseAPIController):
         self.user_manager = users.UserManager(app)
         self.plugged_media_manager = plugged_media.PluggedMediaManager(app)
         self.plugged_media_serializer = plugged_media.PluggedMediaSerializer(app)
+        self.plugged_media_deserializer = plugged_media.PluggedMediaDeserializer(app)
         self.hda_manager = hdas.HDAManager(app)
         self.dataset_manager = datasets.DatasetManager(app)
 
@@ -154,7 +156,7 @@ class PluggedMediaController(BaseAPIController):
         return []
 
     @expose_api
-    def unplug(self, trans, id, **kwd):
+    def unplug(self, trans, encoded_id, **kwd):
         """
         unplug(self, trans, id, **kwd)
         * DELETE /api/plugged_media/{id}
@@ -173,7 +175,7 @@ class PluggedMediaController(BaseAPIController):
         :return: The deleted or purged plugged media.
         """
         try:
-            plugged_media = self.plugged_media_manager.get_owned(self.decode_id(id), trans.user)
+            plugged_media = self.plugged_media_manager.get_owned(self.decode_id(encoded_id), trans.user)
             payload = kwd.get('payload', None)
             purge = False if payload is None else string_as_bool(payload.get('purge', False))
             if purge:
@@ -184,7 +186,7 @@ class PluggedMediaController(BaseAPIController):
                 plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwd, 'summary'))
         except exceptions.ObjectNotFound:
             trans.response.status = '404 Not Found'
-            msg = 'The plugged media with ID `{}` does not exist.'.format(str(id))
+            msg = 'The plugged media with ID `{}` does not exist.'.format(str(encoded_id))
             log.debug(msg)
         except exceptions.ConfigDoesNotAllowException as e:
             trans.response.status = '403 Forbidden'
@@ -201,3 +203,28 @@ class PluggedMediaController(BaseAPIController):
                   'related API call. ' + str(e)
             log.error(msg)
         return msg
+
+    @expose_api
+    def update(self, trans, encoded_media_id, payload, **kwd):
+        """
+
+        :param trans:
+        :param id:
+        :param kwd:
+        :return:
+        """
+        msg_template = "Rejected user `" + str(trans.user.id) + "`'s request to updade plugged media config because of {}."
+
+        decoded_id = self.decode_id(encoded_media_id)
+
+        try:
+            media_to_update = trans.sa_session.query(trans.app.model.PluggedMedia).get(decoded_id)
+            self.plugged_media_deserializer.deserialize(media_to_update, payload, view="summary")
+            return self.plugged_media_serializer.serialize_to_view(media_to_update, view="summary")
+        except exceptions.MalformedId as e:
+            raise e
+        except Exception as e:
+            log.exception(msg_template.format("exception while updating the cloudauthz record with "
+                                              "ID: `{}`.".format(decoded_id)))
+            raise exceptions.InternalServerError('An unexpected error has occurred while responding '
+                                                 'to the PUT request of the PluggedMedia API.' + unicodify(e))

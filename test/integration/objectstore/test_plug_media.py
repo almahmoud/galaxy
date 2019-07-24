@@ -99,12 +99,25 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         payload = {
             "category": category,
             "path": path,
-            "authz_id": authz_id,
             "order": order,
             "quota": quota,
-            "usage": usage
+            "usage": usage,
+            "authz_id": authz_id
         }
         response = self._post(path="plugged_media", data=payload)
+        return json.loads(response.content)
+
+    def update_user_media(self, media, path=None, order=None, quota=None, authz_id=None):
+        payload = {}
+        if path is not None:
+            payload["path"] = path
+        if order is not None:
+            payload["order"] = order
+        if quota is not None:
+            payload["quota"] = quota
+        if authz_id is not None:
+            payload["authz_id"] = authz_id
+        response = self._put(path="plugged_media/{}".format(media.get("id")), data=payload)
         return json.loads(response.content)
 
 
@@ -447,3 +460,46 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
                 assert self.get_files_count(media_1.get("path")) == 1
                 assert self.get_files_count(self.files_default_path) == 1
                 assert self.get_files_count(media_2.get("path")) == 31
+
+
+class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
+
+    def setUp(self):
+        super(UpdatesToMedia, self).setUp()
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
+
+    def test_updates_are_exerted(self):
+        with self._different_user(ADMIN_USER_EMAIL):
+            media = self.plug_user_media(
+                category="local",
+                path=os.path.join(self._test_driver.mkdtemp(), "user/media/path/"),
+                order="1",
+                quota="1000.0"
+            )
+
+            # No file should be in the instance-wide storage before
+            # execution of any tool.
+            assert self.get_files_count(self.files_default_path) == 0
+
+            # No file should be in user's plugged media before
+            # execution of any tool.
+            assert self.get_files_count(media.get("path")) == 0
+
+            with self.dataset_populator.test_history() as history_id:
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 0
+
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 2
+                assert self.get_files_count(self.files_default_path) == 1

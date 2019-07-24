@@ -6,10 +6,13 @@ import logging
 
 from galaxy import exceptions
 from galaxy import model
-from galaxy.managers import datasets
-from galaxy.managers import deletable
-from galaxy.managers import hdas
-from galaxy.managers import sharable
+from galaxy.managers import (
+    base,
+    datasets,
+    deletable,
+    hdas,
+    sharable
+)
 
 log = logging.getLogger(__name__)
 
@@ -141,3 +144,36 @@ class PluggedMediaSerializer(sharable.SharableModelSerializer, deletable.Purgabl
             'purged'     : lambda i, k, **c: i.purged,
             'purgeable'  : lambda i, k, **c: i.purgeable
         })
+
+
+class PluggedMediaDeserializer(sharable.SharableModelDeserializer, deletable.PurgableDeserializerMixin):
+
+    model_manager_class = PluggedMediaManager
+
+    def add_deserializers(self):
+        super(PluggedMediaDeserializer, self).add_deserializers()
+        self.deserializers.update({
+            'path': self.default_deserializer,
+            'order': self.default_deserializer,
+            'quota': self.default_deserializer,
+            'authz_id': self.deserialize_and_validate_authz_id
+        })
+
+    def deserialize_and_validate_authz_id(self, item, key, val, **context):
+        try:
+            decoded_authz_id = self.app.security.decode_id(val)
+        except Exception:
+            log.debug("cannot decode authz_id `" + str(val) + "`")
+            raise exceptions.MalformedId("Invalid `authz_id` {}!".format(val))
+
+        trans = context.get("trans")
+        if trans is None:
+            log.debug("Not found expected `trans` when deserializing PluggedMedia.")
+            raise exceptions.InternalServerError
+
+        try:
+            trans.app.authnz_manager.can_user_assume_authz(trans, decoded_authz_id)
+        except Exception as e:
+            raise e
+
+        return decoded_authz_id
