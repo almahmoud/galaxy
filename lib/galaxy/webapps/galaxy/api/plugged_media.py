@@ -37,7 +37,7 @@ class PluggedMediaController(BaseAPIController):
         self.dataset_manager = datasets.DatasetManager(app)
 
     @expose_api
-    def index(self, trans, **kwd):
+    def index(self, trans, **kwargs):
         """
         GET /api/plugged_media: returns a list of installed plugged media
         """
@@ -48,11 +48,27 @@ class PluggedMediaController(BaseAPIController):
         rtv = []
         for pm in user.plugged_media:
             rtv.append(self.plugged_media_serializer.serialize_to_view(
-                pm, user=trans.user, trans=trans, **self._parse_serialization_params(kwd, 'summary')))
+                pm, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary")))
         return rtv
 
     @expose_api
-    def plug(self, trans, payload, **kwd):
+    def show(self, trans, encoded_media_id, **kwargs):
+        user = self.user_manager.current_user(trans)
+        decoded_id = self.decode_id(encoded_media_id)
+
+        try:
+            media = next(x for x in user.plugged_media if x.id == decoded_id)
+        except StopIteration:
+            raise exceptions.ObjectNotFound("User does not have PluggedMedia with the given ID.")
+
+        return self.plugged_media_serializer.serialize_to_view(
+            media,
+            user=trans.user,
+            trans=trans,
+            **self._parse_serialization_params(kwargs, "detailed"))
+
+    @expose_api
+    def plug(self, trans, payload, **kwargs):
         """
         plug(self, trans, payload, **kwd)
         * POST /api/plugged_media:
@@ -139,7 +155,7 @@ class PluggedMediaController(BaseAPIController):
                 usage=usage,
                 purgeable=purgeable)
             view = self.plugged_media_serializer.serialize_to_view(
-                new_plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwd, 'summary'))
+                new_plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
             # Do not use integer response codes (e.g., 200), as they are not accepted by the
             # 'wsgi_status' function in lib/galaxy/web/framework/base.py
             trans.response.status = '200 OK'
@@ -156,7 +172,7 @@ class PluggedMediaController(BaseAPIController):
         return []
 
     @expose_api
-    def unplug(self, trans, encoded_id, **kwd):
+    def unplug(self, trans, encoded_id, **kwargs):
         """
         unplug(self, trans, id, **kwd)
         * DELETE /api/plugged_media/{id}
@@ -176,14 +192,14 @@ class PluggedMediaController(BaseAPIController):
         """
         try:
             plugged_media = self.plugged_media_manager.get_owned(self.decode_id(encoded_id), trans.user)
-            payload = kwd.get('payload', None)
+            payload = kwargs.get('payload', None)
             purge = False if payload is None else string_as_bool(payload.get('purge', False))
             if purge:
                 self.plugged_media_manager.purge(plugged_media)
             else:
                 self.plugged_media_manager.delete(plugged_media)
             return self.plugged_media_serializer.serialize_to_view(
-                plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwd, 'summary'))
+                plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
         except exceptions.ObjectNotFound:
             trans.response.status = '404 Not Found'
             msg = 'The plugged media with ID `{}` does not exist.'.format(str(encoded_id))
@@ -205,14 +221,7 @@ class PluggedMediaController(BaseAPIController):
         return msg
 
     @expose_api
-    def update(self, trans, encoded_media_id, payload, **kwd):
-        """
-
-        :param trans:
-        :param id:
-        :param kwd:
-        :return:
-        """
+    def update(self, trans, encoded_media_id, payload, **kwargs):
         msg_template = "Rejected user `" + str(trans.user.id) + "`'s request to updade plugged media config because of {}."
 
         decoded_id = self.decode_id(encoded_media_id)

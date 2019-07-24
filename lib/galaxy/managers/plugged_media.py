@@ -17,10 +17,10 @@ from galaxy.managers import (
 log = logging.getLogger(__name__)
 
 
-class PluggedMediaManager(sharable.SharableModelManager, deletable.PurgableManagerMixin):
+class PluggedMediaManager(base.ModelManager, deletable.PurgableManagerMixin):
 
     model_class = model.PluggedMedia
-    foreign_key_name = 'plugged_media'
+    foreign_key_name = "plugged_media"
 
     def __init__(self, app, *args, **kwargs):
         super(PluggedMediaManager, self).__init__(app, *args, **kwargs)
@@ -84,7 +84,7 @@ class PluggedMediaManager(sharable.SharableModelManager, deletable.PurgableManag
             raise exceptions.ConfigDoesNotAllowException(
                 "The plugged media (ID: `{}`; category: `{}`) is not purgeable; because {}".format(
                     plugged_media.id, plugged_media.category,
-                    "it's purgeable attribute is set to `False`." if plugged_media.purgeable is False
+                    "it`s purgeable attribute is set to `False`." if plugged_media.purgeable is False
                     else "it contains at least one dataset which is not purgeable."))
         for i, assoc in enumerate(plugged_media.data_association):
             for hda in assoc.dataset.history_associations:
@@ -96,7 +96,7 @@ class PluggedMediaManager(sharable.SharableModelManager, deletable.PurgableManag
         return plugged_media
 
 
-class PluggedMediaSerializer(sharable.SharableModelSerializer, deletable.PurgableSerializerMixin):
+class PluggedMediaSerializer(base.ModelSerializer, deletable.PurgableSerializerMixin):
     """
     Interface/service object for serializing plugged media into dictionaries.
     """
@@ -106,21 +106,33 @@ class PluggedMediaSerializer(sharable.SharableModelSerializer, deletable.Purgabl
         super(PluggedMediaSerializer, self).__init__(app, **kwargs)
         self.plugged_media_manager = self.manager
 
-        self.default_view = 'summary'
-        self.add_view('summary', [
-            'id',
-            'model_class',
-            'user_id',
-            'create_time',
-            'update_time',
-            'usage',
-            'order',
-            'quota',
-            'category',
-            'path',
-            'deleted',
-            'purged',
-            'purgeable'
+        self.default_view = "summary"
+        self.add_view("summary", [
+            "id",
+            "model_class",
+            "user_id",
+            "usage",
+            "order",
+            "quota",
+            "category",
+            "path",
+            "authz_id"
+        ])
+        self.add_view("detailed", [
+            "id",
+            "model_class",
+            "user_id",
+            "create_time",
+            "update_time",
+            "usage",
+            "order",
+            "quota",
+            "category",
+            "path",
+            "deleted",
+            "purged",
+            "purgeable",
+            "authz_id"
         ])
 
     def add_serializers(self):
@@ -129,20 +141,21 @@ class PluggedMediaSerializer(sharable.SharableModelSerializer, deletable.Purgabl
 
         # Arguments of the following lambda functions:
         # i  : an instance of galaxy.model.PluggedMedia.
-        # k  : serialized dictionary key (e.g., 'model_class', 'order', 'category', and 'path').
-        # **c: a dictionary containing 'trans' and 'user' objects.
+        # k  : serialized dictionary key (e.g., "model_class", "order", "category", and "path").
+        # **c: a dictionary containing "trans" and "user" objects.
         self.serializers.update({
-            'id'         : lambda i, k, **c: self.app.security.encode_id(i.id),
-            'model_class': lambda *a, **c: 'PluggedMedia',
-            'user_id'    : lambda i, k, **c: self.app.security.encode_id(i.user_id),
-            'usage'      : lambda i, k, **c: str(i.usage),
-            'order'      : lambda i, k, **c: i.order,
-            'quota'      : lambda i, k, **c: str(i.quota),
-            'category'   : lambda i, k, **c: i.category,
-            'path'       : lambda i, k, **c: i.path,
-            'deleted'    : lambda i, k, **c: i.deleted,
-            'purged'     : lambda i, k, **c: i.purged,
-            'purgeable'  : lambda i, k, **c: i.purgeable
+            "id"         : lambda i, k, **c: self.app.security.encode_id(i.id),
+            "model_class": lambda *a, **c: "PluggedMedia",
+            "user_id"    : lambda i, k, **c: self.app.security.encode_id(i.user_id),
+            "usage"      : lambda i, k, **c: str(i.usage),
+            "order"      : lambda i, k, **c: i.order,
+            "quota"      : lambda i, k, **c: str(i.quota),
+            "category"   : lambda i, k, **c: i.category,
+            "path"       : lambda i, k, **c: i.path,
+            "deleted"    : lambda i, k, **c: i.deleted,
+            "purged"     : lambda i, k, **c: i.purged,
+            "purgeable"  : lambda i, k, **c: i.purgeable,
+            "authz_id"   : lambda i, k, **c: i.authz_id
         })
 
 
@@ -153,10 +166,10 @@ class PluggedMediaDeserializer(sharable.SharableModelDeserializer, deletable.Pur
     def add_deserializers(self):
         super(PluggedMediaDeserializer, self).add_deserializers()
         self.deserializers.update({
-            'path': self.default_deserializer,
-            'order': self.default_deserializer,
-            'quota': self.default_deserializer,
-            'authz_id': self.deserialize_and_validate_authz_id
+            "path": self.default_deserializer,
+            "order": self.default_deserializer,
+            "quota": self.default_deserializer,
+            "authz_id": self.deserialize_and_validate_authz_id
         })
 
     def deserialize_and_validate_authz_id(self, item, key, val, **context):

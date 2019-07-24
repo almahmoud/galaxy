@@ -498,6 +498,11 @@ class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
                 assert self.get_files_count(media.get("path")) == 1
                 assert self.get_files_count(self.files_default_path) == 1
 
+                new_quota = "1024000"
+                self.update_user_media(media, quota=new_quota)
+                assert json.loads(self._get(path="plugged_media/{}".format(media.get("id"))).content
+                                  ).get("quota") == new_quota
+
                 self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
                 self.dataset_populator.wait_for_history(history_id)
 

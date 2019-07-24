@@ -315,6 +315,11 @@ def populate_api_routes(webapp, app):
                           controller='plugged_media',
                           conditions=dict(method=["GET"]))
 
+    webapp.mapper.connect('/api/plugged_media/{encoded_media_id}',
+                          controller='plugged_media',
+                          action='show',
+                          conditions=dict(method=["GET"]))
+
     webapp.mapper.connect('/api/plugged_media/',
                           action='plug',
                           controller='plugged_media',
