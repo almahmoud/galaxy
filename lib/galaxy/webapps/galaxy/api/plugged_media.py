@@ -6,7 +6,6 @@ API operations on Plugged Media.
 import logging
 
 from galaxy import exceptions
-from galaxy import web
 from galaxy.managers import (
     datasets,
     hdas,
@@ -17,7 +16,7 @@ from galaxy.util import (
     string_as_bool
 )
 from galaxy.web import expose_api
-from galaxy.web.base.controller import BaseAPIController
+from galaxy.webapps.base.controller import BaseAPIController
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ class PluggedMediaController(BaseAPIController):
         self.hda_manager = hdas.HDAManager(app)
         self.dataset_manager = datasets.DatasetManager(app)
 
-    @web.expose_api_anonymous
+    @expose_api
     def index(self, trans, **kwd):
         """
         GET /api/plugged_media: returns a list of installed plugged media
@@ -50,10 +49,10 @@ class PluggedMediaController(BaseAPIController):
                 pm, user=trans.user, trans=trans, **self._parse_serialization_params(kwd, 'summary')))
         return rtv
 
-    @web.expose_api_anonymous
-    def create(self, trans, payload, **kwd):
+    @expose_api
+    def plug(self, trans, payload, **kwd):
         """
-        create(self, trans, payload, **kwd)
+        plug(self, trans, payload, **kwd)
         * POST /api/plugged_media:
             Creates a new plugged media.
 
@@ -155,9 +154,9 @@ class PluggedMediaController(BaseAPIController):
         return []
 
     @expose_api
-    def delete(self, trans, id, **kwd):
+    def unplug(self, trans, id, **kwd):
         """
-        delete(self, trans, id, **kwd)
+        unplug(self, trans, id, **kwd)
         * DELETE /api/plugged_media/{id}
             Deletes the plugged media with the given ID, also deletes all the associated datasets and HDAs.
 

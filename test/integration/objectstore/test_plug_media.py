@@ -104,7 +104,7 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
             "quota": quota,
             "usage": usage
         }
-        response = self._post(path="plugged_media/create", data=payload)
+        response = self._post(path="plugged_media", data=payload)
         return json.loads(response.content)
 
 
@@ -310,7 +310,7 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
         super(DataDistributionAcrossUserAndInstanceWideMedia, self).setUp()
         self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
-    def t__est_media_selection_based_on_dataset_size(self):
+    def test_media_selection_based_on_dataset_size(self):
         """
         This test asserts if Galaxy can switch between user and
         the instance-wide storage based on the quota on user media

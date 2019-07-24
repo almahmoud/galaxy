@@ -309,8 +309,21 @@ def populate_api_routes(webapp, app):
     webapp.mapper.resource('remote_file', 'remote_files', path_prefix='/api')
     webapp.mapper.resource('group', 'groups', path_prefix='/api')
     webapp.mapper.resource_with_deleted('quota', 'quotas', path_prefix='/api')
-    webapp.mapper.connect('/api/plugged_media/create', action='create', controller='plugged_media')
-    webapp.mapper.resource('plugged_media', 'plugged_media', path_prefix='/api')
+
+    webapp.mapper.connect('/api/plugged_media/',
+                          action='index',
+                          controller='plugged_media',
+                          conditions=dict(method=["GET"]))
+
+    webapp.mapper.connect('/api/plugged_media/',
+                          action='plug',
+                          controller='plugged_media',
+                          conditions=dict(method=["POST"]))
+
+    webapp.mapper.connect('/api/plugged_media/{encoded_authz_id}',
+                          action='unplug',
+                          controller='plugged_media',
+                          conditions=dict(method=["DELETE"]))
 
     webapp.mapper.connect('/api/cloud/authz/', action='index', controller='cloudauthz', conditions=dict(method=["GET"]))
     webapp.mapper.connect('/api/cloud/authz/',
