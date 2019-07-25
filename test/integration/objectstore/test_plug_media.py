@@ -64,9 +64,11 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
     def _create_content_of_size(self, size=1024):
         return self._rnd_str_generator(length=size)
 
-    def run_tool(self, history_id, content=TEST_INPUT_FILES_CONTENT):
-        hda = self.dataset_populator.new_dataset(history_id, content=content)
-        self.dataset_populator.wait_for_history(history_id)
+    def run_tool(self, history_id, hda=None, content=TEST_INPUT_FILES_CONTENT):
+        if hda is None:
+            hda = self.dataset_populator.new_dataset(history_id, content=content)
+            self.dataset_populator.wait_for_history(history_id)
+
         hda_input = {"src": "hda", "id": hda["id"]}
         inputs = {
             "input1": hda_input,
@@ -80,6 +82,7 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
             assert_ok=True,
         )
         self.dataset_populator.wait_for_history(history_id)
+        return hda
 
     @staticmethod
     def assert_content(files, expected_content):
@@ -269,7 +272,7 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
 
                 with self.dataset_populator.test_history() as history_id:
                     users_data[i].update({"history_id": history_id})
-                    self.run_tool(history_id, users_data[i]["content"])
+                    self.run_tool(history_id, content=users_data[i]["content"])
                     users_data[i].update({
                         "history_details": self._get(path="histories/" + users_data[i]["history_id"])
                     })
@@ -468,7 +471,19 @@ class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
         super(UpdatesToMedia, self).setUp()
         self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
 
-    def test_updates_are_exerted(self):
+    def test_if_changes_to_media_quota_are_effective(self):
+        """
+        The goal here is to assert if (a) user can modify plugged media
+        quota, and (b) the changes will be applied/considered when creating
+        a new dataset.
+
+        Accordingly, we first plug a media, then upload two datasets, where
+        based on the plugged media quota, first dataset will be stored on
+        the plugged media and the second dataset will be stored on the
+        instance-wide storage. Then we increase the quota on the plugged media
+        and expect Galaxy to store a new datasets on the plugged media.
+        :return:
+        """
         with self._different_user(ADMIN_USER_EMAIL):
             media = self.plug_user_media(
                 category="local",
@@ -508,3 +523,96 @@ class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
 
                 assert self.get_files_count(media.get("path")) == 2
                 assert self.get_files_count(self.files_default_path) == 1
+
+
+class FunctionalityForUsersWithoutPluggedMediaIsIntact(BaseUserBasedObjectStoreTestCase):
+
+    def setUp(self):
+        super(FunctionalityForUsersWithoutPluggedMediaIsIntact, self).setUp()
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
+
+    def test_if_plugging_media_affects_existing_dataset_on_instance_wide_storage(self):
+        """
+        This test asserts multiple points:
+
+        a- user should be able to run tools without having to plug a media;
+        b- Galaxy should be able to run a tool whose input is on one media,
+        and be able to persist its output on a different media;
+        c- media should be correctly used based on the their order.
+
+        More specifically, this test asserts the following points:
+
+        1- user should be able to use Galaxy without having to plug a
+        media. Accordingly, we create two datasets, and use each of them
+        as an input for a tool. Then we assert if the input and tool output
+        are correctly stored in the instance-wide storage.
+
+        2- if user plugs a media with lower order than the instance-wide
+        storage, Galaxy should still use the instance-wide storage until
+        quota limit is reached (if defined). Accordingly, we plug a media
+        with its order set to `-1` (i.e. use this media if quota is
+        exhausted on the instance-wide storage), then we create a new
+        dataset and assert if this dataset is persisted on the instance-wide
+        storage. Then we run a tool whose input is persisted on the
+        instance-wide storage, and we assert if the tool output is also
+        stored on the instance-wide storage.
+
+        3- if user plugs a media with higher order than the instance-wide
+        storage, Galaxy should use the plugged media. Accordingly, we
+        plug a media whose order is set to 1 (i.e. use this media until
+        its quota limit is reached, then try instance-wide storage), then
+        we upload a new dataset, and assert if it is stored on the plugged
+        media. Then we run a tool whose input is stored on the instance-wide
+        storage, and assert if its output is persisted on the plugged media.
+        """
+        with self._different_user("vahid@test.com"):
+            # No file should be in the instance-wide storage before
+            # execution of any tool.
+            assert self.get_files_count(self.files_default_path) == 0
+
+            with self.dataset_populator.test_history() as history_id:
+                content1 = self._create_content_of_size()
+                hda1 = self.run_tool(history_id, content=content1)
+                assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT
+
+                content2 = self._create_content_of_size()
+                hda2 = self.run_tool(history_id, content=content2)
+                assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT * 2
+
+                media = self.plug_user_media(
+                    category="local",
+                    path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_1/"),
+                    order="-1",
+                    quota="102400.0"
+                )
+
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 0
+                assert self.get_files_count(self.files_default_path) == (EXPECTED_FILES_COUNT_IN_OUTPUT * 2) + 1
+
+                self.run_tool(history_id, hda=hda1)
+
+                assert self.get_files_count(media.get("path")) == 0
+                assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT * 3
+
+                media = self.plug_user_media(
+                    category="local",
+                    path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
+                    order="1",
+                    quota="102400.0"
+                )
+
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size())
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 1
+
+                self.run_tool(history_id, hda=hda1)
+
+                assert self.get_files_count(media.get("path")) == 1 + (EXPECTED_FILES_COUNT_IN_OUTPUT - 1)
+
+                self.run_tool(history_id, hda=hda2)
+
+                assert self.get_files_count(media.get("path")) == 1 + (2 * (EXPECTED_FILES_COUNT_IN_OUTPUT - 1))
