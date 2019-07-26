@@ -133,7 +133,7 @@ class StorageMediaController(BaseAPIController):
             return "Expect a float number for the `usage` attribute, but received `{}`.".format(payload.get("usage"))
 
         authz_id = None
-        if category in [trans.app.model.StorageMedia.categories.S3,
+        if category in [trans.app.model.StorageMedia.categories.AWS,
                         trans.app.model.StorageMedia.categories.AZURE]:
             encoded_authz_id = payload.get("authz_id", None)
             if encoded_authz_id is None:
