@@ -932,8 +932,8 @@ class JobWrapper(HasResourceParameters):
             if quota is not None:
                 usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
                 eqi = usage < quota
-            all_user_media = job.user.active_plugged_media
-            selected_media = model.PluggedMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
+            all_user_media = job.user.active_storage_media
+            selected_media = model.StorageMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
             if selected_media is not None:
                 selected_media.association_with_dataset(dataset)
 
@@ -1222,7 +1222,7 @@ class JobWrapper(HasResourceParameters):
                         log.error("fail(): Missing output file in working directory: %s", unicodify(e))
             for dataset_assoc in job.output_datasets + job.output_library_datasets:
                 dataset = dataset_assoc.dataset
-                model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+                model.StorageMedia.refresh_all_media_credentials(dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
                 self.sa_session.refresh(dataset)
                 dataset.state = dataset.states.ERROR
                 dataset.blurb = 'tool error'
@@ -1253,7 +1253,7 @@ class JobWrapper(HasResourceParameters):
         else:
             for dataset_assoc in job.output_datasets:
                 dataset = dataset_assoc.dataset
-                model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+                model.StorageMedia.refresh_all_media_credentials(dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
                 # Any reason for clean_only here? We should probably be more consistent and transfer
                 # the partial files to the object store regardless of whether job.state == DELETED
                 self.__update_output(job, dataset, clean_only=True)
@@ -1321,7 +1321,7 @@ class JobWrapper(HasResourceParameters):
             return
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
             dataset = dataset_assoc.dataset
-            model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+            model.StorageMedia.refresh_all_media_credentials(dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
             if not job_supplied:
                 self.sa_session.refresh(dataset)
             state_changed = dataset.raw_set_dataset_state(state)
@@ -1645,9 +1645,9 @@ class JobWrapper(HasResourceParameters):
         # Once datasets are collected, set the total dataset size (includes extra files)
         for dataset_assoc in job.output_datasets:
             if not dataset_assoc.dataset.dataset.purged:
-                model.PluggedMedia.refresh_all_media_credentials(dataset_assoc.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+                model.StorageMedia.refresh_all_media_credentials(dataset_assoc.dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
                 dataset_assoc.dataset.dataset.set_total_size()
-                if len(dataset_assoc.dataset.dataset.active_plugged_media_associations) == 0:
+                if len(dataset_assoc.dataset.dataset.active_storage_media_associations) == 0:
                     collected_bytes += dataset_assoc.dataset.dataset.get_total_size()
 
         if job.user:
@@ -1843,7 +1843,7 @@ class JobWrapper(HasResourceParameters):
 
         results = []
         for da in job.output_datasets + job.output_library_datasets:
-            model.PluggedMedia.refresh_all_media_credentials(da.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+            model.StorageMedia.refresh_all_media_credentials(da.dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
             da_false_path = dataset_path_rewriter.rewrite_dataset_path(da.dataset, 'output')
             mutable = da.dataset.dataset.external_filename is None
             dataset_path = DatasetPath(da.dataset.dataset.id, da.dataset.file_name, false_path=da_false_path, mutable=mutable)
@@ -1937,7 +1937,7 @@ class JobWrapper(HasResourceParameters):
         if set_extension:
             for output_dataset_assoc in job.output_datasets:
                 if output_dataset_assoc.dataset.ext == 'auto':
-                    model.PluggedMedia.refresh_all_media_credentials(output_dataset_assoc.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+                    model.StorageMedia.refresh_all_media_credentials(output_dataset_assoc.dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
                     context = self.get_dataset_finish_context(dict(), output_dataset_assoc)
                     output_dataset_assoc.dataset.extension = context.get('ext', 'data')
             self.sa_session.flush()
@@ -2095,7 +2095,7 @@ class JobWrapper(HasResourceParameters):
         job = self.get_job()
         tool = self.app.toolbox.get_tool(job.tool_id, tool_version=job.tool_version) or None
         for dataset in job.output_datasets:
-            model.PluggedMedia.refresh_all_media_credentials(dataset.dataset.dataset.active_plugged_media_associations, self.app.authnz_manager, self.sa_session)
+            model.StorageMedia.refresh_all_media_credentials(dataset.dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
             self.app.error_reports.default_error_plugin.submit_report(dataset, job, tool, user_submission=False)
 
 

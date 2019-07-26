@@ -57,14 +57,14 @@ class ObjectStore(object):
     :param user: The user (object) whose dataset is being upload/download
         to/from object store.
 
-    :type plugged_media: A list of PluggedMedia (lib/galaxy/model/__init__.py)
-    :param plugged_media: A list of data persistence media from/to which a dataset
-        is pulled/pushed. If multiple plugged media is available for a user,
+    :type storage_media: A list of StorageMedia (lib/galaxy/model/__init__.py)
+    :param storage_media: A list of data persistence media from/to which a dataset
+        is pulled/pushed. If multiple storage media is available for a user,
         object store chooses one based on `usage`, `order`, and `quota` attributes
-        of each plugged media.
-        A recommended approach for getting a list of plugged media available for
+        of each storage media.
+        A recommended approach for getting a list of storage media available for
         a user, or possibly associated with the dataset, is using the
-        `Dataset.get_plugged_media` method.
+        `Dataset.get_storage_media` method.
 
     :type dir_only: boolean
     :param dir_only: If `True`, check only the path where the file identified
@@ -100,7 +100,7 @@ class ObjectStore(object):
     # _path_ on which _backend_ the result of job shall
     # be persisted, considering only instance-level
     # objectstore configuration and neglecting user's
-    # plugged media.
+    # storage media.
     # After job has completed, the resulting dataset is
     # staged at a path depending on which _backend_
     # was initially selected, before signaling objectstore
@@ -109,7 +109,7 @@ class ObjectStore(object):
     # the result of job execution is staged in S3 cache path
     # as defined in the ObjectStore config.
     #
-    # If user has defined a plugged media, and that is
+    # If user has defined a storage media, and that is
     # chosen as the media where the result of job shall
     # be persisted; then this variable is used to inform
     # the media where the dataset is _staged_.
@@ -569,8 +569,8 @@ class NestedObjectStore(ObjectStore):
 
     def create(self, obj, ignore_media=False, **kwargs):
         """Create a backing file in a random backend."""
-        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
-            media = UserObjectStore(obj.active_plugged_media_associations, self)
+        if not hasattr(obj, "job") and len(obj.active_storage_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_storage_media_associations, self)
             return media.call_method("create", obj, **kwargs)
         else:
             random.choice(list(self.backends.values())).create(obj, **kwargs)
@@ -617,7 +617,7 @@ class NestedObjectStore(ObjectStore):
     def _get_backend(self, obj, **kwargs):
         """
         Check all children object stores for the first one with the dataset;
-        it first checks plugged media, if given, then evaluates other backends.
+        it first checks storage media, if given, then evaluates other backends.
         """
         for key, backend in self.backends.items():
             if backend.exists(obj, **kwargs):
@@ -625,8 +625,8 @@ class NestedObjectStore(ObjectStore):
         return None
 
     def _call_method(self, method, obj, default, default_is_exception, ignore_media=False, **kwargs):
-        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
-            media = UserObjectStore(obj.active_plugged_media_associations, self)
+        if not hasattr(obj, "job") and len(obj.active_storage_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_storage_media_associations, self)
             return media.call_method(method, obj, default, default_is_exception, **kwargs)
 
         backend = self._get_backend(obj, **kwargs)
@@ -882,8 +882,8 @@ class HierarchicalObjectStore(NestedObjectStore):
 
     def exists(self, obj, ignore_media=False, **kwargs):
         """Check all child object stores."""
-        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
-            media = UserObjectStore(obj.active_plugged_media_associations, self)
+        if not hasattr(obj, "job") and len(obj.active_storage_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_storage_media_associations, self)
             return media.call_method("exists", obj, **kwargs)
         for store in self.backends.values():
             if store.exists(obj, **kwargs):
@@ -898,8 +898,8 @@ class HierarchicalObjectStore(NestedObjectStore):
         # types:
         # - `galaxy.model.Dataset`
         # - `galaxy.model.Job`
-        if not hasattr(obj, "job") and len(obj.active_plugged_media_associations) > 0 and not ignore_media:
-            media = UserObjectStore(obj.active_plugged_media_associations, self)
+        if not hasattr(obj, "job") and len(obj.active_storage_media_associations) > 0 and not ignore_media:
+            media = UserObjectStore(obj.active_storage_media_associations, self)
             return media.call_method("create", obj, **kwargs)
         else:
             self.backends[0].create(obj, **kwargs)
@@ -917,7 +917,7 @@ class UserObjectStore(ObjectStore):
 
     def __configure_store(self):
         for association in self.media_associations:
-            m = association.plugged_media
+            m = association.storage_media
             categories = m.__class__.categories
             if m.category == categories.LOCAL:
                 config = m.get_config(cache_path=self.cache_path, jobs_directory=self.jobs_directory)
@@ -926,13 +926,13 @@ class UserObjectStore(ObjectStore):
                 from .cloud import Cloud
                 self.backends[m.id] = Cloud(config=m.get_config(), config_dict={})
             else:
-                raise Exception("Received a plugged media with a un-recognized category type ({}). "
+                raise Exception("Received a storage media with a un-recognized category type ({}). "
                                 "The category type should match either of the following categories: {}"
                                 .format(self.media.category, categories))
 
     def __get_containing_media(self, obj, media, **kwargs):
         """
-        Returns the first plugged media that contains the object.
+        Returns the first storage media that contains the object.
         """
         if media is None:
             for key, backend in self.backends.items():
@@ -968,21 +968,21 @@ class UserObjectStore(ObjectStore):
         access and secret are invalid).
         """
         from_order = None
-        i = len(obj.active_plugged_media_associations)
+        i = len(obj.active_storage_media_associations)
         rtv = default
         while i > 0:
             i -= 1
             try:
                 # TODO: should not the following be required only if the operation is create?
-                dataset_size = self.size(obj, obj.active_plugged_media_associations[i].plugged_media, **kwargs)
+                dataset_size = self.size(obj, obj.active_storage_media_associations[i].storage_media, **kwargs)
 
                 # TODO: should not try different media, because at this point a media is already chosen for the dataset, hence just use it regardless of the actions success.
-                # picked_media = self.pick_a_plugged_media(
-                #     obj.active_plugged_media_associations, from_order, dataset_size,
+                # picked_media = self.pick_a_storage_media(
+                #     obj.active_storage_media_associations, from_order, dataset_size,
                 #     enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
-                picked_media = obj.active_plugged_media_associations[i].plugged_media
+                picked_media = obj.active_storage_media_associations[i].storage_media
             except Exception as e:
-                log.exception("Failed to choose a plugged media. Error: {}".format(e))
+                log.exception("Failed to choose a storage media. Error: {}".format(e))
             else:
                 try:
                     if picked_media is not None:
@@ -1011,64 +1011,64 @@ class UserObjectStore(ObjectStore):
                                   "following error; now trying another persistence option, if any available. "
                                   "Error: {}".format(obj.id,
                                                      "{} with ID {}".format(picked_media.category, picked_media.id)
-                                                     if obj.active_plugged_media_associations[i] is not None else "the instance-wide storage", e))
+                                                     if obj.active_storage_media_associations[i] is not None else "the instance-wide storage", e))
         # TODO: User should be notified if this operation has failed.
         return rtv
 
     @staticmethod
-    def pick_a_plugged_media(plugged_media, from_order=None, dataset_size=0,
+    def pick_a_storage_media(storage_media, from_order=None, dataset_size=0,
                              enough_quota_on_instance_level_media=True):
         """
-        This function receives a list of plugged media, and decides which one to be
-        used for the object store operations. If a single plugged media is given
+        This function receives a list of storage media, and decides which one to be
+        used for the object store operations. If a single storage media is given
         (i.e., only one available/defined for the user, or user has explicitly
-        chosen a plugged media), it returns that single option. However, if multiple
-        plugged media are available, then it uses the `order`, and `quota` attributes of
-        the plugged media to decide which one to be used.
-        NOTE: do not associate a dataset with a plugged media before the dataset is
+        chosen a storage media), it returns that single option. However, if multiple
+        storage media are available, then it uses the `order`, and `quota` attributes of
+        the storage media to decide which one to be used.
+        NOTE: do not associate a dataset with a storage media before the dataset is
         successfully persisted on the media.
-        :param plugged_media: A list of plugged media defined/available for the user.
-        :param from_order: is the order of a previously returned and failed plugged media,
-        which this function should determine a plugged media in a lower order to that.
+        :param storage_media: A list of storage media defined/available for the user.
+        :param from_order: is the order of a previously returned and failed storage media,
+        which this function should determine a storage media in a lower order to that.
         :param dataset_size: is the file size of the dataset.
         :param enough_quota_on_instance_level_media: Sets if user has enough quota on
         the default media (i.e., the instance-level persistence media) to persist the dataset.
-        :return: A single plugged media, or None (if no plugged media is available, or
+        :return: A single storage media, or None (if no storage media is available, or
         if object store should use instance-level config).
         """
-        if plugged_media is None:
+        if storage_media is None:
             return None
-        if not hasattr(plugged_media, '__len__'):
-            log.exception("Expected a list of PluggedMedia, but received an object of type `%s`." % type(plugged_media))
+        if not hasattr(storage_media, '__len__'):
+            log.exception("Expected a list of StorageMedia, but received an object of type `%s`." % type(storage_media))
             return None
-        if len(plugged_media) == 0:
+        if len(storage_media) == 0:
             return None
         # The following condition is met when a media is already chosen
         # (e.g., override or associated) for the dataset.
-        if len(plugged_media) == 1:
-            return plugged_media[0]
+        if len(storage_media) == 1:
+            return storage_media[0]
 
-        # The following is the procedure of choosing a plugged media from a list of available options
+        # The following is the procedure of choosing a storage media from a list of available options
         # including instance-level object store configuration. This operation iterates from the highest
-        # to lowest order plugged media (i.e., biggest positive and smallest negative order respectively)
-        # with `0` being the instance-level object store configuration. It falls from one plugged media to
+        # to lowest order storage media (i.e., biggest positive and smallest negative order respectively)
+        # with `0` being the instance-level object store configuration. It falls from one storage media to
         # another, if the available space on that media is not sufficient to store the given dataset.
-        plugged_media.sort(key=lambda p: p.order)
-        from_order = from_order - 1 if from_order is not None else plugged_media[-1].order
-        i = len(plugged_media) - 1
+        storage_media.sort(key=lambda p: p.order)
+        from_order = from_order - 1 if from_order is not None else storage_media[-1].order
+        i = len(storage_media) - 1
         while i >= 0:
-            if from_order >= plugged_media[i].order > 0 or from_order <= plugged_media[i].order < -1:
-                if plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
-                    return plugged_media[i]
+            if from_order >= storage_media[i].order > 0 or from_order <= storage_media[i].order < -1:
+                if storage_media[i].usage + dataset_size <= storage_media[i].quota:
+                    return storage_media[i]
             else:
                 if enough_quota_on_instance_level_media:
                     return None
-                elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
-                    return plugged_media[i]
+                elif storage_media[i].usage + dataset_size <= storage_media[i].quota:
+                    return storage_media[i]
             i -= 1
         if enough_quota_on_instance_level_media:
             return None
-        elif plugged_media[i].usage + dataset_size <= plugged_media[i].quota:
+        elif storage_media[i].usage + dataset_size <= storage_media[i].quota:
             # TODO: replace the following exception with a better approach.
             raise Exception("User does not have enough quota to persist the dataset.")
 

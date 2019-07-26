@@ -1,7 +1,7 @@
 """
-API operations on Plugged Media.
+API operations on storage media.
 
-.. see also:: :class:`galaxy.model.PluggedMedia`
+.. see also:: :class:`galaxy.model.StorageMedia`
 """
 import logging
 
@@ -9,7 +9,7 @@ from galaxy import exceptions
 from galaxy.managers import (
     datasets,
     hdas,
-    plugged_media,
+    storage_media,
     users
 )
 from galaxy.util import (
@@ -22,32 +22,32 @@ from galaxy.webapps.base.controller import BaseAPIController
 log = logging.getLogger(__name__)
 
 
-class PluggedMediaController(BaseAPIController):
+class StorageMediaController(BaseAPIController):
     """
-    RESTful controller for interactions with plugged media.
+    RESTful controller for interactions with storage media.
     """
 
     def __init__(self, app):
-        super(PluggedMediaController, self).__init__(app)
+        super(StorageMediaController, self).__init__(app)
         self.user_manager = users.UserManager(app)
-        self.plugged_media_manager = plugged_media.PluggedMediaManager(app)
-        self.plugged_media_serializer = plugged_media.PluggedMediaSerializer(app)
-        self.plugged_media_deserializer = plugged_media.PluggedMediaDeserializer(app)
+        self.storage_media_manager = storage_media.StorageMediaManager(app)
+        self.storage_media_serializer = storage_media.StorageMediaSerializer(app)
+        self.storage_media_deserializer = storage_media.StorageMediaDeserializer(app)
         self.hda_manager = hdas.HDAManager(app)
         self.dataset_manager = datasets.DatasetManager(app)
 
     @expose_api
     def index(self, trans, **kwargs):
         """
-        GET /api/plugged_media: returns a list of installed plugged media
+        GET /api/storage_media: returns a list of installed storage media
         """
         user = self.user_manager.current_user(trans)
         if self.user_manager.is_anonymous(user):
-            # an anonymous user is not expected to have installed a plugged media.
+            # an anonymous user is not expected to have installed a storage media.
             return []
         rtv = []
-        for pm in user.plugged_media:
-            rtv.append(self.plugged_media_serializer.serialize_to_view(
+        for pm in user.storage_media:
+            rtv.append(self.storage_media_serializer.serialize_to_view(
                 pm, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary")))
         return rtv
 
@@ -57,11 +57,11 @@ class PluggedMediaController(BaseAPIController):
         decoded_id = self.decode_id(encoded_media_id)
 
         try:
-            media = next(x for x in user.plugged_media if x.id == decoded_id)
+            media = next(x for x in user.storage_media if x.id == decoded_id)
         except StopIteration:
-            raise exceptions.ObjectNotFound("User does not have PluggedMedia with the given ID.")
+            raise exceptions.ObjectNotFound("User does not have StorageMedia with the given ID.")
 
-        return self.plugged_media_serializer.serialize_to_view(
+        return self.storage_media_serializer.serialize_to_view(
             media,
             user=trans.user,
             trans=trans,
@@ -71,31 +71,31 @@ class PluggedMediaController(BaseAPIController):
     def plug(self, trans, payload, **kwargs):
         """
         plug(self, trans, payload, **kwd)
-        * POST /api/plugged_media:
-            Creates a new plugged media.
+        * POST /api/storage_media:
+            Creates a new storage media.
 
         :type  trans: galaxy.web.framework.webapp.GalaxyWebTransaction
         :param trans: Galaxy web transaction.
 
         :type  payload: dict
         :param payload: A dictionary structure containing the following keys:
-            - order: A key which defines the hierarchical relation between this and other plugged media defined
+            - order: A key which defines the hierarchical relation between this and other storage media defined
             by the user.
-            - category: is the type of this plugged media, its value is a key from `categories` bunch defined in the
-            `PluggedMedia` class.
-            - path: a path in the plugged media to be used (e.g., AWS S3 Bucket name).
-            - order : Sets the order of this plugged media, it is an integer specifying the order in
-            which a plugged media should be tried to persiste a dataset on. Order is relative to the default
-            Galaxy instance storage, which has a reserved order 0, where plugged media with positive and negative
+            - category: is the type of this storage media, its value is a key from `categories` bunch defined in the
+            `StorageMedia` class.
+            - path: a path in the storage media to be used (e.g., AWS S3 Bucket name).
+            - order : Sets the order of this storage media, it is an integer specifying the order in
+            which a storage media should be tried to persiste a dataset on. Order is relative to the default
+            Galaxy instance storage, which has a reserved order 0, where storage media with positive and negative
             order are tried prior and posterior to the default storage respectively. For instance, considering 3
-            plugged media, PM_1, PM_2, and PM_3 with the orders 2, 1, and -1 respectively; Galaxy tries the these
-            plugged media in the following order: PM_1, PM_2, Default, PM_3.
-            - credentials (Optional): It is a JSON object containing required credentials to access the plugged media
+            storage media, PM_1, PM_2, and PM_3 with the orders 2, 1, and -1 respectively; Galaxy tries the these
+            storage media in the following order: PM_1, PM_2, Default, PM_3.
+            - credentials (Optional): It is a JSON object containing required credentials to access the storage media
              (e.g., access and secret key for an AWS S3 bucket).
-            - quota (Optional): Disk quota, a limit that sets maximum data storage limit on this plugged media.
-            - usage (Optional): Sets the size of data persisted by Galaxy in this plugged media.
+            - quota (Optional): Disk quota, a limit that sets maximum data storage limit on this storage media.
+            - usage (Optional): Sets the size of data persisted by Galaxy in this storage media.
         :rtype: dict
-        :return: The newly created plugged media.
+        :return: The newly created storage media.
         """
         if not isinstance(payload, dict):
             trans.response.status = 400
@@ -133,8 +133,8 @@ class PluggedMediaController(BaseAPIController):
             return "Expect a float number for the `usage` attribute, but received `{}`.".format(payload.get("usage"))
 
         authz_id = None
-        if category in [trans.app.model.PluggedMedia.categories.S3,
-                        trans.app.model.PluggedMedia.categories.AZURE]:
+        if category in [trans.app.model.StorageMedia.categories.S3,
+                        trans.app.model.StorageMedia.categories.AZURE]:
             encoded_authz_id = payload.get("authz_id", None)
             if encoded_authz_id is None:
                 missing_arguments.append("authz_id")
@@ -145,7 +145,7 @@ class PluggedMediaController(BaseAPIController):
                     return "Invalid `authz_id`. {}".format(e)
 
         try:
-            new_plugged_media = self.plugged_media_manager.create(
+            new_storage_media = self.storage_media_manager.create(
                 user_id=trans.user.id,
                 order=order,
                 category=category,
@@ -154,19 +154,19 @@ class PluggedMediaController(BaseAPIController):
                 quota=quota,
                 usage=usage,
                 purgeable=purgeable)
-            view = self.plugged_media_serializer.serialize_to_view(
-                new_plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
+            view = self.storage_media_serializer.serialize_to_view(
+                new_storage_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
             # Do not use integer response codes (e.g., 200), as they are not accepted by the
             # 'wsgi_status' function in lib/galaxy/web/framework/base.py
             trans.response.status = '200 OK'
-            log.debug('Created a new plugged media of type `%s` for the user id `%s` ', category, str(trans.user.id))
+            log.debug('Created a new storage media of type `%s` for the user id `%s` ', category, str(trans.user.id))
             return view
         except ValueError as e:
-            log.debug('An error occurred while creating a plugged media. ' + str(e))
+            log.debug('An error occurred while creating a storage media. ' + str(e))
             trans.response.status = '400 Bad Request'
         except Exception as e:
             log.exception('An unexpected error has occurred while responding to the '
-                          'create request of the plugged media API. ' + str(e))
+                          'create request of the storage media API. ' + str(e))
             # Do not use integer response code (see above).
             trans.response.status = '500 Internal Server Error'
         return []
@@ -175,34 +175,34 @@ class PluggedMediaController(BaseAPIController):
     def unplug(self, trans, encoded_id, **kwargs):
         """
         unplug(self, trans, id, **kwd)
-        * DELETE /api/plugged_media/{id}
-            Deletes the plugged media with the given ID, also deletes all the associated datasets and HDAs.
+        * DELETE /api/storage_media/{id}
+            Deletes the storage media with the given ID, also deletes all the associated datasets and HDAs.
 
         :type  trans: galaxy.web.framework.webapp.GalaxyWebTransaction
         :param trans: Galaxy web transaction.
 
         :type id: string
-        :param id: The encoded ID of the plugged media to be deleted.
+        :param id: The encoded ID of the storage media to be deleted.
 
         :type kwd: dict
         :param kwd: (optional) dictionary structure containing extra parameters (e.g., `purge`).
 
         :rtype: dict
-        :return: The deleted or purged plugged media.
+        :return: The deleted or purged storage media.
         """
         try:
-            plugged_media = self.plugged_media_manager.get_owned(self.decode_id(encoded_id), trans.user)
+            storage_media = self.storage_media_manager.get_owned(self.decode_id(encoded_id), trans.user)
             payload = kwargs.get('payload', None)
             purge = False if payload is None else string_as_bool(payload.get('purge', False))
             if purge:
-                self.plugged_media_manager.purge(plugged_media)
+                self.storage_media_manager.purge(storage_media)
             else:
-                self.plugged_media_manager.delete(plugged_media)
-            return self.plugged_media_serializer.serialize_to_view(
-                plugged_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
+                self.storage_media_manager.delete(storage_media)
+            return self.storage_media_serializer.serialize_to_view(
+                storage_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
         except exceptions.ObjectNotFound:
             trans.response.status = '404 Not Found'
-            msg = 'The plugged media with ID `{}` does not exist.'.format(str(encoded_id))
+            msg = 'The storage media with ID `{}` does not exist.'.format(str(encoded_id))
             log.debug(msg)
         except exceptions.ConfigDoesNotAllowException as e:
             trans.response.status = '403 Forbidden'
@@ -210,30 +210,30 @@ class PluggedMediaController(BaseAPIController):
             log.debug(msg)
         except AttributeError as e:
             trans.response.status = '500 Internal Server Error'
-            msg = 'An unexpected error has occurred while deleting/purging a plugged media in response to the ' \
+            msg = 'An unexpected error has occurred while deleting/purging a storage media in response to the ' \
                   'related API call. Maybe an inappropriate database manipulation. ' + str(e)
             log.error(msg)
         except Exception as e:
             trans.response.status = '500 Internal Server Error'
-            msg = 'An unexpected error has occurred while deleting/purging a plugged media in response to the ' \
+            msg = 'An unexpected error has occurred while deleting/purging a storage media in response to the ' \
                   'related API call. ' + str(e)
             log.error(msg)
         return msg
 
     @expose_api
     def update(self, trans, encoded_media_id, payload, **kwargs):
-        msg_template = "Rejected user `" + str(trans.user.id) + "`'s request to updade plugged media config because of {}."
+        msg_template = "Rejected user `" + str(trans.user.id) + "`'s request to updade storage media config because of {}."
 
         decoded_id = self.decode_id(encoded_media_id)
 
         try:
-            media_to_update = trans.sa_session.query(trans.app.model.PluggedMedia).get(decoded_id)
-            self.plugged_media_deserializer.deserialize(media_to_update, payload, view="summary")
-            return self.plugged_media_serializer.serialize_to_view(media_to_update, view="summary")
+            media_to_update = trans.sa_session.query(trans.app.model.StorageMedia).get(decoded_id)
+            self.storage_media_deserializer.deserialize(media_to_update, payload, view="summary")
+            return self.storage_media_serializer.serialize_to_view(media_to_update, view="summary")
         except exceptions.MalformedId as e:
             raise e
         except Exception as e:
             log.exception(msg_template.format("exception while updating the cloudauthz record with "
                                               "ID: `{}`.".format(decoded_id)))
             raise exceptions.InternalServerError('An unexpected error has occurred while responding '
-                                                 'to the PUT request of the PluggedMedia API.' + unicodify(e))
+                                                 'to the PUT request of the StorageMedia API.' + unicodify(e))

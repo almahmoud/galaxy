@@ -1,6 +1,6 @@
 """
-Migration script to (a) create a table for PluggedMedia and (b) extend the HDA table
-linking datasets to plugged media.
+Migration script to (a) create a table for StorageMedia and (b) extend the HDA table
+linking datasets to storage media.
 """
 from __future__ import print_function
 
@@ -16,8 +16,8 @@ metadata = MetaData()
 
 # Tables to add
 
-PluggedMediaTable = Table(
-    "plugged_media", metadata,
+StorageMediaTable = Table(
+    "storage_media", metadata,
     Column("id", Integer, primary_key=True),
     Column("create_time", DateTime, default=now),
     Column("update_time", DateTime, default=now, onupdate=now),
@@ -32,11 +32,11 @@ PluggedMediaTable = Table(
     Column("purged", Boolean, index=True, default=False),
     Column("purgeable", Boolean, default=True))
 
-PluggedMediaDatasetAssociation = Table(
-    "plugged_media_dataset_association", metadata,
+StorageMediaDatasetAssociation = Table(
+    "storage_media_dataset_association", metadata,
     Column("id", Integer, primary_key=True),
     Column("dataset_id", Integer, ForeignKey("dataset.id"), index=True),
-    Column("plugged_media_id", Integer, ForeignKey("plugged_media.id"), index=True),
+    Column("storage_media_id", Integer, ForeignKey("storage_media.id"), index=True),
     Column("create_time", DateTime, default=now),
     Column("update_time", DateTime, default=now, onupdate=now),
     Column("deleted", Boolean, index=True, default=False),
@@ -49,30 +49,30 @@ def upgrade(migrate_engine):
     metadata.bind = migrate_engine
     metadata.reflect()
 
-    # Create PluggedMedia table
+    # Create StorageMedia table
     try:
-        PluggedMediaTable.create()
+        StorageMediaTable.create()
     except Exception as e:
-        log.error("Creating plugged_media table failed: %s" % str(e))
+        log.error("Creating storage_media table failed: %s" % str(e))
 
-    # Create PluggedMedia Association table.
+    # Create StorageMedia Association table.
     try:
-        PluggedMediaDatasetAssociation.create()
+        StorageMediaDatasetAssociation.create()
     except Exception as e:
-        log.error("Creating plugged_media_dataset_association table failed: %s" % str(e))
+        log.error("Creating storage_media_dataset_association table failed: %s" % str(e))
 
 
 def downgrade(migrate_engine):
     metadata.bind = migrate_engine
     metadata.reflect()
 
-    # Drop plugged_media table
+    # Drop storage_media table
     try:
-        PluggedMediaTable.drop()
+        StorageMediaTable.drop()
     except Exception as e:
-        log.debug("Dropping plugged_media table failed: %s" % str(e))
+        log.debug("Dropping storage_media table failed: %s" % str(e))
 
     try:
-        PluggedMediaDatasetAssociation.drop()
+        StorageMediaDatasetAssociation.drop()
     except Exception as e:
-        log.error("Dropping plugged_media_dataset_association table failed: %s" % str(e))
+        log.error("Dropping storage_media_dataset_association table failed: %s" % str(e))

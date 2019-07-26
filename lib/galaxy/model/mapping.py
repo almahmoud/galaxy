@@ -74,8 +74,8 @@ model.User.table = Table(
     Column("active", Boolean, index=True, default=True, nullable=False),
     Column("activation_token", TrimmedString(64), nullable=True, index=True))
 
-model.PluggedMedia.table = Table(
-    "plugged_media", metadata,
+model.StorageMedia.table = Table(
+    "storage_media", metadata,
     Column("id", Integer, primary_key=True),
     Column("create_time", DateTime, default=now),
     Column("update_time", DateTime, index=True, default=now, onupdate=now),
@@ -90,11 +90,11 @@ model.PluggedMedia.table = Table(
     Column("purged", Boolean, index=True, default=False),
     Column("purgeable", Boolean, default=True))
 
-model.PluggedMediaDatasetAssociation.table = Table(
-    "plugged_media_dataset_association", metadata,
+model.StorageMediaDatasetAssociation.table = Table(
+    "storage_media_dataset_association", metadata,
     Column("id", Integer, primary_key=True),
     Column("dataset_id", Integer, ForeignKey("dataset.id"), index=True),
-    Column("plugged_media_id", Integer, ForeignKey("plugged_media.id"), index=True),
+    Column("storage_media_id", Integer, ForeignKey("storage_media.id"), index=True),
     Column("create_time", DateTime, default=now),
     Column("update_time", DateTime, default=now, onupdate=now),
     Column("deleted", Boolean, index=True, default=False),
@@ -1709,12 +1709,12 @@ simple_mapping(model.HistoryDatasetAssociation,
     _metadata=deferred(model.HistoryDatasetAssociation.table.c._metadata)
 )
 
-simple_mapping(model.PluggedMediaDatasetAssociation,
+simple_mapping(model.StorageMediaDatasetAssociation,
     dataset=relation(model.Dataset,
-        primaryjoin=(model.Dataset.table.c.id == model.PluggedMediaDatasetAssociation.table.c.dataset_id), lazy=False),
-    plugged_media=relation(
-        model.PluggedMedia,
-        primaryjoin=(model.PluggedMediaDatasetAssociation.table.c.plugged_media_id == model.PluggedMedia.table.c.id))
+        primaryjoin=(model.Dataset.table.c.id == model.StorageMediaDatasetAssociation.table.c.dataset_id), lazy=False),
+    storage_media=relation(
+        model.StorageMedia,
+        primaryjoin=(model.StorageMediaDatasetAssociation.table.c.storage_media_id == model.StorageMedia.table.c.id))
 )
 
 simple_mapping(model.Dataset,
@@ -1738,15 +1738,15 @@ simple_mapping(model.Dataset,
     tags=relation(model.DatasetTagAssociation,
         order_by=model.DatasetTagAssociation.table.c.id,
         backref='datasets'),
-    plugged_media_associations=relation(
-        model.PluggedMediaDatasetAssociation,
-        primaryjoin=(model.Dataset.table.c.id == model.PluggedMediaDatasetAssociation.table.c.dataset_id)),
-    active_plugged_media_associations=relation(
-        model.PluggedMediaDatasetAssociation,
+    storage_media_associations=relation(
+        model.StorageMediaDatasetAssociation,
+        primaryjoin=(model.Dataset.table.c.id == model.StorageMediaDatasetAssociation.table.c.dataset_id)),
+    active_storage_media_associations=relation(
+        model.StorageMediaDatasetAssociation,
         primaryjoin=(
-            (model.Dataset.table.c.id == model.PluggedMediaDatasetAssociation.table.c.dataset_id) &
-            (model.PluggedMediaDatasetAssociation.table.c.deleted == false()) &
-            (model.PluggedMediaDatasetAssociation.table.c.purged == false()))
+            (model.Dataset.table.c.id == model.StorageMediaDatasetAssociation.table.c.dataset_id) &
+            (model.StorageMediaDatasetAssociation.table.c.deleted == false()) &
+            (model.StorageMediaDatasetAssociation.table.c.purged == false()))
     )
 )
 
@@ -1896,30 +1896,30 @@ mapper(model.User, model.User.table, properties=dict(
         order_by=desc(model.APIKeys.table.c.create_time)),
     cloudauthzs=relation(model.CloudAuthz,
                          primaryjoin=model.CloudAuthz.table.c.user_id == model.User.table.c.id),
-    plugged_media=relation(model.PluggedMedia),
-    active_plugged_media=relation(
-        model.PluggedMedia,
+    storage_media=relation(model.StorageMedia),
+    active_storage_media=relation(
+        model.StorageMedia,
         primaryjoin=(
-            (model.PluggedMedia.table.c.user_id == model.User.table.c.id) &
-            (model.PluggedMedia.table.c.deleted == false()) &
-            (model.PluggedMedia.table.c.purged == false())
+            (model.StorageMedia.table.c.user_id == model.User.table.c.id) &
+            (model.StorageMedia.table.c.deleted == false()) &
+            (model.StorageMedia.table.c.purged == false())
         ))
 ))
 
-mapper(model.PluggedMedia, model.PluggedMedia.table, properties=dict(
+mapper(model.StorageMedia, model.StorageMedia.table, properties=dict(
     user=relation(model.User),
     data_association=relation(
-        model.PluggedMediaDatasetAssociation,
-        primaryjoin=(model.PluggedMediaDatasetAssociation.table.c.plugged_media_id == model.PluggedMedia.table.c.id),
+        model.StorageMediaDatasetAssociation,
+        primaryjoin=(model.StorageMediaDatasetAssociation.table.c.storage_media_id == model.StorageMedia.table.c.id),
         lazy=False),
     active_data_association=relation(
-        model.PluggedMediaDatasetAssociation,
-        primaryjoin=((model.PluggedMediaDatasetAssociation.table.c.plugged_media_id == model.PluggedMedia.table.c.id) &
-                     (model.PluggedMediaDatasetAssociation.table.c.deleted == false()) &
-                     (model.PluggedMediaDatasetAssociation.table.c.purged == false()))),
+        model.StorageMediaDatasetAssociation,
+        primaryjoin=((model.StorageMediaDatasetAssociation.table.c.storage_media_id == model.StorageMedia.table.c.id) &
+                     (model.StorageMediaDatasetAssociation.table.c.deleted == false()) &
+                     (model.StorageMediaDatasetAssociation.table.c.purged == false()))),
     authz=relation(
         model.CloudAuthz,
-        primaryjoin=(model.PluggedMedia.table.c.authz_id == model.CloudAuthz.table.c.id))
+        primaryjoin=(model.StorageMedia.table.c.authz_id == model.CloudAuthz.table.c.id))
 ))
 
 mapper(model.PasswordResetToken, model.PasswordResetToken.table,

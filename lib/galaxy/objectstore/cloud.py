@@ -68,12 +68,12 @@ class Cloud(ObjectStore, CloudConfigMixin):
     """
     store_type = 'cloud'
 
-    def __init__(self, config, config_dict, plugged_media=None):
+    def __init__(self, config, config_dict, storage_media=None):
         super(Cloud, self).__init__(config, config_dict)
         self.transfer_progress = 0
 
-        if plugged_media is not None:
-            self._configure_using_plugged_media(plugged_media)
+        if storage_media is not None:
+            self._configure_using_storage_media(storage_media)
         else:
             bucket_dict = config_dict['bucket']
             connection_dict = config_dict.get('connection', {})
@@ -166,18 +166,18 @@ class Cloud(ObjectStore, CloudConfigMixin):
 
         return connection
 
-    def _configure_using_plugged_media(self, plugged_media):
-        credentials = plugged_media.get_credentials()
+    def _configure_using_storage_media(self, storage_media):
+        credentials = storage_media.get_credentials()
         self.access_key = credentials.get("AccessKeyId", None)
         self.secret_key = credentials.get("SecretAccessKey", None)
         self.session_token = credentials.get("SessionToken", None)
         if self.access_key is None or self.secret_key is None:
-            log.debug('The plugged media with ID `{}` is missing access and/or secret key(s).'.format(plugged_media.id))
-            raise KeyError('The selected S3 plugged media is missing access and/or secret key(s).')
-            # Note: if this exception is raised, it indicates that the plugged media `credentials` was not verified
-            # with the `is_credentials_valid` function when the plugged media was initialized, or when the
+            log.debug('The storage media with ID `{}` is missing access and/or secret key(s).'.format(storage_media.id))
+            raise KeyError('The selected S3 storage media is missing access and/or secret key(s).')
+            # Note: if this exception is raised, it indicates that the storage media `credentials` was not verified
+            # with the `is_credentials_valid` function when the storage media was initialized, or when the
             # `credentials` object was modified.
-        self.bucket = plugged_media.path
+        self.bucket = storage_media.path
         self.use_rr = False
         self.max_chunk_size = 250
         self.host = None

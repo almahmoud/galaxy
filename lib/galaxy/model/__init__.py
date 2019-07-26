@@ -601,27 +601,27 @@ class User(Dictifiable, RepresentById):
         return True
 
 
-class PluggedMedia(object):
+class StorageMedia(object):
     categories = Bunch(LOCAL="local",
                        S3="s3",
                        AZURE="azure")
 
     def __init__(self, user_id, category, path, authz_id, order, quota=0, usage=0, purgeable=True):
         """
-        Initializes a plugged media.
-        :param user_id: the Galaxy user id for whom this plugged media is defined.
-        :param category: is the type of this plugged media, its value is a key from `categories` bunch.
-        :param path: a path in the plugged media to be used. For instance, a path on a local disk, or bucket name
+        Initializes a storage media.
+        :param user_id: the Galaxy user id for whom this storage media is defined.
+        :param category: is the type of this storage media, its value is a key from `categories` bunch.
+        :param path: a path in the storage media to be used. For instance, a path on a local disk, or bucket name
         on AWS, or container name on Azure.
         :param authz_id: the id of AuthZ record to be used to obtain authorization to the media.
-        :param order: A key which defines the hierarchical relation between this and other plugged media defined
+        :param order: A key which defines the hierarchical relation between this and other storage media defined
         by the user. This key is used in Object Store to determine where to write to or read from a dataset. The
         value of this parameter can be any integer (+/-) excluding 0, as 0 is the default storage configuration
-        of the Galaxy instance. For instance, if use has defined multiple plugged media with the following orders:
-        -2, -1, 1, 2, 3, then object store tries read/write a dataset to a plugged media (PM) in the following order:
-        PM_3, PM_2, PM_1, Instance ObjectStore Configuration, PM_-1, PM_-2. It fals from one plugged media to another
-        if (a) plugged media is not available, or (b) usage + dataset_size > quota.
-        :param quota: sets the maximum data size to be persisted on this plugged media.
+        of the Galaxy instance. For instance, if use has defined multiple storage media with the following orders:
+        -2, -1, 1, 2, 3, then object store tries read/write a dataset to a storage media (PM) in the following order:
+        PM_3, PM_2, PM_1, Instance ObjectStore Configuration, PM_-1, PM_-2. It fals from one storage media to another
+        if (a) storage media is not available, or (b) usage + dataset_size > quota.
+        :param quota: sets the maximum data size to be persisted on this storage media.
         :param usage: sets the total size of the data Galaxy has persisted on the media.
         """
         self.user_id = user_id
@@ -637,15 +637,15 @@ class PluggedMedia(object):
         self._credentials = None
 
     def association_with_dataset(self, dataset):
-        qres = object_session(self).query(PluggedMediaDatasetAssociation).join(Dataset)\
-            .filter(PluggedMediaDatasetAssociation.table.c.dataset_id == dataset.id)\
-            .filter(PluggedMediaDatasetAssociation.table.c.plugged_media_id == self.id).all()
+        qres = object_session(self).query(StorageMediaDatasetAssociation).join(Dataset)\
+            .filter(StorageMediaDatasetAssociation.table.c.dataset_id == dataset.id)\
+            .filter(StorageMediaDatasetAssociation.table.c.storage_media_id == self.id).all()
         if len(qres) > 0:
-            log.error('An attempt to create a duplicate PluggedMediaDatasetAssociation is blocked. A duplicated file'
+            log.error('An attempt to create a duplicate StorageMediaDatasetAssociation is blocked. A duplicated file'
                       ', with the same or different file name as the original file, for the dataset with ID `{}` might'
-                      ' be uploaded to the plugged media with ID `{}`.'.format(self.id, dataset.id))
+                      ' be uploaded to the storage media with ID `{}`.'.format(self.id, dataset.id))
             return
-        association = PluggedMediaDatasetAssociation(dataset, self)
+        association = StorageMediaDatasetAssociation(dataset, self)
         object_session(self).add(association)
         object_session(self).flush()
 
@@ -680,7 +680,7 @@ class PluggedMedia(object):
             return
 
         if authnz_manager is None:
-            raise Exception("`authnz_manager` is required to obtain credentials to sign requests to the PluggedMedia.")
+            raise Exception("`authnz_manager` is required to obtain credentials to sign requests to the StorageMedia.")
 
         if sa_session is None:
             sa_session = object_session(self)
@@ -701,7 +701,7 @@ class PluggedMedia(object):
     @staticmethod
     def refresh_all_media_credentials(active_associations, authnz_manager, sa_session=None):
         for association in active_associations:
-            association.plugged_media.refresh_credentials(authnz_manager, sa_session)
+            association.storage_media.refresh_credentials(authnz_manager, sa_session)
 
     @staticmethod
     def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True):
@@ -731,10 +731,10 @@ class PluggedMedia(object):
         return None
 
 
-class PluggedMediaDatasetAssociation(object):
-    def __init__(self, dataset, plugged_media, deleted=False, purged=False):
+class StorageMediaDatasetAssociation(object):
+    def __init__(self, dataset, storage_media, deleted=False, purged=False):
         self.dataset_id = dataset.id
-        self.plugged_media_id = plugged_media.id
+        self.storage_media_id = storage_media.id
         self.dataset_path_on_media = None
         self.deleted = deleted
         self.purged = purged
@@ -1737,7 +1737,7 @@ class History(HasTags, Dictifiable, UsesAnnotations, HasName, RepresentById):
         else:
             if set_hid:
                 dataset.hid = self._next_hid()
-        if quota and self.user and len(dataset.dataset.active_plugged_media_associations) == 0:
+        if quota and self.user and len(dataset.dataset.active_storage_media_associations) == 0:
             self.user.adjust_total_disk_usage(dataset.quota_amount(self.user))
         dataset.history = self
         if genome_build not in [None, '?']:
@@ -2400,7 +2400,7 @@ class Dataset(StorableObject, RepresentById):
 
     def mark_deleted(self):
         self.deleted = True
-        self.plugged_media_associations.deleted = True
+        self.storage_media_associations.deleted = True
 
     # FIXME: sqlalchemy will replace this
     def _delete(self):
@@ -2425,8 +2425,8 @@ class Dataset(StorableObject, RepresentById):
         # TODO: purge metadata files
         self.deleted = True
         self.purged = True
-        self.plugged_media_associations.deleted = True
-        self.plugged_media_associations.purged = True
+        self.storage_media_associations.deleted = True
+        self.storage_media_associations.purged = True
 
     def get_access_roles(self, trans):
         roles = []
@@ -3201,7 +3201,7 @@ class HistoryDatasetAssociation(DatasetInstance, HasTags, Dictifiable, UsesAnnot
         # Gets an HDA disk usage, if the user does not already
         #   have an association of the same dataset
         if not self.dataset.library_associations and not self.purged and not self.dataset.purged:
-            # FIXME: check the active plugged media association of this dataset, and add to rval only if dataset is not stored on user's media.
+            # FIXME: check the active storage media association of this dataset, and add to rval only if dataset is not stored on user's media.
             for hda in self.dataset.history_associations:
                 if hda.id == self.id:
                     continue

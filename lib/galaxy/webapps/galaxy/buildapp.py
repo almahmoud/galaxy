@@ -310,29 +310,29 @@ def populate_api_routes(webapp, app):
     webapp.mapper.resource('group', 'groups', path_prefix='/api')
     webapp.mapper.resource_with_deleted('quota', 'quotas', path_prefix='/api')
 
-    webapp.mapper.connect('/api/plugged_media/',
+    webapp.mapper.connect('/api/storage_media/',
                           action='index',
-                          controller='plugged_media',
+                          controller='storage_media',
                           conditions=dict(method=["GET"]))
 
-    webapp.mapper.connect('/api/plugged_media/{encoded_media_id}',
-                          controller='plugged_media',
+    webapp.mapper.connect('/api/storage_media/{encoded_media_id}',
+                          controller='storage_media',
                           action='show',
                           conditions=dict(method=["GET"]))
 
-    webapp.mapper.connect('/api/plugged_media/',
+    webapp.mapper.connect('/api/storage_media/',
                           action='plug',
-                          controller='plugged_media',
+                          controller='storage_media',
                           conditions=dict(method=["POST"]))
 
-    webapp.mapper.connect('/api/plugged_media/{encoded_media_id}',
+    webapp.mapper.connect('/api/storage_media/{encoded_media_id}',
                           action='unplug',
-                          controller='plugged_media',
+                          controller='storage_media',
                           conditions=dict(method=["DELETE"]))
 
-    webapp.mapper.connect('/api/plugged_media/{encoded_media_id}',
+    webapp.mapper.connect('/api/storage_media/{encoded_media_id}',
                           action='update',
-                          controller="plugged_media",
+                          controller="storage_media",
                           conditions=dict(method=["PUT"]))
 
     webapp.mapper.connect('/api/cloud/authz/', action='index', controller='cloudauthz', conditions=dict(method=["GET"]))
