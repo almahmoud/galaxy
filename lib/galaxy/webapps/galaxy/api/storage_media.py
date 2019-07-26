@@ -172,7 +172,7 @@ class StorageMediaController(BaseAPIController):
         return []
 
     @expose_api
-    def unplug(self, trans, encoded_id, **kwargs):
+    def unplug(self, trans, encoded_media_id, **kwargs):
         """
         unplug(self, trans, id, **kwd)
         * DELETE /api/storage_media/{id}
@@ -191,18 +191,19 @@ class StorageMediaController(BaseAPIController):
         :return: The deleted or purged storage media.
         """
         try:
-            storage_media = self.storage_media_manager.get_owned(self.decode_id(encoded_id), trans.user)
+            decoded_id = self.decode_id(encoded_media_id)
+            media_to_delete = trans.sa_session.query(trans.app.model.StorageMedia).get(decoded_id)
             payload = kwargs.get('payload', None)
             purge = False if payload is None else string_as_bool(payload.get('purge', False))
             if purge:
-                self.storage_media_manager.purge(storage_media)
+                self.storage_media_manager.purge(media_to_delete)
             else:
-                self.storage_media_manager.delete(storage_media)
+                self.storage_media_manager.delete(media_to_delete)
             return self.storage_media_serializer.serialize_to_view(
-                storage_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
+                media_to_delete, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
         except exceptions.ObjectNotFound:
             trans.response.status = '404 Not Found'
-            msg = 'The storage media with ID `{}` does not exist.'.format(str(encoded_id))
+            msg = 'The storage media with ID `{}` does not exist.'.format(str(encoded_media_id))
             log.debug(msg)
         except exceptions.ConfigDoesNotAllowException as e:
             trans.response.status = '403 Forbidden'

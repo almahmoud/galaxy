@@ -50,10 +50,6 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         config["enable_quotas"] = True
         config["admin_users"] = ADMIN_USER_EMAIL
 
-    @classmethod
-    def setup_objectstore(cls):
-        pass
-
     def setUp(self):
         super(BaseUserBasedObjectStoreTestCase, self).setUp()
 
@@ -98,7 +94,7 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
     def get_files_count(directory):
         return sum(len(files) for _, _, files in os.walk(directory))
 
-    def plug_user_media(self, category, path, order, quota="0.0", usage="0.0", authz_id=None):
+    def plug_storage_media(self, category, path, order, quota="0.0", usage="0.0", authz_id=None):
         payload = {
             "category": category,
             "path": path,
@@ -110,7 +106,14 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         response = self._post(path="storage_media", data=payload)
         return json.loads(response.content)
 
-    def update_user_media(self, media, path=None, order=None, quota=None, authz_id=None):
+    def unplug_storage_media(self, id, purge=False):
+        payload = {
+            "purge": purge,
+        }
+        response = self._delete(path="storage_media/{}".format(id), data=payload)
+        return json.loads(response.content)
+
+    def update_storage_media(self, media, path=None, order=None, quota=None, authz_id=None):
         payload = {}
         if path is not None:
             payload["path"] = path
@@ -122,6 +125,44 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
             payload["authz_id"] = authz_id
         response = self._put(path="storage_media/{}".format(media.get("id")), data=payload)
         return json.loads(response.content)
+
+
+class PlugAndUnplugStorageMedia(BaseUserBasedObjectStoreTestCase):
+
+    def setUp(self):
+        super(PlugAndUnplugStorageMedia, self).setUp()
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
+
+    def test_plug_and_unplug(self):
+        """
+        This test asserts if a media can be plugged and Galaxy can store
+        data on it, then it asserts if that media can be unplugged and
+        Galaxy can fallback to the instance-wide storage for new datasets.
+
+        An important point here is that unplugging a media should NOT
+        touch data stored on the media. Accordingly, this test asserts
+        if data are still on the media after it is unplugged. 
+        """
+        with self._different_user("vahid@test.com"):
+            user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
+            storage_media = self.plug_storage_media("local", user_media_path, "1", quota="10240")
+
+            assert self.get_files_count(self.files_default_path) == 0
+            assert self.get_files_count(storage_media.get("path")) == 0
+
+            with self.dataset_populator.test_history() as history_id:
+                self.run_tool(history_id)
+
+                assert self.get_files_count(self.files_default_path) == 0
+                assert self.get_files_count(storage_media.get("path")) == EXPECTED_FILES_COUNT_IN_OUTPUT
+
+                self.unplug_storage_media(storage_media.get("id"))
+
+                self.run_tool(history_id)
+                assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT
+                assert self.get_files_count(storage_media.get("path")) == EXPECTED_FILES_COUNT_IN_OUTPUT
+
+                self.unplug_storage_media(storage_media.get("id"), purge=True)
 
 
 class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
@@ -149,7 +190,7 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
         """
         with self._different_user("vahid@test.com"):
             user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
-            storage_media = self.plug_user_media("local", user_media_path, "1", quota="10240")
+            storage_media = self.plug_storage_media("local", user_media_path, "1", quota="10240")
 
             # No file should be in the instance-wide storage before
             # execution of any tool.
@@ -257,7 +298,7 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
 
             with self._different_user(users_data[i]["email"]):
                 user_media_path = os.path.join(self._test_driver.mkdtemp(), users_data[i]["path"])
-                storage_media = self.plug_user_media("local", user_media_path, "1", quota="10240.0")
+                storage_media = self.plug_storage_media("local", user_media_path, "1", quota="10240.0")
                 users_data[i].update({"media": storage_media})
 
                 # No file should be in the instance-wide storage before
@@ -365,14 +406,14 @@ class DataDistributionAcrossUserAndInstanceWideMedia(BaseUserBasedObjectStoreTes
                 }
             )
 
-            media_1 = self.plug_user_media(
+            media_1 = self.plug_storage_media(
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_1/"),
                 order="1",
                 quota="1000.0"
             )
 
-            media_2 = self.plug_user_media(
+            media_2 = self.plug_storage_media(
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
                 order="-1",
@@ -485,7 +526,7 @@ class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
         :return:
         """
         with self._different_user(ADMIN_USER_EMAIL):
-            media = self.plug_user_media(
+            media = self.plug_storage_media(
                 category="local",
                 path=os.path.join(self._test_driver.mkdtemp(), "user/media/path/"),
                 order="1",
@@ -514,7 +555,7 @@ class UpdatesToMedia(BaseUserBasedObjectStoreTestCase):
                 assert self.get_files_count(self.files_default_path) == 1
 
                 new_quota = "1024000"
-                self.update_user_media(media, quota=new_quota)
+                self.update_storage_media(media, quota=new_quota)
                 assert json.loads(self._get(path="storage_media/{}".format(media.get("id"))).content
                                   ).get("quota") == new_quota
 
@@ -579,7 +620,7 @@ class FunctionalityForUsersWithoutStorageMediaIsIntact(BaseUserBasedObjectStoreT
                 hda2 = self.run_tool(history_id, content=content2)
                 assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT * 2
 
-                media = self.plug_user_media(
+                media = self.plug_storage_media(
                     category="local",
                     path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_1/"),
                     order="-1",
@@ -597,7 +638,7 @@ class FunctionalityForUsersWithoutStorageMediaIsIntact(BaseUserBasedObjectStoreT
                 assert self.get_files_count(media.get("path")) == 0
                 assert self.get_files_count(self.files_default_path) == EXPECTED_FILES_COUNT_IN_OUTPUT * 3
 
-                media = self.plug_user_media(
+                media = self.plug_storage_media(
                     category="local",
                     path=os.path.join(self._test_driver.mkdtemp(), "user/media/path_2/"),
                     order="1",
