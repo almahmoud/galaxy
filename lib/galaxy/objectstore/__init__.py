@@ -906,8 +906,7 @@ class HierarchicalObjectStore(NestedObjectStore):
 
 
 class UserObjectStore(ObjectStore):
-    # TODO: define a common cache and jobs directory for user-based objectstore per backend in config and pass it here.
-    def __init__(self, media_associations, instance_wide_objectstore, cache_path="/Users/vahid/Code/galaxy/user-object-store/database/users_cache", jobs_directory="/Users/vahid/Code/galaxy/user-object-store/database/users_jobs"):
+    def __init__(self, media_associations, instance_wide_objectstore, cache_path=None, jobs_directory=None):
         self.media_associations = media_associations
         self.backends = {}
         self.cache_path = cache_path
