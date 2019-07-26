@@ -155,7 +155,7 @@ class StorageMediaSerializer(base.ModelSerializer, deletable.PurgableSerializerM
             "deleted"    : lambda i, k, **c: i.deleted,
             "purged"     : lambda i, k, **c: i.purged,
             "purgeable"  : lambda i, k, **c: i.purgeable,
-            "authz_id"   : lambda i, k, **c: i.authz_id
+            "authz_id"   : lambda i, k, **c: self.app.security.encode_id(i.authz_id) if i.authz_id is not None else i.authz_id
         })
 
 
@@ -188,5 +188,5 @@ class StorageMediaDeserializer(sharable.SharableModelDeserializer, deletable.Pur
             trans.app.authnz_manager.can_user_assume_authz(trans, decoded_authz_id)
         except Exception as e:
             raise e
-
+        item.authz_id = decoded_authz_id
         return decoded_authz_id

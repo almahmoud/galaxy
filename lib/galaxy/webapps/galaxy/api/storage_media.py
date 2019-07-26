@@ -229,8 +229,8 @@ class StorageMediaController(BaseAPIController):
 
         try:
             media_to_update = trans.sa_session.query(trans.app.model.StorageMedia).get(decoded_id)
-            self.storage_media_deserializer.deserialize(media_to_update, payload, view="summary")
-            return self.storage_media_serializer.serialize_to_view(media_to_update, view="summary")
+            self.storage_media_deserializer.deserialize(media_to_update, payload, trans=trans, view="summary")
+            return self.storage_media_serializer.serialize_to_view(media_to_update, trans=trans, view="summary")
         except exceptions.MalformedId as e:
             raise e
         except Exception as e:

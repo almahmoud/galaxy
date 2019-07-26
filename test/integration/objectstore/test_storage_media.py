@@ -100,9 +100,10 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
             "path": path,
             "order": order,
             "quota": quota,
-            "usage": usage,
-            "authz_id": authz_id
+            "usage": usage
         }
+        if authz_id is not None:
+            payload["authz_id"] = authz_id
         response = self._post(path="storage_media", data=payload)
         return json.loads(response.content)
 
