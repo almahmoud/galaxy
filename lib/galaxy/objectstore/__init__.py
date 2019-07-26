@@ -921,7 +921,7 @@ class UserObjectStore(ObjectStore):
             if m.category == categories.LOCAL:
                 config = m.get_config(cache_path=self.cache_path, jobs_directory=self.jobs_directory)
                 self.backends[m.id] = DiskObjectStore(config=config, config_dict={"files_dir": m.path})
-            elif m.category == categories.S3 or m.category == categories.AZURE:
+            elif m.category == categories.AWS or m.category == categories.AZURE:
                 from .cloud import Cloud
                 self.backends[m.id] = Cloud(config=m.get_config(), config_dict={})
             else:

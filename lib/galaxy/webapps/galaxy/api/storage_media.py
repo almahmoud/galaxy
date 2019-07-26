@@ -143,6 +143,11 @@ class StorageMediaController(BaseAPIController):
                     authz_id = self.decode_id(encoded_authz_id)
                 except exceptions.MalformedId as e:
                     return "Invalid `authz_id`. {}".format(e)
+        else:
+            raise exceptions.RequestParameterInvalidException(
+                "Invalid category; received `{}`, expected either of the following categories {}.".format(
+                    category,
+                    [trans.app.model.StorageMedia.categories.AWS, trans.app.model.StorageMedia.categories.AZURE]))
 
         try:
             new_storage_media = self.storage_media_manager.create(

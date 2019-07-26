@@ -689,7 +689,7 @@ class StorageMedia(object):
         # The tokens returned by the following method are usually valid for
         # a short period of time (e.g., 3600 seconds); hence, it might be
         # good idea to re-use them within their lifetime.
-        if self.category == self.categories.S3 or self.category == self.categories.AZURE:
+        if self.category == self.categories.AWS or self.category == self.categories.AZURE:
             self._credentials = authnz_manager.get_cloud_access_credentials(self.authz, sa_session, self.user_id)
 
     def get_credentials(self):
