@@ -947,6 +947,9 @@ class UserObjectStore(ObjectStore):
                         return self.backends[m.id]
         return None
 
+    def __call_instance_wide_backend_method(self, method, obj, default, default_is_exception, ignore_media=True, **kwargs):
+        return self.instance_wide_objectstore.__getattribute__(method)(obj, default, default_is_exception, ignore_media=ignore_media, **kwargs)
+
     def exists(self, obj, **kwargs):
         for backend in self.backends.values():
             if backend.exists(obj, **kwargs):
@@ -960,40 +963,28 @@ class UserObjectStore(ObjectStore):
         else:
             return backend.size(obj, **kwargs)
 
-    def call_method(self, method, obj, default=None, default_is_exception=False, enough_quota_on_instance_level_media=True, **kwargs):
+    def call_method(self, method, obj, default=None, default_is_exception=False, **kwargs):
         """
         Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
         the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
         be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
         access and secret are invalid).
         """
-        from_order = None
         i = len(obj.active_storage_media_associations)
         rtv = default
         while i > 0:
             i -= 1
             try:
-                # TODO: should not the following be required only if the operation is create?
-                dataset_size = self.size(obj, obj.active_storage_media_associations[i].storage_media, **kwargs)
-
-                # TODO: should not try different media, because at this point a media is already chosen for the dataset, hence just use it regardless of the actions success.
-                # picked_media = self.pick_a_storage_media(
-                #     obj.active_storage_media_associations, from_order, dataset_size,
-                #     enough_quota_on_instance_level_media=enough_quota_on_instance_level_media)
                 picked_media = obj.active_storage_media_associations[i].storage_media
             except Exception as e:
                 log.exception("Failed to choose a storage media. Error: {}".format(e))
             else:
                 try:
                     if picked_media is not None:
-                        # picked_media.dataset_staging_path = self.backends[picked_media.id].get_filename(obj)
-                        from_order = picked_media.order
                         backend = self.backends[picked_media.id]
                         rtv = backend.__getattribute__(method)(obj, **kwargs)
 
                         if method == "create":
-                            # picked_media.association_with_dataset(obj)
-                            # TODO: should not call get_size() because obj is not created yet (this is create method).
                             dataset_size = obj.get_size()
                             picked_media.add_usage(dataset_size)
                     else:
@@ -1002,9 +993,7 @@ class UserObjectStore(ObjectStore):
                         elif method == "exists":
                             rtv = self.instance_wide_objectstore.exists(obj, ignore_media=True, **kwargs)
                         else:
-                            rtv = self.instance_wide_objectstore._call_method(method, obj, default, default_is_exception, ignore_media=True, **kwargs)
-                        # from_order = 0
-                        # self.backends[0].create(obj, **kwargs)
+                            rtv = self.__call_instance_wide_backend_method(method, obj, default, default_is_exception, **kwargs)
                     break
                 except Exception as e:
                     log.exception("Failed to persist dataset with ID `{}` on media category `{}` with the "
@@ -1014,65 +1003,6 @@ class UserObjectStore(ObjectStore):
                                                      if obj.active_storage_media_associations[i] is not None else "the instance-wide storage", e))
         # TODO: User should be notified if this operation has failed.
         return rtv
-
-    @staticmethod
-    def pick_a_storage_media(storage_media, from_order=None, dataset_size=0,
-                             enough_quota_on_instance_level_media=True):
-        """
-        This function receives a list of storage media, and decides which one to be
-        used for the object store operations. If a single storage media is given
-        (i.e., only one available/defined for the user, or user has explicitly
-        chosen a storage media), it returns that single option. However, if multiple
-        storage media are available, then it uses the `order`, and `quota` attributes of
-        the storage media to decide which one to be used.
-        NOTE: do not associate a dataset with a storage media before the dataset is
-        successfully persisted on the media.
-        :param storage_media: A list of storage media defined/available for the user.
-        :param from_order: is the order of a previously returned and failed storage media,
-        which this function should determine a storage media in a lower order to that.
-        :param dataset_size: is the file size of the dataset.
-        :param enough_quota_on_instance_level_media: Sets if user has enough quota on
-        the default media (i.e., the instance-level persistence media) to persist the dataset.
-        :return: A single storage media, or None (if no storage media is available, or
-        if object store should use instance-level config).
-        """
-        if storage_media is None:
-            return None
-        if not hasattr(storage_media, '__len__'):
-            log.exception("Expected a list of StorageMedia, but received an object of type `%s`." % type(storage_media))
-            return None
-        if len(storage_media) == 0:
-            return None
-        # The following condition is met when a media is already chosen
-        # (e.g., override or associated) for the dataset.
-        if len(storage_media) == 1:
-            return storage_media[0]
-
-        # The following is the procedure of choosing a storage media from a list of available options
-        # including instance-level object store configuration. This operation iterates from the highest
-        # to lowest order storage media (i.e., biggest positive and smallest negative order respectively)
-        # with `0` being the instance-level object store configuration. It falls from one storage media to
-        # another, if the available space on that media is not sufficient to store the given dataset.
-        storage_media.sort(key=lambda p: p.order)
-        from_order = from_order - 1 if from_order is not None else storage_media[-1].order
-        i = len(storage_media) - 1
-        while i >= 0:
-            if from_order >= storage_media[i].order > 0 or from_order <= storage_media[i].order < -1:
-                if storage_media[i].usage + dataset_size <= storage_media[i].quota:
-                    return storage_media[i]
-            else:
-                if enough_quota_on_instance_level_media:
-                    return None
-                elif storage_media[i].usage + dataset_size <= storage_media[i].quota:
-                    return storage_media[i]
-            i -= 1
-        if enough_quota_on_instance_level_media:
-            return None
-        elif storage_media[i].usage + dataset_size <= storage_media[i].quota:
-            # TODO: replace the following exception with a better approach.
-            raise Exception("User does not have enough quota to persist the dataset.")
-
-    # TODO: check exist, this method should be implemented differently as it checks for the existence of data in all the backends.
 
 
 def type_to_object_store_class(store, fsmon=False):
