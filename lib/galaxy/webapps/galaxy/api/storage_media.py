@@ -4,6 +4,7 @@ API operations on storage media.
 .. see also:: :class:`galaxy.model.StorageMedia`
 """
 import logging
+import os
 
 from galaxy import exceptions
 from galaxy.managers import (
@@ -143,7 +144,7 @@ class StorageMediaController(BaseAPIController):
                     authz_id = self.decode_id(encoded_authz_id)
                 except exceptions.MalformedId as e:
                     return "Invalid `authz_id`. {}".format(e)
-        else:
+        elif category != trans.app.model.StorageMedia.categories.LOCAL:
             raise exceptions.RequestParameterInvalidException(
                 "Invalid category; received `{}`, expected either of the following categories {}.".format(
                     category,
@@ -158,7 +159,15 @@ class StorageMediaController(BaseAPIController):
                 authz_id=authz_id,
                 quota=quota,
                 usage=usage,
-                purgeable=purgeable)
+                purgeable=purgeable,
+                cache_size=trans.app.config.default_storage_media_cache_size)
+            encoded_id = trans.app.security.encode_id(new_storage_media.id)
+            new_storage_media.jobs_directory = os.path.join(
+                trans.app.config.default_storage_media_jobs_directory,
+                encoded_id)
+            new_storage_media.cache_path = os.path.join(
+                trans.app.config.default_storage_media_cache_path,
+                encoded_id)
             view = self.storage_media_serializer.serialize_to_view(
                 new_storage_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
             # Do not use integer response codes (e.g., 200), as they are not accepted by the

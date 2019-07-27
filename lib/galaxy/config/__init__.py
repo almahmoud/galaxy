@@ -589,6 +589,17 @@ class GalaxyAppConfiguration(BaseAppConfiguration):
         self.object_store_cache_path = resolve_path(kwargs.get("object_store_cache_path", "database/object_store_cache"), self.data_dir)
         self.object_store_store_by = kwargs.get("object_store_store_by", "id")
 
+        # Configuration options for new storage media uses can plug-in.
+        self.default_storage_media_jobs_directory = kwargs.get(
+            "default_storage_media_jobs_directory",
+            "database/job_working_directory_storage_media")
+        self.default_storage_media_cache_path = kwargs.get(
+            "default_storage_media_cache_path",
+            "database/storage_media_cache")
+        self.default_storage_media_cache_size = kwargs.get(
+            "default_storage_media_cache_size",
+            100)
+
         # Handle AWS-specific config options for backward compatibility
         if kwargs.get('aws_access_key', None) is not None:
             self.os_access_key = kwargs.get('aws_access_key', None)

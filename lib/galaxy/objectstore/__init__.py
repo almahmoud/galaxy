@@ -906,11 +906,9 @@ class HierarchicalObjectStore(NestedObjectStore):
 
 
 class UserObjectStore(ObjectStore):
-    def __init__(self, media_associations, instance_wide_objectstore, cache_path=None, jobs_directory=None):
+    def __init__(self, media_associations, instance_wide_objectstore):
         self.media_associations = media_associations
         self.backends = {}
-        self.cache_path = cache_path
-        self.jobs_directory = jobs_directory
         self.__configure_store()
         self.instance_wide_objectstore = instance_wide_objectstore
 
@@ -919,15 +917,30 @@ class UserObjectStore(ObjectStore):
             m = association.storage_media
             categories = m.__class__.categories
             if m.category == categories.LOCAL:
-                config = m.get_config(cache_path=self.cache_path, jobs_directory=self.jobs_directory)
+                config = m.get_config(cache_path=m.cache_path, jobs_directory=m.jobs_directory)
                 self.backends[m.id] = DiskObjectStore(config=config, config_dict={"files_dir": m.path})
             elif m.category == categories.AWS or m.category == categories.AZURE:
                 from .cloud import Cloud
-                self.backends[m.id] = Cloud(config=m.get_config(), config_dict={})
+                config = {
+                    "provider": m.category,
+                    "auth": m.get_credentials(),
+                    "bucket": {
+                        "name": m.path
+                    },
+                    "cache": {
+                        "path": m.cache_path,
+                        "size": m.cache_size
+                    }
+                }
+
+                self.backends[m.id] = Cloud(
+                    config=m.get_config(cache_path=m.cache_path, jobs_directory=m.jobs_directory),
+                    config_dict=config
+                )
             else:
-                raise Exception("Received a storage media with a un-recognized category type ({}). "
-                                "The category type should match either of the following categories: {}"
-                                .format(self.media.category, categories))
+                raise Exception("Received a storage media with an un-recognized category type `{}`. "
+                                "Expected of the following categories: {}"
+                                .format(m.category, categories))
 
     def __get_containing_media(self, obj, media, **kwargs):
         """

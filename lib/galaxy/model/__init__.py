@@ -606,7 +606,7 @@ class StorageMedia(object):
                        AWS="aws",
                        AZURE="azure")
 
-    def __init__(self, user_id, category, path, authz_id, order, quota=0, usage=0, purgeable=True):
+    def __init__(self, user_id, category, path, authz_id, order, quota=0, usage=0, purgeable=True, jobs_directory=None, cache_path=None, cache_size=100,):
         """
         Initializes a storage media.
         :param user_id: the Galaxy user id for whom this storage media is defined.
@@ -634,6 +634,9 @@ class StorageMedia(object):
         self.deleted = False
         self.purged = False
         self.purgeable = purgeable
+        self.jobs_directory = jobs_directory
+        self.cache_path = cache_path
+        self.cache_size = cache_size
         self._credentials = None
 
     def association_with_dataset(self, dataset):
