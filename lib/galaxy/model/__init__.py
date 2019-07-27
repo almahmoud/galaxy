@@ -641,7 +641,7 @@ class StorageMedia(object):
         self.credentials = credentials
         self.credentials_update_time = credentials_update_time
 
-    def association_with_dataset(self, dataset):
+    def associate_with_dataset(self, dataset):
         qres = object_session(self).query(StorageMediaDatasetAssociation).join(Dataset)\
             .filter(StorageMediaDatasetAssociation.table.c.dataset_id == dataset.id)\
             .filter(StorageMediaDatasetAssociation.table.c.storage_media_id == self.id).all()
