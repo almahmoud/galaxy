@@ -603,8 +603,7 @@ class User(Dictifiable, RepresentById):
 
 class StorageMedia(object):
     categories = Bunch(LOCAL="local",
-                       AWS="aws",
-                       AZURE="azure")
+                       AWS="aws")
 
     def __init__(self, user_id, category, path, authz_id, order, quota=0,
                  usage=0, purgeable=True, jobs_directory=None, cache_path=None,

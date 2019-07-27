@@ -68,31 +68,28 @@ class Cloud(ObjectStore, CloudConfigMixin):
     """
     store_type = 'cloud'
 
-    def __init__(self, config, config_dict, storage_media=None):
+    def __init__(self, config, config_dict):
         super(Cloud, self).__init__(config, config_dict)
         self.transfer_progress = 0
 
-        if storage_media is not None:
-            self._configure_using_storage_media(storage_media)
-        else:
-            bucket_dict = config_dict['bucket']
-            connection_dict = config_dict.get('connection', {})
-            cache_dict = config_dict['cache']
+        bucket_dict = config_dict['bucket']
+        connection_dict = config_dict.get('connection', {})
+        cache_dict = config_dict['cache']
 
-            self.provider = config_dict["provider"]
-            self.credentials = config_dict["auth"]
-            self.bucket_name = bucket_dict.get('name')
-            self.use_rr = bucket_dict.get('use_reduced_redundancy', False)
-            self.max_chunk_size = bucket_dict.get('max_chunk_size', 250)
+        self.provider = config_dict["provider"]
+        self.credentials = config_dict["auth"]
+        self.bucket_name = bucket_dict.get('name')
+        self.use_rr = bucket_dict.get('use_reduced_redundancy', False)
+        self.max_chunk_size = bucket_dict.get('max_chunk_size', 250)
 
-            self.host = connection_dict.get('host', None)
-            self.port = connection_dict.get('port', 6000)
-            self.multipart = connection_dict.get('multipart', True)
-            self.is_secure = connection_dict.get('is_secure', True)
-            self.conn_path = connection_dict.get('conn_path', '/')
+        self.host = connection_dict.get('host', None)
+        self.port = connection_dict.get('port', 6000)
+        self.multipart = connection_dict.get('multipart', True)
+        self.is_secure = connection_dict.get('is_secure', True)
+        self.conn_path = connection_dict.get('conn_path', '/')
 
-            self.cache_size = cache_dict.get('size', -1)
-            self.staging_path = cache_dict.get('path') or self.config.object_store_cache_path
+        self.cache_size = cache_dict.get('size', -1)
+        self.staging_path = cache_dict.get('path') or self.config.object_store_cache_path
 
         self._initialize()
 
@@ -122,9 +119,18 @@ class Cloud(ObjectStore, CloudConfigMixin):
     def _get_connection(provider, credentials):
         log.debug("Configuring `{}` Connection".format(provider))
         if provider == "aws":
-            config = {"aws_access_key": credentials["access_key"],
-                      "aws_secret_key": credentials["secret_key"],
-                      "aws_session_token": credentials.get("session_token", None)}
+            access_key = credentials.get("access_key")
+            if access_key is None:
+                access_key = credentials.get("AccessKeyId")
+            secret_key = credentials.get("secret_key")
+            if secret_key is None:
+                secret_key = credentials.get("SecretAccessKey")
+            session_token = credentials.get("session_token")
+            if session_token is None:
+                session_token = credentials.get("SessionToken")
+            config = {"aws_access_key": access_key,
+                      "aws_secret_key": secret_key,
+                      "aws_session_token": session_token}
             connection = CloudProviderFactory().create_provider(ProviderList.AWS, config)
         elif provider == "azure":
             config = {"azure_subscription_id": credentials["subscription_id"],
@@ -165,28 +171,6 @@ class Cloud(ObjectStore, CloudConfigMixin):
         # incorrect, invalid, or unauthorized credentials.
 
         return connection
-
-    def _configure_using_storage_media(self, storage_media):
-        credentials = storage_media.get_credentials()
-        self.access_key = credentials.get("AccessKeyId", None)
-        self.secret_key = credentials.get("SecretAccessKey", None)
-        self.session_token = credentials.get("SessionToken", None)
-        if self.access_key is None or self.secret_key is None:
-            log.debug('The storage media with ID `{}` is missing access and/or secret key(s).'.format(storage_media.id))
-            raise KeyError('The selected S3 storage media is missing access and/or secret key(s).')
-            # Note: if this exception is raised, it indicates that the storage media `credentials` was not verified
-            # with the `is_credentials_valid` function when the storage media was initialized, or when the
-            # `credentials` object was modified.
-        self.bucket = storage_media.path
-        self.use_rr = False
-        self.max_chunk_size = 250
-        self.host = None
-        self.port = 6000
-        self.multipart = True
-        self.is_secure = True
-        self.conn_path = '/'
-        self.cache_size = -1
-        self.staging_path = self.config.object_store_cache_path
 
     @classmethod
     def parse_xml(clazz, config_xml):
