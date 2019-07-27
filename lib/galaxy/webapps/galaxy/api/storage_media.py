@@ -134,8 +134,7 @@ class StorageMediaController(BaseAPIController):
             return "Expect a float number for the `usage` attribute, but received `{}`.".format(payload.get("usage"))
 
         authz_id = None
-        if category in [trans.app.model.StorageMedia.categories.AWS,
-                        trans.app.model.StorageMedia.categories.AZURE]:
+        if category in [trans.app.model.StorageMedia.categories.AWS]:
             encoded_authz_id = payload.get("authz_id", None)
             if encoded_authz_id is None:
                 missing_arguments.append("authz_id")
@@ -148,7 +147,7 @@ class StorageMediaController(BaseAPIController):
             raise exceptions.RequestParameterInvalidException(
                 "Invalid category; received `{}`, expected either of the following categories {}.".format(
                     category,
-                    [trans.app.model.StorageMedia.categories.AWS, trans.app.model.StorageMedia.categories.AZURE]))
+                    [trans.app.model.StorageMedia.categories.AWS]))
 
         try:
             new_storage_media = self.storage_media_manager.create(
