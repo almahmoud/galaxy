@@ -7,6 +7,7 @@ from __future__ import print_function
 import datetime
 import logging
 
+from galaxy.model.custom_types import JSONType
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, Numeric, Table, TEXT
 
 
@@ -33,7 +34,9 @@ StorageMediaTable = Table(
     Column("purgeable", Boolean, default=True),
     Column("jobs_directory", TEXT),
     Column("cache_path", TEXT),
-    Column("cache_size", Integer))
+    Column("cache_size", Integer),
+    Column("credentials", JSONType),
+    Column("credentials_update_time", DateTime))
 
 StorageMediaDatasetAssociation = Table(
     "storage_media_dataset_association", metadata,

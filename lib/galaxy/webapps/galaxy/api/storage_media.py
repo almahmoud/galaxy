@@ -168,6 +168,7 @@ class StorageMediaController(BaseAPIController):
             new_storage_media.cache_path = os.path.join(
                 trans.app.config.default_storage_media_cache_path,
                 encoded_id)
+            self.storage_media_manager.session().flush()
             view = self.storage_media_serializer.serialize_to_view(
                 new_storage_media, user=trans.user, trans=trans, **self._parse_serialization_params(kwargs, "summary"))
             # Do not use integer response codes (e.g., 200), as they are not accepted by the

@@ -936,6 +936,10 @@ class JobWrapper(HasResourceParameters):
             selected_media = model.StorageMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
             if selected_media is not None:
                 selected_media.association_with_dataset(dataset)
+                selected_media.refresh_all_media_credentials(
+                    dataset.active_storage_media_associations,
+                    self.app.authnz_manager,
+                    self.sa_session)
 
     def can_split(self):
         # Should the job handler split this job up?

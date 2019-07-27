@@ -606,7 +606,9 @@ class StorageMedia(object):
                        AWS="aws",
                        AZURE="azure")
 
-    def __init__(self, user_id, category, path, authz_id, order, quota=0, usage=0, purgeable=True, jobs_directory=None, cache_path=None, cache_size=100,):
+    def __init__(self, user_id, category, path, authz_id, order, quota=0,
+                 usage=0, purgeable=True, jobs_directory=None, cache_path=None,
+                 cache_size=100, credentials=None, credentials_update_time=None):
         """
         Initializes a storage media.
         :param user_id: the Galaxy user id for whom this storage media is defined.
@@ -637,7 +639,8 @@ class StorageMedia(object):
         self.jobs_directory = jobs_directory
         self.cache_path = cache_path
         self.cache_size = cache_size
-        self._credentials = None
+        self.credentials = credentials
+        self.credentials_update_time = credentials_update_time
 
     def association_with_dataset(self, dataset):
         qres = object_session(self).query(StorageMediaDatasetAssociation).join(Dataset)\
@@ -677,9 +680,9 @@ class StorageMedia(object):
         )
         return config
 
-    def refresh_credentials(self, authnz_manager=None, sa_session=None):
+    def refresh_credentials(self, authnz_manager=None, sa_session=None, flush=True):
         if self.category == self.categories.LOCAL:
-            self._credentials = None
+            self.credentials = None
             return
 
         if authnz_manager is None:
@@ -693,11 +696,14 @@ class StorageMedia(object):
         # a short period of time (e.g., 3600 seconds); hence, it might be
         # good idea to re-use them within their lifetime.
         if self.category == self.categories.AWS or self.category == self.categories.AZURE:
-            self._credentials = authnz_manager.get_cloud_access_credentials(self.authz, sa_session, self.user_id)
+            self.credentials = authnz_manager.get_cloud_access_credentials(self.authz, sa_session, self.user_id)
+            self.credentials_update_time = datetime.now()
+            if flush:
+                sa_session.flush()
 
     def get_credentials(self):
         try:
-            return self._credentials
+            return self.credentials
         except NameError:
             return None
 

@@ -91,7 +91,9 @@ model.StorageMedia.table = Table(
     Column("purgeable", Boolean, default=True),
     Column("jobs_directory", TEXT),
     Column("cache_path", TEXT),
-    Column("cache_size", Integer))
+    Column("cache_size", Integer),
+    Column("credentials", JSONType),
+    Column("credentials_update_time", DateTime))
 
 model.StorageMediaDatasetAssociation.table = Table(
     "storage_media_dataset_association", metadata,
