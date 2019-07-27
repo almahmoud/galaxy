@@ -11,7 +11,6 @@ from base import integration_util  # noqa: I202
 from base.populators import (
     DatasetPopulator,
 )
-
 from test_jobs import _get_datasets_files_in_path
 
 TEST_INPUT_FILES_CONTENT = "abc def 123 456"
@@ -142,7 +141,7 @@ class PlugAndUnplugStorageMedia(BaseUserBasedObjectStoreTestCase):
 
         An important point here is that unplugging a media should NOT
         touch data stored on the media. Accordingly, this test asserts
-        if data are still on the media after it is unplugged. 
+        if data are still on the media after it is unplugged.
         """
         with self._different_user("vahid@test.com"):
             user_media_path = os.path.join(self._test_driver.mkdtemp(), "user/media/path/")
@@ -293,7 +292,7 @@ class DataPersistedOnUserMedia(BaseUserBasedObjectStoreTestCase):
             rnd_user_id = self._rnd_str_generator()
             users_data[i] = {
                 "email": "vahid_{}@test.com".format(rnd_user_id),
-                "path":  "user_{}/media/path/".format(rnd_user_id),
+                "path": "user_{}/media/path/".format(rnd_user_id),
                 "content": self._rnd_str_generator(10)
             }
 

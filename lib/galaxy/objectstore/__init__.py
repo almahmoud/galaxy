@@ -984,44 +984,13 @@ class UserObjectStore(ObjectStore):
             return backend.size(obj, **kwargs)
 
     def call_method(self, method, obj, default=None, default_is_exception=False, **kwargs):
-        """
-        Iterates until: (a) a backend is determined and the dataset is successfully persisted on, or (b) if all
-        the available backends are exhausted and then raise an exception. Backend are exhausted if (a) none can
-        be chosen (e.g., if usage quota on the storage is hit), or (b) object store fails to use it (e.g., S3
-        access and secret are invalid).
-        """
-        i = len(obj.active_storage_media_associations)
-        rtv = default
-        while i > 0:
-            i -= 1
-            try:
-                picked_media = obj.active_storage_media_associations[i].storage_media
-            except Exception as e:
-                log.exception("Failed to choose a storage media. Error: {}".format(e))
-            else:
-                try:
-                    if picked_media is not None:
-                        backend = self.backends[picked_media.id]
-                        rtv = backend.__getattribute__(method)(obj, **kwargs)
+        picked_media = obj.active_storage_media_associations[0].storage_media
+        backend = self.backends[picked_media.id]
+        rtv = backend.__getattribute__(method)(obj, **kwargs)
 
-                        if method == "create":
-                            dataset_size = obj.get_size()
-                            picked_media.add_usage(dataset_size)
-                    else:
-                        if method == "create":
-                            rtv = self.instance_wide_objectstore.create(obj, ignore_media=True, **kwargs)
-                        elif method == "exists":
-                            rtv = self.instance_wide_objectstore.exists(obj, ignore_media=True, **kwargs)
-                        else:
-                            rtv = self.__call_instance_wide_backend_method(method, obj, default, default_is_exception, **kwargs)
-                    break
-                except Exception as e:
-                    log.exception("Failed to persist dataset with ID `{}` on media category `{}` with the "
-                                  "following error; now trying another persistence option, if any available. "
-                                  "Error: {}".format(obj.id,
-                                                     "{} with ID {}".format(picked_media.category, picked_media.id)
-                                                     if obj.active_storage_media_associations[i] is not None else "the instance-wide storage", e))
-        # TODO: User should be notified if this operation has failed.
+        if method == "create":
+            dataset_size = obj.get_size()
+            picked_media.add_usage(dataset_size)
         return rtv
 
 

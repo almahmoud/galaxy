@@ -7,8 +7,9 @@ from __future__ import print_function
 import datetime
 import logging
 
-from galaxy.model.custom_types import JSONType
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, Numeric, Table, TEXT
+
+from galaxy.model.custom_types import JSONType
 
 
 now = datetime.datetime.utcnow
