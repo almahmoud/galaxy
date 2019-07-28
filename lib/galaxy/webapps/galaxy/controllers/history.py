@@ -340,7 +340,12 @@ class HistoryController(BaseUIController, SharableMixin, UsesAnnotations, UsesIt
                 if purge and trans.app.config.allow_user_dataset_purge:
                     for hda in history.datasets:
                         if trans.user:
-                            trans.user.adjust_total_disk_usage(-hda.quota_amount(trans.user))
+                            if len(hda.dataset.active_storage_media_associations) == 0:
+                                trans.user.adjust_total_disk_usage(-hda.quota_amount(trans.user))
+                            else:
+                                for assoc in hda.dataset.active_storage_media_associations:
+                                    assoc.storage_media.add_usage(-hda.quota_amount(trans.user))
+                                    trans.sa_session.flush()
                         hda.purged = True
                         trans.sa_session.add(hda)
                         trans.log_event("HDA id %s has been purged" % hda.id)
@@ -1070,7 +1075,12 @@ class HistoryController(BaseUIController, SharableMixin, UsesAnnotations, UsesIt
                 if not hda.deleted or hda.purged:
                     continue
                 if trans.user:
-                    trans.user.adjust_total_disk_usage(-hda.quota_amount(trans.user))
+                    if len(hda.dataset.active_storage_media_associations) == 0:
+                        trans.user.adjust_total_disk_usage(-hda.quota_amount(trans.user))
+                    else:
+                        for assoc in hda.dataset.active_storage_media_associations:
+                            assoc.storage_media.add_usage(-hda.quota_amount(trans.user))
+                            trans.sa_session.flush()
                 hda.purged = True
                 trans.sa_session.add(hda)
                 trans.log_event("HDA id %s has been purged" % hda.id)

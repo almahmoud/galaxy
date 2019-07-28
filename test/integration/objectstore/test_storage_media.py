@@ -126,6 +126,9 @@ class BaseUserBasedObjectStoreTestCase(integration_util.IntegrationTestCase):
         response = self._put(path="storage_media/{}".format(media.get("id")), data=payload)
         return json.loads(response.content)
 
+    def get_media_usage(self, media_id):
+        return float(json.loads(self._get(path="storage_media/{}".format(media_id)).content).get("usage"))
+
 
 class PlugAndUnplugStorageMedia(BaseUserBasedObjectStoreTestCase):
 
@@ -657,3 +660,88 @@ class FunctionalityForUsersWithoutStorageMediaIsIntact(BaseUserBasedObjectStoreT
                 self.run_tool(history_id, hda=hda2)
 
                 assert self.get_files_count(media.get("path")) == 1 + (2 * (EXPECTED_FILES_COUNT_IN_OUTPUT - 1))
+
+
+class QuotaAndUsageOfMedia(BaseUserBasedObjectStoreTestCase):
+
+    def setUp(self):
+        super(QuotaAndUsageOfMedia, self).setUp()
+        self.dataset_populator = DatasetPopulator(self.galaxy_interactor)
+
+    def test_if_media_usage_is_correctly_updated_when_dataset_is_purged(self):
+        """
+        This test asserts if:
+            a- a purged dataset is correctly deleted from a storage media;
+            b- the `usage` attribute of the media is changed to reflect the purged dataset;
+            c- purging a dataset on instance-wide storage, does not cause purging datasets on
+            storage media, and vice-versa.
+        """
+        with self._different_user("vahid@test.com"):
+            media = self.plug_storage_media(
+                category="local",
+                path=os.path.join(self._test_driver.mkdtemp(), "user/media/path/"),
+                order="1",
+                quota="1024.0"
+            )
+
+            assert self.get_files_count(media.get("path")) == 0
+            assert self.get_files_count(self.files_default_path) == 0
+
+            assert self.get_media_usage(media.get("id")) == 0
+
+            with self.dataset_populator.test_history() as history_id:
+                hda1 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size(1024))
+                self.dataset_populator.wait_for_history(history_id)
+
+                # The uploaded dataset should be persisted on the plugged media
+                # (because of the quota, usage, and order attributes of the media),
+                # and its size should be reflected in the media's usage attribute.
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 0
+                media_usage_after_first_dataset = self.get_media_usage(media.get("id"))
+                assert media_usage_after_first_dataset > 1000
+
+                hda2 = self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size(1024))
+                self.dataset_populator.wait_for_history(history_id)
+
+                # Second dataset should be persisted on the instance-wide storage
+                # because the first dataset consumed all the quota on the media,
+                # hence the second available option is the instance-wide storage.
+                # Also, since this dataset is uploaded to the instance-wide storage,
+                # it should not increase the usage of the plugged media.
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_media_usage(media.get("id")) == media_usage_after_first_dataset
+
+                # Purge the first created dataset, we expect it to be delete
+                # from the plugged media, and the media usage should be reduced.
+                self._delete("histories/{}/contents/{}".format(history_id, hda1["id"]), data={"purge": True})
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 0
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_media_usage(media.get("id")) == 0
+
+                # Uploading a third dataset, and since the first dataset
+                # is purged and has freed quota on the plugged media,
+                # hence the third dataset should be persisted on the
+                # plugged media because its usage is less than its quota now.
+                self.dataset_populator.new_dataset(history_id, content=self._create_content_of_size(1024))
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 1
+                assert self.get_media_usage(media.get("id")) > 1000
+
+                # Purging the second dataset, it should be deleted from
+                # the instance-wide storage without deleting any datasets
+                # from the plugged storage media, and importantly, not
+                # reduce the media usage. Hence, asserting if usage/quota
+                # changes between instance-wide storage (stored in Galaxy
+                # User type) and plugged storage media are are independent.
+                self._delete("histories/{}/contents/{}".format(history_id, hda2["id"]), data={"purge": True})
+                self.dataset_populator.wait_for_history(history_id)
+
+                assert self.get_files_count(media.get("path")) == 1
+                assert self.get_files_count(self.files_default_path) == 0
+                assert self.get_media_usage(media.get("id")) > 1000

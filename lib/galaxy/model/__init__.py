@@ -1745,8 +1745,14 @@ class History(HasTags, Dictifiable, UsesAnnotations, HasName, RepresentById):
         else:
             if set_hid:
                 dataset.hid = self._next_hid()
-        if quota and self.user and len(dataset.dataset.active_storage_media_associations) == 0:
-            self.user.adjust_total_disk_usage(dataset.quota_amount(self.user))
+        if quota and self.user:
+            if len(dataset.dataset.active_storage_media_associations) == 0:
+                self.user.adjust_total_disk_usage(dataset.quota_amount(self.user))
+            else:
+                for assoc in dataset.dataset.active_storage_media_associations:
+                    assoc.storage_media.add_usage(dataset.quota_amount(self.user))
+                    object_session(self).flush()
+
         dataset.history = self
         if genome_build not in [None, '?']:
             self.genome_build = genome_build
@@ -1761,9 +1767,18 @@ class History(HasTags, Dictifiable, UsesAnnotations, HasName, RepresentById):
         optimize = len(datasets) > 1 and parent_id is None and all_hdas and set_hid
         if optimize:
             self.__add_datasets_optimized(datasets, genome_build=genome_build)
-            if quota and self.user:
-                disk_usage = sum([d.get_total_size() for d in datasets])
-                self.user.adjust_total_disk_usage(disk_usage)
+            if self.user:
+                disk_usage = 0
+                for dataset in datasets:
+                    if len(dataset.dataset.active_storage_media_associations) == 0:
+                        disk_usage += dataset.get_total_size()
+                    else:
+                        for assoc in dataset.dataset.active_storage_media_associations:
+                            assoc.storage_media.add_usage(dataset.get_total_size())
+                            if flush:
+                                sa_session.flush()
+                if quota and disk_usage > 0:
+                    self.user.adjust_total_disk_usage(disk_usage)
             sa_session.add_all(datasets)
             if flush:
                 sa_session.flush()

@@ -1653,6 +1653,10 @@ class JobWrapper(HasResourceParameters):
                 dataset_assoc.dataset.dataset.set_total_size()
                 if len(dataset_assoc.dataset.dataset.active_storage_media_associations) == 0:
                     collected_bytes += dataset_assoc.dataset.dataset.get_total_size()
+                else:
+                    for assoc in dataset_assoc.dataset.dataset.active_storage_media_associations:
+                        assoc.storage_media.add_usage(dataset_assoc.dataset.dataset.get_total_size())
+                        self.sa_session.flush()
 
         if job.user:
             job.user.adjust_total_disk_usage(collected_bytes)

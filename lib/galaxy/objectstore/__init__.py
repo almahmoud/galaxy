@@ -987,10 +987,6 @@ class UserObjectStore(ObjectStore):
         picked_media = obj.active_storage_media_associations[0].storage_media
         backend = self.backends[picked_media.id]
         rtv = backend.__getattribute__(method)(obj, **kwargs)
-
-        if method == "create":
-            dataset_size = obj.get_size()
-            picked_media.add_usage(dataset_size)
         return rtv
 
 
