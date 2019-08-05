@@ -933,7 +933,12 @@ class JobWrapper(HasResourceParameters):
                 usage = self.app.quota_agent.get_usage(user=job.user, history=job.history)
                 eqi = usage < quota
             all_user_media = job.user.active_storage_media
-            selected_media = model.StorageMedia.choose_media_for_association(all_user_media, enough_quota_on_instance_level_media=eqi)
+            is_history_shared = self.sa_session.query(
+                self.app.model.HistoryUserShareAssociation).filter_by(history_id=job.history.id).first() is not None
+            selected_media = model.StorageMedia.choose_media_for_association(
+                all_user_media,
+                enough_quota_on_instance_level_media=eqi,
+                history_shared=is_history_shared)
             if selected_media is not None:
                 selected_media.associate_with_dataset(dataset)
                 selected_media.refresh_all_media_credentials(

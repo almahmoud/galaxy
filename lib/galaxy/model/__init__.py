@@ -712,8 +712,13 @@ class StorageMedia(object):
             association.storage_media.refresh_credentials(authnz_manager, sa_session)
 
     @staticmethod
-    def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True):
+    def choose_media_for_association(media, dataset_size=0, enough_quota_on_instance_level_media=True, history_shared=False):
         if media is None or len(media) == 0:
+            return None
+
+        if history_shared:
+            log.debug("The history to which this dataset belongs to, is shared with another user, "
+                      "hence cannot choose a user's storage media.")
             return None
 
         i = len(media) - 1
