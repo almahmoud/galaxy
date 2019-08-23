@@ -376,6 +376,8 @@ def create_paramfile(trans, uploaded_datasets):
         tool_params.append(params)
     with tempfile.NamedTemporaryFile(mode="w", prefix='upload_params_', delete=False) as fh:
         json_file_path = fh.name
+        print("\n\n\n\n\n\n\n\n\nALEX\n\n\n\n\n\n")
+        print(fh.name)
         dump(tool_params, fh)
     return json_file_path
 
