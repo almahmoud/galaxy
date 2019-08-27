@@ -338,7 +338,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 # Handle URLs as files
                 filename = file_element.get('url', None)
                 if filename:
-                    tmp_file = NamedTemporaryFile(prefix='TTDT_URL_%s-' % self.name)
+                    tmp_file = NamedTemporaryFile(prefix='TTDT_URL_%s-' % self.name, delete=False)
                     try:
                         tmp_file.write(requests.get(filename, timeout=url_timeout).text)
                     except Exception as e:
@@ -347,6 +347,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                     log.debug('Loading Data Table URL "%s" as filename "%s".', filename, tmp_file.name)
                     filename = tmp_file.name
                     tmp_file.flush()
+                    tmp_file.close()
             filename = file_path = expand_here_template(filename, here=self.here)
             found = False
             if file_path is None:
@@ -399,7 +400,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 log.debug("Filename '%s' already exists in filenames (%s), not adding", filename, list(self.filenames.keys()))
             # Remove URL tmp file
             if tmp_file is not None:
-                tmp_file.close()
+                os.remove(tmp_file.name)
 
     def merge_tool_data_table(self, other_table, allow_duplicates=True, persist=False, persist_on_error=False, entry_source=None, **kwd):
         assert self.columns == other_table.columns, "Merging tabular data tables with non matching columns is not allowed: %s:%s != %s:%s" % (self.name, self.columns, other_table.name, other_table.columns)
