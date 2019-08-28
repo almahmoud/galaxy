@@ -76,6 +76,14 @@ class ToolBoxSearch(object):
             if tool:
                 add_doc_kwds = self._create_doc(tool_id=tool_id, tool=tool, index_help=index_help)
                 writer.add_document(**add_doc_kwds)
+        print("\n\n\n\n\nALEX\n\n\n")
+        print(writer)
+        print(str(writer))
+        print(writer.temp_storage())
+        import time
+        for i in range(0,60):
+          print(i)
+          time.sleep(1)
         writer.commit()
         log.debug("Toolbox index finished %s", execution_timer)
 
