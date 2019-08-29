@@ -80,9 +80,10 @@ class ToolBoxSearch(object):
         print(writer)
         print(str(writer))
         print(writer.temp_storage())
-        import time
+        import time, os, tempfile
         for i in range(0,60):
           print(i)
+          print(os.listdir(tempfile.tempdir))
           time.sleep(1)
         writer.commit()
         log.debug("Toolbox index finished %s", execution_timer)
