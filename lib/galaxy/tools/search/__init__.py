@@ -69,19 +69,36 @@ class ToolBoxSearch(object):
         self.index_count += 1
         execution_timer = ExecutionTimer()
         writer = self.index.writer()
+        import time, os, tempfile
+        print(os.listdir(tempfile.tempdir))
+        for i in range(0,20):
+          print("after writer")
+          print(i)
+          print(writer.temp_storage())
+          print(os.listdir(tempfile.tempdir))
+          time.sleep(1)
         for tool_id in tool_cache._removed_tool_ids:
+            print("removed" + str(tool_id))
             writer.delete_by_term('id', tool_id)
         for tool_id in tool_cache._new_tool_ids:
+            print("looking for " + tool_id)
             tool = tool_cache.get_tool_by_id(tool_id)
             if tool:
+                print("adding" + str(tool_id))
                 add_doc_kwds = self._create_doc(tool_id=tool_id, tool=tool, index_help=index_help)
                 writer.add_document(**add_doc_kwds)
-        print("\n\n\n\n\nALEX\n\n\n")
+                for i in range(0,20):
+                    print("added document")
+                    print(writer.temp_storage())
+                    print(i)
+                    print(os.listdir(tempfile.tempdir))
+                    time.sleep(1)
+        print("\n\n\n\nALEX\n\n\n")
         print(writer)
         print(str(writer))
         print(writer.temp_storage())
-        import time, os, tempfile
-        for i in range(0,60):
+        for i in range(0,20):
+          print("before commit")
           print(i)
           print(os.listdir(tempfile.tempdir))
           time.sleep(1)
