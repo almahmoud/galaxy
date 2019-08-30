@@ -165,6 +165,9 @@ class ToolBoxSearch(object):
 
 
 def _temp_storage(self, name=None):
+    current_tempdir = tempfile.tempdir
+    tempfile.tempdir = '/tmp/'
     path = tempfile.mkdtemp()
     tempstore = FileStorage(path)
+    tempfile.tempdir = current_tempdir if current_tempdir else None
     return tempstore.create()
