@@ -87,12 +87,6 @@ class ToolBoxSearch(object):
                 print("adding" + str(tool_id))
                 add_doc_kwds = self._create_doc(tool_id=tool_id, tool=tool, index_help=index_help)
                 writer.add_document(**add_doc_kwds)
-                for i in range(0,20):
-                    print("added document")
-                    print(writer.temp_storage())
-                    print(i)
-                    print(os.listdir(tempfile.tempdir))
-                    time.sleep(1)
         print("\n\n\n\nALEX\n\n\n")
         print(writer)
         print(str(writer))
@@ -191,6 +185,9 @@ class ToolBoxSearch(object):
 
 
 def _temp_storage(self, name=None):
+    current_tempdir = tempfile.tempdir
+    tempfile.tempdir = '/tmp/'
     path = tempfile.mkdtemp()
     tempstore = FileStorage(path)
+    tempfile.tempdir = current_tempdir if current_tempdir else None
     return tempstore.create()
