@@ -48,6 +48,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             k8s_galaxy_instance_id=dict(map=str),
             k8s_timeout_seconds_job_deletion=dict(map=int, valid=lambda x: int > 0, default=30),
             k8s_job_api_version=dict(map=str, default=DEFAULT_JOB_API_VERSION),
+            k8s_job_ttl_secs_after_finished=dict(map=int, valid=lambda x: x is None or int(x) >= 0, default=300),
             k8s_supplemental_group_id=dict(map=str),
             k8s_pull_policy=dict(map=str, default="Default"),
             k8s_run_as_user_id=dict(map=str, valid=lambda s: s == "$uid" or s.isdigit()),
@@ -226,6 +227,9 @@ class KubernetesJobRunner(AsynchronousJobRunner):
         If the job hangs around unlimited it will be ended after k8s wall time limit, which sets activeDeadlineSeconds"""
         k8s_job_spec = {"template": self.__get_k8s_job_spec_template(ajs),
                         "activeDeadlineSeconds": int(self.runner_params['k8s_walltime_limit'])}
+        job_ttl = self.runner_params["k8s_job_ttl_secs_after_finished"]
+        if self.runner_params["k8s_cleanup_job"] != "never" and job_ttl is not None:
+            k8s_job_spec["ttlSecondsAfterFinished"] = job_ttl
         return k8s_job_spec
 
     def __get_k8s_job_spec_template(self, ajs):
@@ -494,13 +498,18 @@ class KubernetesJobRunner(AsynchronousJobRunner):
         job.scale(replicas=0)
         if (k8s_cleanup_job == "always" or
                 (k8s_cleanup_job == "onsuccess" and not job_failed)):
-            delete_options = {
-                "apiVersion": "v1",
-                "kind": "DeleteOptions",
-                "propagationPolicy": "Background"
-            }
-            r = job.api.delete(json=delete_options, **job.api_kwargs())
-            job.api.raise_for_status(r)
+            job_ttl = self.runner_params["k8s_job_ttl_secs_after_finished"]
+            if job_ttl is None:
+                delete_options = {
+                    "apiVersion": "v1",
+                    "kind": "DeleteOptions",
+                    "propagationPolicy": "Background"
+                }
+                r = job.api.delete(json=delete_options, **job.api_kwargs())
+                job.api.raise_for_status(r)
+            else:
+                # Let the k8s ttl take care of deletion
+                pass
 
     def __job_failed_due_to_walltime_limit(self, job):
         conditions = job.obj['status']['conditions']
