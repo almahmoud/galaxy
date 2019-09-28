@@ -148,7 +148,7 @@ class ContainerFinder(object):
             key = "%s_image" % container_type
         if key in destination_info:
             return destination_info.get(key)
-        elif "%s_image_default" in destination_info:
+        elif "%s_image_default" % container_type in destination_info:
             return self.__build_container_id_from_parts(container_type, destination_info, mode="default")
         return None
 
@@ -159,7 +159,7 @@ class ContainerFinder(object):
 
         # TODO: Right now this assumes all containers available when a
         # container type is - there should be more thought put into this.
-        # Checking which are availalbe - settings policies for what can be
+        # Checking which are available - settings policies for what can be
         # auto-fetched, etc....
         return CONTAINER_CLASSES[container_type](container_id, self.app_info, tool_info, destination_info, job_info, container_description)
 
@@ -178,7 +178,7 @@ class ContainerRegistry(object):
 
     def __init__(self, app_info):
         self.resolver_classes = self.__resolvers_dict()
-        self.enable_beta_mulled_containers = app_info.enable_beta_mulled_containers
+        self.enable_mulled_containers = app_info.enable_mulled_containers
         self.app_info = app_info
         self.container_resolvers = self.__build_container_resolvers(app_info)
 
@@ -203,7 +203,7 @@ class ContainerRegistry(object):
             ExplicitContainerResolver(self.app_info),
             ExplicitSingularityContainerResolver(self.app_info),
         ]
-        if self.enable_beta_mulled_containers:
+        if self.enable_mulled_containers:
             default_resolvers.extend([
                 CachedMulledDockerContainerResolver(self.app_info, namespace="biocontainers"),
                 CachedMulledDockerContainerResolver(self.app_info, namespace="local"),

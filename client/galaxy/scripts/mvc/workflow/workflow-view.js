@@ -47,6 +47,7 @@ function reset_tool_search(initValue) {
 
         // Reset search input.
         tool_menu_frame.find("#search-spinner").hide();
+        tool_menu_frame.find("#search-clear-btn").show();
         if (initValue) {
             var search_input = tool_menu_frame.find("#tool-search-query");
             search_input.val("search tools");
@@ -155,6 +156,7 @@ export default Backbone.View.extend({
                     }
                     // Start a new ajax-request in X ms
                     $("#search-spinner").show();
+                    $("#search-clear-btn").hide();
                     this.timer = window.setTimeout(() => {
                         $.get(
                             self.urls.tool_search,
@@ -209,6 +211,7 @@ export default Backbone.View.extend({
                                     $("#search-no-results").show();
                                 }
                                 $("#search-spinner").hide();
+                                $("#search-clear-btn").show();
                             },
                             "json"
                         );
@@ -360,6 +363,8 @@ export default Backbone.View.extend({
                 () => (window.location = `${getAppRoot()}workflows/run?id=${self.options.id}`)
             );
             $("#workflow-save-button").click(() => save_current_workflow());
+            $("#workflow-report-button").click(() => edit_report());
+            $("#workflow-canvas-button").click(() => edit_canvas());
             make_popupmenu($("#workflow-options-button"), {
                 "Save As": workflow_save_as,
                 "Edit Attributes": function() {
@@ -418,6 +423,16 @@ export default Backbone.View.extend({
             self.canvas_manager.draw_overview();
         }
 
+        function edit_report() {
+            $(".workflow-canvas-content").hide();
+            $(".workflow-report-content").show();
+        }
+
+        function edit_canvas() {
+            $(".workflow-canvas-content").show();
+            $(".workflow-report-content").hide();
+        }
+
         // On load, set the size to the pref stored in local storage if it exists
         var overview_size = localStorage.getItem("overview-size");
         if (overview_size !== undefined) {
@@ -450,7 +465,7 @@ export default Backbone.View.extend({
 
         // Tool menu
         $("div.toolSectionBody").hide();
-        $("div.toolSectionTitle > span").wrap("<a href='#'></a>");
+        $("div.toolSectionTitle > span").wrap("<a href='javascript:void(0)' role='button'></a>");
         var last_expanded = null;
         $("div.toolSectionTitle").each(function() {
             var body = $(this).next("div.toolSectionBody");
@@ -491,7 +506,7 @@ export default Backbone.View.extend({
         var $section = $(
             '<div class="toolSectionWrapper">' +
                 '<div class="toolSectionTitle">' +
-                '<a href="#"><span>Workflows</span></a>' +
+                '<a href="javascript:void(0)" role="button"><span>Workflows</span></a>' +
                 "</div>" +
                 '<div class="toolSectionBody">' +
                 '<div class="toolSectionBg"/>' +
@@ -527,7 +542,8 @@ export default Backbone.View.extend({
                     }
                 });
                 var $add = $("<a/>")
-                    .attr("href", "#")
+                    .attr("href", "javascript:void(0)")
+                    .attr("role", "button")
                     .html(workflow.name)
                     .on("click", () => {
                         self.add_node_for_subworkflow(workflow.latest_id, workflow.name);
@@ -761,7 +777,7 @@ export default Backbone.View.extend({
 
     prebuildNode: function(type, title_text, content_id) {
         var self = this;
-        var $f = $("<div class='toolForm toolFormInCanvas'/>");
+        var $f = $(`<div class='toolForm toolFormInCanvas' tabindex = '0' aria-label='Node ${title_text}'/>`);
         var $title = $(`<div class='toolFormTitle unselectable'><span class='nodeTitle'>${title_text}</div></div>`);
         add_node_icon($title.find(".nodeTitle"), type);
         $f.append($title);
@@ -771,15 +787,19 @@ export default Backbone.View.extend({
         var node = new Node(this, { element: $f });
         node.type = type;
         node.content_id = content_id;
-        var tmp = `<div><img height='16' align='middle' src='${getAppRoot()}static/images/loading_small_white_bg.gif'/> loading tool info...</div>`;
+        var tmp = `<div><img alt="loading" height='16' align='middle' src='${getAppRoot()}static/images/loading_small_white_bg.gif'/> loading tool info...</div>`;
         $f.find(".toolFormBody").append(tmp);
         // Fix width to computed width
         // Now add floats
         var buttons = $("<div class='buttons' style='float: right;'></div>");
-        buttons.append($(`<div class="sr-only"><a href="#right">Node Details</a></div>`));
         if (type !== "subworkflow") {
             buttons.append(
-                $("<div/>")
+                $("<a/>")
+                    .attr({
+                        "aria-label": "clone node",
+                        role: "button",
+                        href: "javascript:void(0)"
+                    })
                     .addClass("fa-icon-button fa fa-files-o node-clone")
                     .click(e => {
                         node.clone();
@@ -787,7 +807,12 @@ export default Backbone.View.extend({
             );
         }
         buttons.append(
-            $("<div/>")
+            $("<a/>")
+                .attr({
+                    "aria-label": "destroy node",
+                    role: "button",
+                    href: "javascript:void(0)"
+                })
                 .addClass("fa-icon-button fa fa-times node-destroy")
                 .click(e => {
                     node.destroy();

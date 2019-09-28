@@ -4,6 +4,7 @@ Support for running a tool in Galaxy via an internal job management system
 import copy
 import datetime
 import errno
+import json
 import logging
 import os
 import pwd
@@ -16,7 +17,6 @@ import time
 import traceback
 from abc import ABCMeta, abstractmethod
 from json import loads
-from tempfile import NamedTemporaryFile
 from xml.etree import ElementTree
 
 import six
@@ -27,20 +27,25 @@ import galaxy
 from galaxy import model, util
 from galaxy.datatypes import sniff
 from galaxy.exceptions import ObjectInvalid, ObjectNotFound
+from galaxy.job_execution.datasets import (
+    DatasetPath,
+    NullDatasetPathRewriter,
+    OutputsToWorkingDirectoryPathRewriter,
+    TaskPathRewriter
+)
+from galaxy.job_execution.output_collect import collect_extra_files
 from galaxy.jobs.actions.post import ActionBox
 from galaxy.jobs.mapper import JobMappingException, JobRunnerMapper
 from galaxy.jobs.runners import BaseJobRunner, JobState
 from galaxy.metadata import get_metadata_compute_strategy
 from galaxy.objectstore import ObjectStorePopulator
 from galaxy.tool_util.deps import requirements
+from galaxy.tool_util.output_checker import check_output, DETECTED_JOB_STATE
 from galaxy.util import safe_makedirs, unicodify
 from galaxy.util.bunch import Bunch
 from galaxy.util.expressions import ExpressionContext
 from galaxy.util.xml_macros import load
-from galaxy.web.stack.handlers import ConfiguresHandlers
-from .datasets import (DatasetPath, NullDatasetPathRewriter,
-    OutputsToWorkingDirectoryPathRewriter, TaskPathRewriter)
-from .output_checker import check_output, DETECTED_JOB_STATE
+from galaxy.web_stack.handlers import ConfiguresHandlers
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +168,10 @@ def job_config_xml_to_dict(config, root):
         environment["metrics"] = metrics_to_dict
 
         params = JobConfiguration.get_params(config, destination)
+        # Handle legacy XML enabling sudo when using docker by default.
+        if "docker_sudo" not in params:
+            params["docker_sudo"] = "true"
+
         # TODO: handle enabled/disabled in configure_from
         environment['params'] = params
         environment['env'] = JobConfiguration.get_envs(destination)
@@ -871,7 +880,7 @@ class JobWrapper(HasResourceParameters):
         self.output_hdas_and_paths = None
         self.tool_provided_job_metadata = None
         # Wrapper holding the info required to restore and clean up from files used for setting metadata externally
-        self.external_output_metadata = get_metadata_compute_strategy(self.app, job.id)
+        self.external_output_metadata = get_metadata_compute_strategy(self.app.config, job.id)
         self.job_runner_mapper = JobRunnerMapper(self, queue.dispatcher.url_to_destination, self.app.job_config)
         self.params = None
         if job.params:
@@ -916,6 +925,10 @@ class JobWrapper(HasResourceParameters):
     @property
     def requires_containerization(self):
         return util.asbool(self.get_destination_configuration("require_container", "False"))
+
+    @property
+    def use_metadata_binary(self):
+        return util.asbool(self.get_destination_configuration('use_metadata_binary', "False"))
 
     def can_split(self):
         # Should the job handler split this job up?
@@ -989,6 +1002,15 @@ class JobWrapper(HasResourceParameters):
         param_dict = self.tool.params_from_strings(param_dict, self.app)
         return param_dict
 
+    @property
+    def validate_outputs(self):
+        job = self.get_job()
+        for p in job.parameters:
+            if p.name == "__validate_outputs__":
+                log.info("validate... %s" % p.value)
+                return loads(p.value)
+        return False
+
     def get_version_string_path(self):
         return os.path.abspath(os.path.join(self.working_directory, COMMAND_VERSION_FILENAME))
 
@@ -1046,6 +1068,7 @@ class JobWrapper(HasResourceParameters):
         # if the server was stopped and restarted before the job finished
         job.command_line = unicodify(self.command_line)
         job.dependencies = self.tool.dependencies
+        self.interactivetools = getattr(tool_evaluator, 'interactivetools', None)
         self.sa_session.add(job)
         self.sa_session.flush()
         # Return list of all extra files
@@ -1089,6 +1112,10 @@ class JobWrapper(HasResourceParameters):
             self.__working_directory = self.app.object_store.get_filename(
                 job, base_dir='job_work', dir_only=True, obj_dir=True)
         return self.__working_directory
+
+    def working_directory_exists(self):
+        job = self.get_job()
+        return self.app.object_store.exists(job, base_dir='job_work', dir_only=True, obj_dir=True)
 
     @property
     def tool_working_directory(self):
@@ -1170,8 +1197,12 @@ class JobWrapper(HasResourceParameters):
             self.job_destination
         except JobMappingException as exc:
             log.debug("(%s) fail(): Job destination raised JobMappingException('%s'), caching fake '__fail__' "
-                      "destination for completion of fail method", self.get_id_tag(), str(exc.failure_message))
+                      "destination for completion of fail method", self.get_id_tag(), unicodify(exc.failure_message))
             self.job_runner_mapper.cached_job_destination = JobDestination(id='__fail__')
+
+        # Might be AssertionError or other exception
+        message = str(message)
+        working_directory_exists = self.working_directory_exists()
 
         # if the job was deleted, don't fail it
         if not job.state == job.states.DELETED:
@@ -1185,13 +1216,13 @@ class JobWrapper(HasResourceParameters):
                 etype, evalue, tb = sys.exc_info()
 
             outputs_to_working_directory = util.asbool(self.get_destination_configuration("outputs_to_working_directory", False))
-            if outputs_to_working_directory and not self.__link_file_check():
+            if outputs_to_working_directory and not self.__link_file_check() and working_directory_exists:
                 for dataset_path in self.get_output_fnames():
                     try:
                         shutil.move(dataset_path.false_path, dataset_path.real_path)
-                        log.debug("fail(): Moved %s to %s" % (dataset_path.false_path, dataset_path.real_path))
+                        log.debug("fail(): Moved %s to %s", dataset_path.false_path, dataset_path.real_path)
                     except (IOError, OSError) as e:
-                        log.error("fail(): Missing output file in working directory: %s" % e)
+                        log.error("fail(): Missing output file in working directory: %s", unicodify(e))
             for dataset_assoc in job.output_datasets + job.output_library_datasets:
                 dataset = dataset_assoc.dataset
                 self.sa_session.refresh(dataset)
@@ -1228,7 +1259,8 @@ class JobWrapper(HasResourceParameters):
                 # the partial files to the object store regardless of whether job.state == DELETED
                 self.__update_output(job, dataset, clean_only=True)
 
-        self._fix_output_permissions()
+        if working_directory_exists:
+            self._fix_output_permissions()
         self._report_error()
         # Perform email action even on failure.
         for pja in [pjaa.post_job_action for pjaa in job.post_job_actions if pjaa.post_job_action.action_type == "EmailAction"]:
@@ -1390,6 +1422,87 @@ class JobWrapper(HasResourceParameters):
         job.object_store_id = object_store_populator.object_store_id
         self._setup_working_directory(job=job)
 
+    def _finish_dataset(self, output_name, dataset, job, context, final_job_state, remote_metadata_directory):
+        implicit_collection_jobs = job.implicit_collection_jobs_association
+        purged = dataset.dataset.purged
+        if not purged and dataset.dataset.external_filename is None:
+            trynum = 0
+            while trynum < self.app.config.retry_job_output_collection:
+                try:
+                    # Attempt to short circuit NFS attribute caching
+                    os.stat(dataset.dataset.file_name)
+                    os.chown(dataset.dataset.file_name, os.getuid(), -1)
+                    trynum = self.app.config.retry_job_output_collection
+                except (OSError, ObjectNotFound) as e:
+                    trynum += 1
+                    log.warning('Error accessing dataset with ID %i, will retry: %s', dataset.dataset.id, unicodify(e))
+                    time.sleep(2)
+        if getattr(dataset, "hidden_beneath_collection_instance", None):
+            dataset.visible = False
+        dataset.blurb = 'done'
+        dataset.peek = 'no peek'
+        dataset.info = (dataset.info or '')
+        if context['stdout'].strip():
+            # Ensure white space between entries
+            dataset.info = dataset.info.rstrip() + "\n" + context['stdout'].strip()
+        if context['stderr'].strip():
+            # Ensure white space between entries
+            dataset.info = dataset.info.rstrip() + "\n" + context['stderr'].strip()
+        dataset.tool_version = self.version_string
+        dataset.set_size()
+        if 'uuid' in context:
+            dataset.dataset.uuid = context['uuid']
+        self.__update_output(job, dataset)
+        if not purged:
+            collect_extra_files(self.object_store, dataset, self.working_directory)
+        if job.states.ERROR == final_job_state:
+            dataset.blurb = "error"
+            if not implicit_collection_jobs:
+                # Only unhide dataset outputs that are not part of a implicit collection
+                dataset.mark_unhidden()
+        elif not purged:
+            # If the tool was expected to set the extension, attempt to retrieve it
+            if dataset.ext == 'auto':
+                dataset.extension = context.get('ext', 'data')
+                dataset.init_meta(copy_from=dataset)
+            # if a dataset was copied, it won't appear in our dictionary:
+            # either use the metadata from originating output dataset, or call set_meta on the copies
+            # it would be quicker to just copy the metadata from the originating output dataset,
+            # but somewhat trickier (need to recurse up the copied_from tree), for now we'll call set_meta()
+            retry_internally = util.asbool(self.get_destination_configuration("retry_metadata_internally", True))
+            metadata_set_successfully = self.external_output_metadata.external_metadata_set_successfully(dataset, output_name, self.sa_session, working_directory=self.working_directory)
+            if retry_internally and not metadata_set_successfully:
+                # If Galaxy was expected to sniff type and didn't - do so.
+                if dataset.ext == "_sniff_":
+                    extension = sniff.handle_uploaded_dataset_file(dataset.dataset.file_name, self.app.datatypes_registry)
+                    dataset.extension = extension
+
+                # call datatype.set_meta directly for the initial set_meta call during dataset creation
+                dataset.datatype.set_meta(dataset, overwrite=False)
+            elif (job.states.ERROR != final_job_state and not metadata_set_successfully):
+                dataset._state = model.Dataset.states.FAILED_METADATA
+            else:
+                self.external_output_metadata.load_metadata(dataset, output_name, self.sa_session, working_directory=self.working_directory, remote_metadata_directory=remote_metadata_directory)
+            line_count = context.get('line_count', None)
+            try:
+                # Certain datatype's set_peek methods contain a line_count argument
+                dataset.set_peek(line_count=line_count)
+            except TypeError:
+                # ... and others don't
+                dataset.set_peek()
+        else:
+            # Handle purged datasets.
+            dataset.blurb = "empty"
+            if dataset.ext == 'auto':
+                dataset.extension = context.get('ext', 'txt')
+
+        for context_key in TOOL_PROVIDED_JOB_METADATA_KEYS:
+            if context_key in context:
+                context_value = context[context_key]
+                setattr(dataset, context_key, context_value)
+
+        self.sa_session.add(dataset)
+
     def finish(
         self,
         tool_stdout,
@@ -1399,6 +1512,7 @@ class JobWrapper(HasResourceParameters):
         job_stderr=None,
         check_output_detected_state=None,
         remote_metadata_directory=None,
+        job_metrics_directory=None,
     ):
         """
         Called to indicate that the associated command has been run. Updates
@@ -1453,7 +1567,8 @@ class JobWrapper(HasResourceParameters):
             if not os.path.exists(version_filename):
                 version_filename = self.get_version_string_path_legacy()
             if os.path.exists(version_filename):
-                self.version_string = open(version_filename).read()
+                with open(version_filename, 'rb') as fh:
+                    self.version_string = galaxy.util.shrink_and_unicodify(fh.read())
                 os.unlink(version_filename)
 
         outputs_to_working_directory = util.asbool(self.get_destination_configuration("outputs_to_working_directory", False))
@@ -1475,101 +1590,15 @@ class JobWrapper(HasResourceParameters):
                         return self.fail("Job %s's output dataset(s) could not be read" % job.id)
 
         job_context = ExpressionContext(dict(stdout=job.stdout, stderr=job.stderr))
-        implicit_collection_jobs = job.implicit_collection_jobs_association
         for dataset_assoc in job.output_datasets + job.output_library_datasets:
             context = self.get_dataset_finish_context(job_context, dataset_assoc)
             # should this also be checking library associations? - can a library item be added from a history before the job has ended? -
             # lets not allow this to occur
             # need to update all associated output hdas, i.e. history was shared with job running
             for dataset in dataset_assoc.dataset.dataset.history_associations + dataset_assoc.dataset.dataset.library_associations:
-                purged = dataset.dataset.purged
-                if not purged and dataset.dataset.external_filename is None:
-                    trynum = 0
-                    while trynum < self.app.config.retry_job_output_collection:
-                        try:
-                            # Attempt to short circuit NFS attribute caching
-                            os.stat(dataset.dataset.file_name)
-                            os.chown(dataset.dataset.file_name, os.getuid(), -1)
-                            trynum = self.app.config.retry_job_output_collection
-                        except (OSError, ObjectNotFound) as e:
-                            trynum += 1
-                            log.warning('Error accessing dataset with ID %i, will retry: %s', dataset.dataset.id, e)
-                            time.sleep(2)
-                if getattr(dataset, "hidden_beneath_collection_instance", None):
-                    dataset.visible = False
-                dataset.blurb = 'done'
-                dataset.peek = 'no peek'
-                dataset.info = (dataset.info or '')
-                if context['stdout'].strip():
-                    # Ensure white space between entries
-                    dataset.info = dataset.info.rstrip() + "\n" + context['stdout'].strip()
-                if context['stderr'].strip():
-                    # Ensure white space between entries
-                    dataset.info = dataset.info.rstrip() + "\n" + context['stderr'].strip()
-                dataset.tool_version = self.version_string
-                dataset.set_size()
-                if 'uuid' in context:
-                    dataset.dataset.uuid = context['uuid']
-                self.__update_output(job, dataset)
-                if not purged:
-                    self._collect_extra_files(dataset.dataset, self.working_directory)
-                # Handle composite datatypes of auto_primary_file type
-                if dataset.datatype.composite_type == 'auto_primary_file' and not dataset.has_data():
-                    try:
-                        with NamedTemporaryFile(mode='w') as temp_fh:
-                            temp_fh.write(dataset.datatype.generate_primary_file(dataset))
-                            temp_fh.flush()
-                            self.object_store.update_from_file(dataset.dataset, file_name=temp_fh.name, create=True)
-                            dataset.set_size()
-                    except Exception as e:
-                        log.warning('Unable to generate primary composite file automatically for %s: %s', dataset.dataset.id, e)
-                if job.states.ERROR == final_job_state:
-                    dataset.blurb = "error"
-                    if not implicit_collection_jobs:
-                        # Only unhide dataset outputs that are not part of a implicit collection
-                        dataset.mark_unhidden()
-                elif not purged:
-                    # If the tool was expected to set the extension, attempt to retrieve it
-                    if dataset.ext == 'auto':
-                        dataset.extension = context.get('ext', 'data')
-                        dataset.init_meta(copy_from=dataset)
-                    # if a dataset was copied, it won't appear in our dictionary:
-                    # either use the metadata from originating output dataset, or call set_meta on the copies
-                    # it would be quicker to just copy the metadata from the originating output dataset,
-                    # but somewhat trickier (need to recurse up the copied_from tree), for now we'll call set_meta()
-                    retry_internally = util.asbool(self.get_destination_configuration("retry_metadata_internally", True))
-                    metadata_set_successfully = self.external_output_metadata.external_metadata_set_successfully(dataset, dataset_assoc.name, self.sa_session, working_directory=self.working_directory)
-                    if retry_internally and not metadata_set_successfully:
-                        # If Galaxy was expected to sniff type and didn't - do so.
-                        if dataset.ext == "_sniff_":
-                            extension = sniff.handle_uploaded_dataset_file(dataset.dataset.file_name, self.app.datatypes_registry)
-                            dataset.extension = extension
-
-                        # call datatype.set_meta directly for the initial set_meta call during dataset creation
-                        dataset.datatype.set_meta(dataset, overwrite=False)
-                    elif (job.states.ERROR != final_job_state and not metadata_set_successfully):
-                        dataset._state = model.Dataset.states.FAILED_METADATA
-                    else:
-                        self.external_output_metadata.load_metadata(dataset, dataset_assoc.name, self.sa_session, working_directory=self.working_directory, remote_metadata_directory=remote_metadata_directory)
-                    line_count = context.get('line_count', None)
-                    try:
-                        # Certain datatype's set_peek methods contain a line_count argument
-                        dataset.set_peek(line_count=line_count)
-                    except TypeError:
-                        # ... and others don't
-                        dataset.set_peek()
-                else:
-                    # Handle purged datasets.
-                    dataset.blurb = "empty"
-                    if dataset.ext == 'auto':
-                        dataset.extension = context.get('ext', 'txt')
-
-                for context_key in TOOL_PROVIDED_JOB_METADATA_KEYS:
-                    if context_key in context:
-                        context_value = context[context_key]
-                        setattr(dataset, context_key, context_value)
-
-                self.sa_session.add(dataset)
+                self._finish_dataset(
+                    dataset_assoc.name, dataset, job, context, final_job_state, remote_metadata_directory
+                )
             if job.states.ERROR == final_job_state:
                 log.debug("(%s) setting dataset %s state to ERROR", job.id, dataset_assoc.dataset.dataset.id)
                 # TODO: This is where the state is being set to error. Change it!
@@ -1638,7 +1667,7 @@ class JobWrapper(HasResourceParameters):
         job.set_final_state(final_job_state)
         if not job.tasks:
             # If job was composed of tasks, don't attempt to recollect statisitcs
-            self._collect_metrics(job)
+            self._collect_metrics(job, job_metrics_directory)
         self.sa_session.flush()
         log.debug('job %d ended (finish() executed in %s)' % (self.job_id, finish_timer))
         if job.state == job.states.ERROR:
@@ -1700,36 +1729,12 @@ class JobWrapper(HasResourceParameters):
         except Exception:
             log.exception("Unable to cleanup job %d", self.job_id)
 
-    def _collect_extra_files(self, dataset, job_working_directory):
-        object_store = self.app.object_store
-        store_by = getattr(object_store, "store_by", "id")
-        file_name = "dataset_%s_files" % getattr(dataset, store_by)
-        temp_file_path = os.path.join(job_working_directory, file_name)
-        extra_dir = None
-        try:
-            # This skips creation of directories - object store
-            # automatically creates them.  However, empty directories will
-            # not be created in the object store at all, which might be a
-            # problem.
-            for root, dirs, files in os.walk(temp_file_path):
-                extra_dir = root.replace(job_working_directory, '', 1).lstrip(os.path.sep)
-                for f in files:
-                    self.object_store.update_from_file(
-                        dataset,
-                        extra_dir=extra_dir,
-                        alt_name=f,
-                        file_name=os.path.join(root, f),
-                        create=True,
-                        preserve_symlinks=True
-                    )
-        except Exception as e:
-            log.debug("Error in collect_associated_files: %s" % (e))
-
-    def _collect_metrics(self, has_metrics):
+    def _collect_metrics(self, has_metrics, job_metrics_directory=None):
         job = has_metrics.get_job()
-        per_plugin_properties = self.app.job_metrics.collect_properties(job.destination_id, self.job_id, self.working_directory)
+        job_metrics_directory = job_metrics_directory or self.working_directory
+        per_plugin_properties = self.app.job_metrics.collect_properties(job.destination_id, self.job_id, job_metrics_directory)
         if per_plugin_properties:
-            log.info("Collecting metrics for %s %s" % (type(has_metrics).__name__, getattr(has_metrics, 'id', None)))
+            log.info("Collecting metrics for %s %s in %s" % (type(has_metrics).__name__, getattr(has_metrics, 'id', None), job_metrics_directory))
         for plugin, properties in per_plugin_properties.items():
             for metric_name, metric_value in properties.items():
                 if metric_value is not None:
@@ -1808,7 +1813,7 @@ class JobWrapper(HasResourceParameters):
         return paths
 
     def get_output_basenames(self):
-        return list(map(os.path.basename, map(str, self.get_output_fnames())))
+        return [os.path.basename(str(fname)) for fname in self.get_output_fnames()]
 
     def get_output_fnames(self):
         if self.output_paths is None:
@@ -1941,7 +1946,8 @@ class JobWrapper(HasResourceParameters):
         if config_file is None:
             config_file = self.app.config.config_file
         if datatypes_config is None:
-            datatypes_config = os.path.join(self.working_directory, 'registry.xml')
+            datatypes_config = os.path.join(self.working_directory, 'metadata', 'registry.xml')
+            safe_makedirs(os.path.join(self.working_directory, 'metadata'))
             self.app.datatypes_registry.to_xml_file(path=datatypes_config)
 
         output_datasets = {}
@@ -1960,6 +1966,7 @@ class JobWrapper(HasResourceParameters):
                                                                         datatypes_config=datatypes_config,
                                                                         job_metadata=os.path.join(self.tool_working_directory, self.tool.provided_metadata_file),
                                                                         max_metadata_value_size=self.app.config.max_metadata_value_size,
+                                                                        validate_outputs=self.validate_outputs,
                                                                         **kwds)
         if resolve_metadata_dependencies:
             metadata_tool = self.app.toolbox.get_tool("__SET_METADATA__")
@@ -1971,6 +1978,54 @@ class JobWrapper(HasResourceParameters):
                     dependency_shell_commands = "; ".join(dependency_shell_commands)
                     command = "%s; %s" % (dependency_shell_commands, command)
         return command
+
+    def check_for_entry_points(self, check_already_configured=True):
+        if not self.tool.produces_entry_points:
+            return True
+
+        job = self.get_job()
+        if check_already_configured and job.all_entry_points_configured:
+            return True
+
+        working_directory = self.working_directory
+        container_runtime_path = os.path.join(working_directory, "container_runtime.json")
+        if os.path.exists(container_runtime_path):
+            with open(container_runtime_path, "r") as f:
+                try:
+                    container_runtime = json.load(f)
+                except ValueError:
+                    # File exists, but is not fully populated yet
+                    return False
+            log.debug("found container runtime %s" % container_runtime)
+            self.app.interactivetool_manager.configure_entry_points(job, container_runtime)
+            return True
+
+    def container_monitor_command(self, container, **kwds):
+        if not container or not self.tool.produces_entry_points:
+            return None
+
+        from os.path import abspath
+        from os import getcwd
+        exec_dir = kwds.get('exec_dir', abspath(getcwd()))
+        work_dir = self.working_directory
+        container_config = os.path.join(work_dir, "container_config.json")
+
+        # TODO: implement callback via URL callback for configuring ports instead
+        #       of fs polling.
+        # if self.app.config.galaxy_infrastructure_url_set:
+        #    # TODO: settable from job destination...
+        #    infrastructure_url = self.app.config.galaxy_infrastructure_url
+        # else:
+        #    infrastructure_url = "host.docker.internal"
+
+        with open(container_config, "w") as f:
+            json.dump({
+                "container_name": container.container_name,
+                "container_type": container.container_type,
+                "connection_configuration": container.connection_configuration,
+            }, f)
+
+        return "(python '%s'/lib/galaxy_ext/container_monitor/monitor.py &) " % exec_dir
 
     @property
     def user(self):
@@ -2085,6 +2140,12 @@ class JobWrapper(HasResourceParameters):
         tool = self.app.toolbox.get_tool(job.tool_id, tool_version=job.tool_version) or None
         for dataset in job.output_datasets:
             self.app.error_reports.default_error_plugin.submit_report(dataset, job, tool, user_submission=False)
+
+    def set_container(self, container):
+        if container:
+            cont = model.JobContainerAssociation(job=self.get_job(), container_type=container.container_type, container_name=container.container_name, container_info=container.container_info)
+            self.sa_session.add(cont)
+            self.sa_session.flush()
 
 
 class TaskWrapper(JobWrapper):
@@ -2403,22 +2464,3 @@ class NoopQueue(object):
 
     def shutdown(self):
         return
-
-
-class ParallelismInfo(object):
-    """
-    Stores the information (if any) for running multiple instances of the tool in parallel
-    on the same set of inputs.
-    """
-
-    def __init__(self, tag):
-        self.method = tag.get('method')
-        if isinstance(tag, dict):
-            items = tag.items()
-        else:
-            items = tag.attrib.items()
-        self.attributes = dict([item for item in items if item[0] != 'method'])
-        if len(self.attributes) == 0:
-            # legacy basic mode - provide compatible defaults
-            self.attributes['split_size'] = 20
-            self.attributes['split_mode'] = 'number_of_parts'

@@ -178,9 +178,13 @@ class MockJobWrapper(object):
             )
         )
         self.shell = "/bin/sh"
+        self.use_metadata_binary = False
 
     def get_command_line(self):
         return self.command_line
+
+    def container_monitor_command(self, *args, **kwds):
+        return None
 
     @property
     def requires_setting_metadata(self):

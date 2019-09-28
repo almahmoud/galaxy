@@ -144,6 +144,7 @@ class MockJobWrapper(object):
         self.shell = "/bin/bash"
         self.cleanup_job = "never"
         self.tmp_dir_creation_statement = ""
+        self.use_metadata_binary = False
 
         # Cruft for setting metadata externally, axe at some point.
         self.external_output_metadata = bunch.Bunch(
@@ -174,6 +175,9 @@ class MockJobWrapper(object):
 
     def get_command_line(self):
         return self.command_line
+
+    def container_monitor_command(self, *args, **kwds):
+        return None
 
     def get_id_tag(self):
         return "1"
