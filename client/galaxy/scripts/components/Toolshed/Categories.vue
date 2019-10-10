@@ -6,7 +6,12 @@
         </div>
         <b-table v-else striped :items="categories" :fields="fields">
             <template slot="name" slot-scope="data">
-                <b-link href="#" class="font-weight-bold" @click="onCategory(data.value)">
+                <b-link
+                    href="javascript:void(0)"
+                    role="button"
+                    class="font-weight-bold"
+                    @click="onCategory(data.value)"
+                >
                     {{ data.value }}
                 </b-link>
             </template>
@@ -60,7 +65,7 @@ export default {
                 });
         },
         onCategory(category) {
-            this.$emit("onCategory", category);
+            this.$emit("onCategory", `category:'${category}'`);
         }
     }
 };

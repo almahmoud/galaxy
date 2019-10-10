@@ -4,6 +4,7 @@ Support for running a tool in Galaxy via an internal job management system
 import copy
 import datetime
 import errno
+import json
 import logging
 import os
 import pwd
@@ -167,6 +168,10 @@ def job_config_xml_to_dict(config, root):
         environment["metrics"] = metrics_to_dict
 
         params = JobConfiguration.get_params(config, destination)
+        # Handle legacy XML enabling sudo when using docker by default.
+        if "docker_sudo" not in params:
+            params["docker_sudo"] = "true"
+
         # TODO: handle enabled/disabled in configure_from
         environment['params'] = params
         environment['env'] = JobConfiguration.get_envs(destination)
@@ -374,18 +379,23 @@ class JobConfiguration(ConfiguresHandlers):
         environments = execution_dict.get("environments", [])
         enviroment_iter = map(lambda e: (e["id"], e), environments) if isinstance(environments, list) else environments.items()
         for environment_id, environment_dict in enviroment_iter:
-            metrics = environment_dict.get("metrics") or {"src": "default"}
-            metrics_src = metrics.get("src") or "default"
-            if metrics_src != "default":
-                # customized metrics for this environment.
-                if metrics_src == "disabled":
-                    job_metrics.set_destination_instrumenter(environment_id, None)
-                elif metrics_src == "xml_element":
-                    metrics_element = metrics.get("xml_element")
-                    job_metrics.set_destination_conf_element(environment_id, metrics_element)
-                elif metrics_src == "path":
-                    metrics_conf_path = self.app.config.resolve_path(metrics.get("path"))
-                    job_metrics.set_destination_conf_file(environment_id, metrics_conf_path)
+            metrics = environment_dict.get("metrics")
+            if metrics is None:
+                metrics = {"src": "default"}
+            if isinstance(metrics, list):
+                job_metrics.set_destination_conf_dicts(environment_id, metrics)
+            else:
+                metrics_src = metrics.get("src") or "default"
+                if metrics_src != "default":
+                    # customized metrics for this environment.
+                    if metrics_src == "disabled":
+                        job_metrics.set_destination_instrumenter(environment_id, None)
+                    elif metrics_src == "xml_element":
+                        metrics_element = metrics.get("xml_element")
+                        job_metrics.set_destination_conf_element(environment_id, metrics_element)
+                    elif metrics_src == "path":
+                        metrics_conf_path = self.app.config.resolve_path(metrics.get("path"))
+                        job_metrics.set_destination_conf_file(environment_id, metrics_conf_path)
 
             destination_kwds = {}
 
@@ -1021,6 +1031,15 @@ class JobWrapper(HasResourceParameters):
         param_dict = self.tool.params_from_strings(param_dict, self.app)
         return param_dict
 
+    @property
+    def validate_outputs(self):
+        job = self.get_job()
+        for p in job.parameters:
+            if p.name == "__validate_outputs__":
+                log.info("validate... %s" % p.value)
+                return loads(p.value)
+        return False
+
     def get_version_string_path(self):
         return os.path.abspath(os.path.join(self.working_directory, COMMAND_VERSION_FILENAME))
 
@@ -1078,6 +1097,7 @@ class JobWrapper(HasResourceParameters):
         # if the server was stopped and restarted before the job finished
         job.command_line = unicodify(self.command_line)
         job.dependencies = self.tool.dependencies
+        self.interactivetools = getattr(tool_evaluator, 'interactivetools', None)
         self.sa_session.add(job)
         self.sa_session.flush()
         # Return list of all extra files
@@ -1987,6 +2007,7 @@ class JobWrapper(HasResourceParameters):
                                                                         datatypes_config=datatypes_config,
                                                                         job_metadata=os.path.join(self.tool_working_directory, self.tool.provided_metadata_file),
                                                                         max_metadata_value_size=self.app.config.max_metadata_value_size,
+                                                                        validate_outputs=self.validate_outputs,
                                                                         **kwds)
         if resolve_metadata_dependencies:
             metadata_tool = self.app.toolbox.get_tool("__SET_METADATA__")
@@ -1998,6 +2019,54 @@ class JobWrapper(HasResourceParameters):
                     dependency_shell_commands = "; ".join(dependency_shell_commands)
                     command = "%s; %s" % (dependency_shell_commands, command)
         return command
+
+    def check_for_entry_points(self, check_already_configured=True):
+        if not self.tool.produces_entry_points:
+            return True
+
+        job = self.get_job()
+        if check_already_configured and job.all_entry_points_configured:
+            return True
+
+        working_directory = self.working_directory
+        container_runtime_path = os.path.join(working_directory, "container_runtime.json")
+        if os.path.exists(container_runtime_path):
+            with open(container_runtime_path, "r") as f:
+                try:
+                    container_runtime = json.load(f)
+                except ValueError:
+                    # File exists, but is not fully populated yet
+                    return False
+            log.debug("found container runtime %s" % container_runtime)
+            self.app.interactivetool_manager.configure_entry_points(job, container_runtime)
+            return True
+
+    def container_monitor_command(self, container, **kwds):
+        if not container or not self.tool.produces_entry_points:
+            return None
+
+        from os.path import abspath
+        from os import getcwd
+        exec_dir = kwds.get('exec_dir', abspath(getcwd()))
+        work_dir = self.working_directory
+        container_config = os.path.join(work_dir, "container_config.json")
+
+        # TODO: implement callback via URL callback for configuring ports instead
+        #       of fs polling.
+        # if self.app.config.galaxy_infrastructure_url_set:
+        #    # TODO: settable from job destination...
+        #    infrastructure_url = self.app.config.galaxy_infrastructure_url
+        # else:
+        #    infrastructure_url = "host.docker.internal"
+
+        with open(container_config, "w") as f:
+            json.dump({
+                "container_name": container.container_name,
+                "container_type": container.container_type,
+                "connection_configuration": container.connection_configuration,
+            }, f)
+
+        return "(python '%s'/lib/galaxy_ext/container_monitor/monitor.py &) " % exec_dir
 
     @property
     def user(self):
@@ -2113,6 +2182,12 @@ class JobWrapper(HasResourceParameters):
         for dataset in job.output_datasets:
             model.StorageMedia.refresh_all_media_credentials(dataset.dataset.dataset.active_storage_media_associations, self.app.authnz_manager, self.sa_session)
             self.app.error_reports.default_error_plugin.submit_report(dataset, job, tool, user_submission=False)
+
+    def set_container(self, container):
+        if container:
+            cont = model.JobContainerAssociation(job=self.get_job(), container_type=container.container_type, container_name=container.container_name, container_info=container.container_info)
+            self.sa_session.add(cont)
+            self.sa_session.flush()
 
 
 class TaskWrapper(JobWrapper):

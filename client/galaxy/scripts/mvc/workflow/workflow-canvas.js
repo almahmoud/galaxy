@@ -97,7 +97,7 @@ class CanvasManager {
         this.init_copy_paste();
     }
     setZoom(zoomLevel) {
-        this.zoomLevel = Math.min(Math.max(0, zoomLevel), zoomLevels.length-1);
+        this.zoomLevel = Math.min(Math.max(0, zoomLevel), zoomLevels.length - 1);
         this.canvasZoom = zoomLevels[this.zoomLevel];
         // Set CSS transform to appropriate zoom level
         this.cv.css("transform-origin", "top left");
@@ -109,32 +109,34 @@ class CanvasManager {
         this.app.workflow.fit_canvas_to_nodes();
     }
     initZoomControls() {
-        var zoomControl = $('<div class="btn-group-horizontal"/>').css({
+        var zoomControl = $('<div class="btn-group-horizontal workflow-canvas-content"/>').css({
             position: "absolute",
             left: "1rem",
             bottom: "1rem",
             cursor: "pointer"
         });
-        const zoomButton = $(`<a class="btn btn-light" title="Reset Zoom Level">${zoomLevels[defaultZoomLevel] * 100}%</a>`).css({
+        const zoomButton = $(
+            `<a class="btn btn-light" title="Reset Zoom Level">${zoomLevels[defaultZoomLevel] * 100}%</a>`
+        ).css({
             width: "4rem"
         });
 
         zoomControl.append(
             $('<a class="btn btn-secondary fa fa-minus"/>').click(() => {
                 this.setZoom(this.zoomLevel - 1);
-                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + '%');
+                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + "%");
             })
         );
         zoomControl.append(
             zoomButton.click(() => {
                 this.setZoom(defaultZoomLevel);
-                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + '%');
+                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + "%");
             })
         );
         zoomControl.append(
             $('<a class="btn btn-secondary fa fa-plus"/>').click(() => {
                 this.setZoom(this.zoomLevel + 1);
-                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + '%');
+                zoomButton.text(Math.floor(zoomLevels[this.zoomLevel] * 100) + "%");
             })
         );
         this.cv.closest("#workflow-canvas-body").append(zoomControl);

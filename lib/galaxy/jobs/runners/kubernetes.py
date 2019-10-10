@@ -48,6 +48,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             k8s_galaxy_instance_id=dict(map=str),
             k8s_timeout_seconds_job_deletion=dict(map=int, valid=lambda x: int > 0, default=30),
             k8s_job_api_version=dict(map=str, default=DEFAULT_JOB_API_VERSION),
+            k8s_job_ttl_secs_after_finished=dict(map=int, valid=lambda x: x is None or int(x) >= 0, default=300),
             k8s_supplemental_group_id=dict(map=str),
             k8s_pull_policy=dict(map=str, default="Default"),
             k8s_run_as_user_id=dict(map=str, valid=lambda s: s == "$uid" or s.isdigit()),
@@ -57,6 +58,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             k8s_default_requests_memory=dict(map=str, default=None),
             k8s_default_limits_cpu=dict(map=str, default=None),
             k8s_default_limits_memory=dict(map=str, default=None),
+            k8s_cleanup_job=dict(map=str, valid=lambda s: s in {"onsuccess", "always", "never"}, default="always"),
             k8s_pod_retries=dict(map=int, valid=lambda x: int >= 0, default=3),
             k8s_pod_retrials=dict(map=int, valid=lambda x: int >= 0, default=3),
             k8s_walltime_limit=dict(map=int, valid=lambda x: int(x) >= 0, default=172800))
@@ -225,6 +227,9 @@ class KubernetesJobRunner(AsynchronousJobRunner):
         If the job hangs around unlimited it will be ended after k8s wall time limit, which sets activeDeadlineSeconds"""
         k8s_job_spec = {"template": self.__get_k8s_job_spec_template(ajs),
                         "activeDeadlineSeconds": int(self.runner_params['k8s_walltime_limit'])}
+        job_ttl = self.runner_params["k8s_job_ttl_secs_after_finished"]
+        if self.runner_params["k8s_cleanup_job"] != "never" and job_ttl is not None:
+            k8s_job_spec["ttlSecondsAfterFinished"] = job_ttl
         return k8s_job_spec
 
     def __get_k8s_job_spec_template(self, ajs):
@@ -406,7 +411,6 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             active = 0
             failed = 0
 
-            max_pod_retries = 1
             if 'max_pod_retries' in job_destination.params:
                 max_pod_retries = int(job_destination.params['max_pod_retries'])
             elif 'k8s_pod_retries' in self.runner_params:
@@ -417,6 +421,8 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             elif 'k8s_pod_retrials' in self.runner_params:
                 # For backward compatibility
                 max_pod_retries = int(self.runner_params['max_pod_retrials'])
+            else:
+                max_pod_retries = 1
 
             if 'succeeded' in job.obj['status']:
                 succeeded = job.obj['status']['succeeded']
@@ -436,7 +442,8 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                     job_state.job_wrapper.change_state(model.Job.states.RUNNING)
                 return job_state
             elif job_state.job_wrapper.get_job().state == model.Job.states.DELETED:
-                # Job has been deleted via stop_job, cleanup and remove from watched_jobs by returning `None`
+                # Job has been deleted via stop_job and job has not been deleted,
+                # remove from watched_jobs by returning `None`
                 if job_state.job_wrapper.cleanup_job in ("always", "onsuccess"):
                     job_state.job_wrapper.cleanup()
                 return None
@@ -444,6 +451,12 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 return self._handle_job_failure(job, job_state)
 
         elif len(jobs.response['items']) == 0:
+            if job_state.job_wrapper.get_job().state == model.Job.states.DELETED:
+                # Job has been deleted via stop_job and job has been deleted,
+                # cleanup and remove from watched_jobs by returning `None`
+                if job_state.job_wrapper.cleanup_job in ("always", "onsuccess"):
+                    job_state.job_wrapper.cleanup()
+                return None
             # there is no job responding to this job_id, it is either lost or something happened.
             log.error("No Jobs are available under expected selector app=%s", job_state.job_id)
             with open(job_state.error_file, 'w') as error_file:
@@ -474,8 +487,29 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 job_state.fail_message = "More pods failed than allowed. See stdout for pods details."
         job_state.running = False
         self.mark_as_failed(job_state)
-        job.scale(replicas=0)
+        self.__cleanup_k8s_job(job)
         return None
+
+    def __cleanup_k8s_job(self, job):
+        k8s_cleanup_job = self.runner_params['k8s_cleanup_job']
+        job_failed = (job.obj['status']['failed'] > 0
+                      if 'failed' in job.obj['status'] else False)
+        # Scale down the job just in case even if cleanup is never
+        job.scale(replicas=0)
+        if (k8s_cleanup_job == "always" or
+                (k8s_cleanup_job == "onsuccess" and not job_failed)):
+            job_ttl = self.runner_params["k8s_job_ttl_secs_after_finished"]
+            if job_ttl is None:
+                delete_options = {
+                    "apiVersion": "v1",
+                    "kind": "DeleteOptions",
+                    "propagationPolicy": "Background"
+                }
+                r = job.api.delete(json=delete_options, **job.api_kwargs())
+                job.api.raise_for_status(r)
+            else:
+                # Let the k8s ttl take care of deletion
+                pass
 
     def __job_failed_due_to_walltime_limit(self, job):
         conditions = job.obj['status']['conditions']
@@ -509,7 +543,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 namespace=self.runner_params['k8s_namespace'])
             if len(jobs.response['items']) >= 0:
                 job_to_delete = Job(self._pykube_api, jobs.response['items'][0])
-                job_to_delete.scale(replicas=0)
+                self.__cleanup_k8s_job(job_to_delete)
             # TODO assert whether job parallelism == 0
             # assert not job_to_delete.exists(), "Could not delete job,"+job.job_runner_external_id+" it still exists"
             log.debug("(%s/%s) Terminated at user's request" % (job.id, job.job_runner_external_id))
@@ -541,3 +575,12 @@ class KubernetesJobRunner(AsynchronousJobRunner):
             ajs.old_state = model.Job.states.QUEUED
             ajs.running = False
             self.monitor_queue.put(ajs)
+
+    def finish_job(self, job_state):
+        super(KubernetesJobRunner, self).finish_job(job_state)
+        jobs = Job.objects(self._pykube_api).filter(selector="app=" + job_state.job_id,
+                                                    namespace=self.runner_params['k8s_namespace'])
+        # If more than one job matches selector, leave all jobs intact as it's a configuration error
+        if len(jobs.response['items']) == 1:
+            job = Job(self._pykube_api, jobs.response['items'][0])
+            self.__cleanup_k8s_job(job)
