@@ -67,7 +67,7 @@ class AuthnzManager(object):
                     if child.get('Type') == "bool":
                         func = string_as_bool
                     else:
-                        func = getattr(importlib.import_module('__builtin__'), child.get('Type'))
+                        func = getattr(importlib.import_module('builtins'), child.get('Type'))
                 except AttributeError:
                     log.error("The value of attribute `Type`, `{}`, is not a valid built-in type;"
                               " skipping this node").format(child.get('Type'))

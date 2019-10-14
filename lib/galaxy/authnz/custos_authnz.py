@@ -5,6 +5,8 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from airavata_custos.security.keycloak_connectors import KeycloakBackend
+from airavata_custos.security.client_credentials import IdpCredentials
 import jwt
 import requests
 from oauthlib.common import generate_nonce
@@ -17,10 +19,12 @@ from ..authnz import IdentityProvider
 log = logging.getLogger(__name__)
 STATE_COOKIE_NAME = 'custos-state'
 NONCE_COOKIE_NAME = 'custos-nonce'
+AUTHORIZATION_CODE_URL_COOKIE_NAME = 'custos-auth-code-url'
 
 
 class CustosAuthnz(IdentityProvider):
     def __init__(self, provider, oidc_config, oidc_backend_config):
+        self.custos_backend = KeycloakBackend('config/custos_config.ini')
         self.config = {'provider': provider.lower()}
         self.config['verify_ssl'] = oidc_config['VERIFY_SSL']
         self.config['url'] = oidc_backend_config['url']
@@ -44,67 +48,91 @@ class CustosAuthnz(IdentityProvider):
             self._load_config_for_provider_and_realm(self.config['provider'], realm)
 
     def authenticate(self, trans):
-        base_authorize_url = self.config['authorization_endpoint']
-        oauth2_session = self._create_oauth2_session(scope=('openid', 'email', 'profile'))
-        nonce = generate_nonce()
-        nonce_hash = self._hash_nonce(nonce)
-        extra_params = {"nonce": nonce_hash}
-        if "extra_params" in self.config:
-            extra_params.update(self.config['extra_params'])
-        authorization_url, state = oauth2_session.authorization_url(
-            base_authorize_url, **extra_params)
+        # scope = ('openid', 'email', 'profile')
+        client_id = self.config['client_id']
+        client_secret = self.config['client_secret']
+        redirect_uri = self.config['redirect_uri']
+        idp_alias = 'custos'
+        if (redirect_uri.startswith('http://localhost')
+                and os.environ.get("OAUTHLIB_INSECURE_TRANSPORT", None) != "1"):
+            log.warning("Setting OAUTHLIB_INSECURE_TRANSPORT to '1' to allow plain HTTP (non-SSL) callback")
+            os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = "1"
+        idp_creds = self.custos_backend.prepare_idp_credentials(client_id, client_secret, redirect_uri, idp_alias)
+        authorization_url = idp_creds.authorization_code_url
+        state = idp_creds.state
+        # nonce = generate_nonce()
+        # nonce_hash = self._hash_nonce(nonce)
+        # extra_params = {"nonce": nonce_hash}
+        # if "extra_params" in self.config:
+        #     extra_params.update(self.config['extra_params'])
+        # authorization_url, state = oauth2_session.authorization_url(
+        #     base_authorize_url, **extra_params)
         trans.set_cookie(value=state, name=STATE_COOKIE_NAME)
-        trans.set_cookie(value=nonce, name=NONCE_COOKIE_NAME)
+        trans.set_cookie(value=authorization_url, name=AUTHORIZATION_CODE_URL_COOKIE_NAME)
+        # trans.set_cookie(value=nonce, name=NONCE_COOKIE_NAME)
         return authorization_url
 
     def callback(self, state_token, authz_code, trans, login_redirect_url):
         # Take state value to validate from token. OAuth2Session.fetch_token
         # will validate that the state query parameter value on the URL matches
         # this value.
-        state_cookie = trans.get_cookie(name=STATE_COOKIE_NAME)
-        oauth2_session = self._create_oauth2_session(state=state_cookie)
-        token = self._fetch_token(oauth2_session, trans)
-        log.debug("token={}".format(json.dumps(token, indent=True)))
+
+        state = trans.get_cookie(name=STATE_COOKIE_NAME)
+        # oauth2_session = self._create_oauth2_session(state=state_cookie)
+        client_secret = self.config['client_secret']
+        # token_endpoint = self.config['token_endpoint']
+        # token = oauth2_session.fetch_token(
+        #     token_endpoint,
+        #     client_secret=client_secret,
+        #     # authorization_response=trans.request.url,
+        #     verify=self._get_verify_param())
+        client_id = self.config['client_id']
+        redirect_uri = self.config['redirect_uri']
+        authorization_code_url = trans.get_cookie(name=AUTHORIZATION_CODE_URL_COOKIE_NAME)
+        idp_creds = IdpCredentials(client_id, client_secret, authorization_code_url, state, redirect_uri)
+        token, user_info = self.custos_backend.authenticate_using_idp(idp_creds)
+
+        #log.debug("token={}".format(json.dumps(token, indent=True)))
         access_token = token['access_token']
         id_token = token['id_token']
         refresh_token = token['refresh_token'] if 'refresh_token' in token else None
         expiration_time = datetime.now() + timedelta(seconds=token['expires_in'])
         refresh_expiration_time = (datetime.now() + timedelta(seconds=token['refresh_expires_in'])) if 'refresh_expires_in' in token else None
 
-        # Get nonce from token['id_token'] and validate. 'nonce' in the
-        # id_token is a hash of the nonce stored in the NONCE_COOKIE_NAME
-        # cookie.
-        id_token_decoded = jwt.decode(id_token, verify=False)
-        nonce_hash = id_token_decoded['nonce']
-        self._validate_nonce(trans, nonce_hash)
+        # # Get nonce from token['id_token'] and validate. 'nonce' in the
+        # # id_token is a hash of the nonce stored in the NONCE_COOKIE_NAME
+        # # cookie.
+        # id_token_decoded = jwt.decode(id_token, verify=False)
+        # nonce_hash = id_token_decoded['nonce']
+        # self._validate_nonce(trans, nonce_hash)
 
         # Get userinfo and lookup/create Galaxy user record
-        userinfo = self._get_userinfo(oauth2_session)
-        log.debug("userinfo={}".format(json.dumps(userinfo, indent=True)))
+        # userinfo = self._get_userinfo(oauth2_session)
+        # log.debug("userinfo={}".format(json.dumps(userinfo, indent=True)))
         username = userinfo['preferred_username']
         email = userinfo['email']
         user_id = userinfo['sub']
 
         # Create or update custos_authnz_token record
-        custos_authnz_token = self._get_custos_authnz_token(trans.sa_session, user_id, self.config['provider'])
-        if custos_authnz_token is None:
-            user = self._get_current_user(trans)
-            if not user:
-                user = self._create_user(trans.sa_session, username, email)
-            custos_authnz_token = CustosAuthnzToken(user=user,
-                                   external_user_id=user_id,
-                                   provider=self.config['provider'],
-                                   access_token=access_token,
-                                   id_token=id_token,
-                                   refresh_token=refresh_token,
-                                   expiration_time=expiration_time,
-                                   refresh_expiration_time=refresh_expiration_time)
-        else:
-            custos_authnz_token.access_token = access_token
-            custos_authnz_token.id_token = id_token
-            custos_authnz_token.refresh_token = refresh_token
-            custos_authnz_token.expiration_time = expiration_time
-            custos_authnz_token.refresh_expiration_time = refresh_expiration_time
+        # custos_authnz_token = self._get_custos_authnz_token(trans.sa_session, user_id, self.config['provider'])
+        # if custos_authnz_token is None:
+        #     user = self._get_current_user(trans)
+        #     if not user:
+        user = self._create_user(trans.sa_session, username, email)
+        custos_authnz_token = CustosAuthnzToken(user=user,
+                               external_user_id=user_id,
+                               provider=self.config['provider'],
+                               access_token=access_token,
+                               id_token=id_token,
+                               refresh_token=refresh_token,
+                               expiration_time=expiration_time,
+                               refresh_expiration_time=refresh_expiration_time)
+        # else:
+        #     custos_authnz_token.access_token = access_token
+        #     custos_authnz_token.id_token = id_token
+        #     custos_authnz_token.refresh_token = refresh_token
+        #     custos_authnz_token.expiration_time = expiration_time
+        #     custos_authnz_token.refresh_expiration_time = refresh_expiration_time
         trans.sa_session.add(custos_authnz_token)
         trans.sa_session.flush()
         return login_redirect_url, custos_authnz_token.user
