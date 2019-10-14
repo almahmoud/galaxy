@@ -50,7 +50,7 @@ Enhancements
   `Pull Request 7527`_
 * Implement dataset source and hash tracking.
   `Pull Request 7487`_, `Pull Request 4659`_, `Pull Request 7549`_
-* Custos integration for AuthNZ
+* Keycloak integration for AuthNZ
   (thanks to `@machristie <https://github.com/machristie>`__).
   `Pull Request 7195`_
 * Flush out API support for AuthNZ and CloudAuthz

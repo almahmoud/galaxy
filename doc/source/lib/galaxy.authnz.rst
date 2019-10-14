@@ -9,10 +9,10 @@ galaxy.authnz package
 Submodules
 ----------
 
-galaxy.authnz.custos\_authnz module
+galaxy.authnz.keycloak\_authnz module
 -----------------------------------
 
-.. automodule:: galaxy.authnz.custos_authnz
+.. automodule:: galaxy.authnz.keycloak_authnz
     :members:
     :undoc-members:
     :show-inheritance:

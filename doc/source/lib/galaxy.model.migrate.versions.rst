@@ -1225,10 +1225,10 @@ galaxy.model.migrate.versions.0152\_add\_metadata\_file\_uuid module
     :undoc-members:
     :show-inheritance:
 
-galaxy.model.migrate.versions.0153\_add\_custos\_authnz\_token\_table module
+galaxy.model.migrate.versions.0153\_add\_keycloak\_authnz\_token\_table module
 ----------------------------------------------------------------------------
 
-.. automodule:: galaxy.model.migrate.versions.0153_add_custos_authnz_token_table
+.. automodule:: galaxy.model.migrate.versions.0153_add_keycloak_authnz_token_table
     :members:
     :undoc-members:
     :show-inheritance:

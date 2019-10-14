@@ -1,5 +1,5 @@
 """
-Migration for adding custos_authnz_token table.
+Migration for adding keycloak_authnz_token table.
 """
 from __future__ import print_function
 
@@ -25,8 +25,8 @@ from galaxy.model.migrate.versions.util import (
 log = logging.getLogger(__name__)
 metadata = MetaData()
 
-CustosAuthnzToken_table = Table(
-    "custos_authnz_token", metadata,
+KeycloakAuthnzToken_table = Table(
+    "keycloak_authnz_token", metadata,
     Column('id', Integer, primary_key=True),
     Column('user_id', Integer, ForeignKey("galaxy_user.id")),
     Column('external_user_id', String(64)),
@@ -46,11 +46,11 @@ def upgrade(migrate_engine):
     metadata.bind = migrate_engine
     metadata.reflect()
 
-    create_table(CustosAuthnzToken_table)
+    create_table(KeycloakAuthnzToken_table)
 
 
 def downgrade(migrate_engine):
     metadata.bind = migrate_engine
     metadata.reflect()
 
-    drop_table(CustosAuthnzToken_table)
+    drop_table(KeycloakAuthnzToken_table)

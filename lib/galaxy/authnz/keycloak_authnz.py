@@ -11,15 +11,15 @@ from oauthlib.common import generate_nonce
 from requests_oauthlib import OAuth2Session
 
 from galaxy import util
-from galaxy.model import CustosAuthnzToken, User
+from galaxy.model import KeycloakAuthnzToken, User
 from ..authnz import IdentityProvider
 
 log = logging.getLogger(__name__)
-STATE_COOKIE_NAME = 'custos-state'
-NONCE_COOKIE_NAME = 'custos-nonce'
+STATE_COOKIE_NAME = 'keycloak-state'
+NONCE_COOKIE_NAME = 'keycloak-nonce'
 
 
-class CustosAuthnz(IdentityProvider):
+class KeycloakAuthnz(IdentityProvider):
     def __init__(self, provider, oidc_config, oidc_backend_config):
         self.config = {'provider': provider.lower()}
         self.config['verify_ssl'] = oidc_config['VERIFY_SSL']
@@ -85,13 +85,13 @@ class CustosAuthnz(IdentityProvider):
         email = userinfo['email']
         user_id = userinfo['sub']
 
-        # Create or update custos_authnz_token record
-        custos_authnz_token = self._get_custos_authnz_token(trans.sa_session, user_id, self.config['provider'])
-        if custos_authnz_token is None:
+        # Create or update keycloak_authnz_token record
+        keycloak_authnz_token = self._get_keycloak_authnz_token(trans.sa_session, user_id, self.config['provider'])
+        if keycloak_authnz_token is None:
             user = self._get_current_user(trans)
             if not user:
                 user = self._create_user(trans.sa_session, username, email)
-            custos_authnz_token = CustosAuthnzToken(user=user,
+            keycloak_authnz_token = KeycloakAuthnzToken(user=user,
                                    external_user_id=user_id,
                                    provider=self.config['provider'],
                                    access_token=access_token,
@@ -100,20 +100,20 @@ class CustosAuthnz(IdentityProvider):
                                    expiration_time=expiration_time,
                                    refresh_expiration_time=refresh_expiration_time)
         else:
-            custos_authnz_token.access_token = access_token
-            custos_authnz_token.id_token = id_token
-            custos_authnz_token.refresh_token = refresh_token
-            custos_authnz_token.expiration_time = expiration_time
-            custos_authnz_token.refresh_expiration_time = refresh_expiration_time
-        trans.sa_session.add(custos_authnz_token)
+            keycloak_authnz_token.access_token = access_token
+            keycloak_authnz_token.id_token = id_token
+            keycloak_authnz_token.refresh_token = refresh_token
+            keycloak_authnz_token.expiration_time = expiration_time
+            keycloak_authnz_token.refresh_expiration_time = refresh_expiration_time
+        trans.sa_session.add(keycloak_authnz_token)
         trans.sa_session.flush()
-        return login_redirect_url, custos_authnz_token.user
+        return login_redirect_url, keycloak_authnz_token.user
 
     def disconnect(self, provider, trans, disconnect_redirect_url=None):
         try:
             user = trans.user
-            # Find CustosAuthnzToken record for this provider (should only be one)
-            provider_tokens = [token for token in user.custos_auth if token.provider == self.config["provider"]]
+            # Find KeycloakAuthnzToken record for this provider (should only be one)
+            provider_tokens = [token for token in user.keycloak_auth if token.provider == self.config["provider"]]
             if len(provider_tokens) == 0:
                 raise Exception("User is not associated with provider {}".format(self.config["provider"]))
             if len(provider_tokens) > 1:
@@ -152,8 +152,8 @@ class CustosAuthnz(IdentityProvider):
         return oauth2_session.get(userinfo_endpoint,
                                   verify=self._get_verify_param()).json()
 
-    def _get_custos_authnz_token(self, sa_session, user_id, provider):
-        return sa_session.query(CustosAuthnzToken).filter_by(
+    def _get_keycloak_authnz_token(self, sa_session, user_id, provider):
+        return sa_session.query(KeycloakAuthnzToken).filter_by(
             external_user_id=user_id, provider=provider).one_or_none()
 
     def _get_current_user(self, trans):
@@ -186,13 +186,13 @@ class CustosAuthnz(IdentityProvider):
 
     def _get_well_known_uri_for_provider_and_realm(self, provider, realm):
         # TODO: Look up this URL from a Python library
-        if provider == 'custos':
+        if provider == 'keycloak':
             base_url = self.config["url"]
             # Remove potential trailing slash to avoid "//realms"
             base_url = base_url if base_url[-1] != "/" else base_url[:-1]
             return "{}/realms/{}/.well-known/openid-configuration".format(base_url, realm)
         else:
-            raise Exception("Unknown Custos provider name: {}".format(provider))
+            raise Exception("Unknown Keycloak provider name: {}".format(provider))
 
     def _load_well_known_oidc_config(self, well_known_uri):
         try:

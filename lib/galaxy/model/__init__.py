@@ -5689,7 +5689,7 @@ class UserAuthnzToken(UserMixin, RepresentById):
         return instance
 
 
-class CustosAuthnzToken(RepresentById):
+class KeycloakAuthnzToken(RepresentById):
 
     def __init__(self, user, external_user_id, provider, access_token, id_token, refresh_token, expiration_time, refresh_expiration_time):
         self.id = None

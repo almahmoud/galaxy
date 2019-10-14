@@ -19,7 +19,7 @@ from galaxy import exceptions
 from galaxy import model
 from galaxy.util import string_as_bool
 from galaxy.util import unicodify
-from .custos_authnz import CustosAuthnz
+from .keycloak_authnz import KeycloakAuthnz
 from .psa_authnz import (
     BACKENDS_NAME,
     on_the_fly_config,
@@ -100,9 +100,9 @@ class AuthnzManager(object):
                     self.oidc_backends_config[idp] = self._parse_idp_config(child)
                     self.oidc_backends_implementation[idp] = 'psa'
                     self.app.config.oidc.append(idp)
-                elif idp == 'custos':
-                    self.oidc_backends_config[idp] = self._parse_custos_config(child)
-                    self.oidc_backends_implementation[idp] = 'custos'
+                elif idp == 'keycloak':
+                    self.oidc_backends_config[idp] = self._parse_keycloak_config(child)
+                    self.oidc_backends_implementation[idp] = 'keycloak'
                     self.app.config.oidc.append(idp)
             if len(self.oidc_backends_config) == 0:
                 raise ParseError("No valid provider configuration parsed.")
@@ -120,7 +120,7 @@ class AuthnzManager(object):
             rtv['prompt'] = config_xml.find('prompt').text
         return rtv
 
-    def _parse_custos_config(self, config_xml):
+    def _parse_keycloak_config(self, config_xml):
         rtv = {
             'url': config_xml.find('url').text,
             'client_id': config_xml.find('client_id').text,
@@ -162,8 +162,8 @@ class AuthnzManager(object):
     def _get_identity_provider_class(implementation):
         if implementation == 'psa':
             return PSAAuthnz
-        elif implementation == 'custos':
-            return CustosAuthnz
+        elif implementation == 'keycloak':
+            return KeycloakAuthnz
         else:
             return None
 
