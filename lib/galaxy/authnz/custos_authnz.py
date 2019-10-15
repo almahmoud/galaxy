@@ -19,7 +19,6 @@ from ..authnz import IdentityProvider
 log = logging.getLogger(__name__)
 STATE_COOKIE_NAME = 'custos-state'
 NONCE_COOKIE_NAME = 'custos-nonce'
-AUTHORIZATION_CODE_URL_COOKIE_NAME = 'custos-auth-code-url'
 
 
 class CustosAuthnz(IdentityProvider):
@@ -68,7 +67,6 @@ class CustosAuthnz(IdentityProvider):
         # authorization_url, state = oauth2_session.authorization_url(
         #     base_authorize_url, **extra_params)
         trans.set_cookie(value=state, name=STATE_COOKIE_NAME)
-        trans.set_cookie(value=authorization_url, name=AUTHORIZATION_CODE_URL_COOKIE_NAME)
         # trans.set_cookie(value=nonce, name=NONCE_COOKIE_NAME)
         return authorization_url
 
@@ -88,7 +86,7 @@ class CustosAuthnz(IdentityProvider):
         #     verify=self._get_verify_param())
         client_id = self.config['client_id']
         redirect_uri = self.config['redirect_uri']
-        authorization_code_url = trans.get_cookie(name=AUTHORIZATION_CODE_URL_COOKIE_NAME)
+        authorization_code_url = trans.request.url
         idp_creds = IdpCredentials(client_id, client_secret, authorization_code_url, state, redirect_uri)
         token, user_info = self.custos_backend.authenticate_using_idp(idp_creds)
 
@@ -109,9 +107,9 @@ class CustosAuthnz(IdentityProvider):
         # Get userinfo and lookup/create Galaxy user record
         # userinfo = self._get_userinfo(oauth2_session)
         # log.debug("userinfo={}".format(json.dumps(userinfo, indent=True)))
-        username = userinfo['preferred_username']
-        email = userinfo['email']
-        user_id = userinfo['sub']
+        username = user_info['preferred_username']
+        email = user_info['email']
+        user_id = user_info['sub']
 
         # Create or update custos_authnz_token record
         # custos_authnz_token = self._get_custos_authnz_token(trans.sa_session, user_id, self.config['provider'])
