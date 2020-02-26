@@ -245,7 +245,7 @@ mapping:
           scripts to install tools that have been migrated to the tool shed upon a new
           release, they will be added to this tool config file.
 
-          The value of this option will be resolved with respect to <config_dir>.
+          The value of this option will be resolved with respect to <mutable_config_dir>.
 
       integrated_tool_panel_config:
         type: str
@@ -256,6 +256,8 @@ mapping:
           files integrated into a single file that defines the tool panel layout.  This
           file can be changed by the Galaxy administrator to alter the layout of the
           tool panel.  If not present, Galaxy will create it.
+
+          The value of this option will be resolved with respect to <mutable_config_dir>.
 
       tool_path:
         type: str
@@ -589,11 +591,13 @@ mapping:
 
       build_sites_config_file:
         type: str
-        default: config/build_sites.yml.sample
+        default: build_sites.yml
         required: false
         desc: |
           File that defines the builds (dbkeys) available at sites used by display applications
           and the URL to those sites.
+
+          The value of this option will be resolved with respect to <config_dir>.
 
       builds_file_path:
         type: str

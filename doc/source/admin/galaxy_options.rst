@@ -303,7 +303,7 @@
     tool shed upon a new release, they will be added to this tool
     config file.
     The value of this option will be resolved with respect to
-    <config_dir>.
+    <mutable_config_dir>.
 :Default: ``migrated_tools_conf.xml``
 :Type: str
 
@@ -318,6 +318,8 @@
     tool panel layout.  This file can be changed by the Galaxy
     administrator to alter the layout of the tool panel.  If not
     present, Galaxy will create it.
+    The value of this option will be resolved with respect to
+    <mutable_config_dir>.
 :Default: ``integrated_tool_panel.xml``
 :Type: str
 
@@ -787,7 +789,9 @@
 :Description:
     File that defines the builds (dbkeys) available at sites used by
     display applications and the URL to those sites.
-:Default: ``config/build_sites.yml.sample``
+    The value of this option will be resolved with respect to
+    <config_dir>.
+:Default: ``build_sites.yml``
 :Type: str
 
 
