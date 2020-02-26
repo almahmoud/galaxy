@@ -72,6 +72,9 @@ def app_factory(global_conf, load_app_kwds={}, **kwargs):
     webapp.add_route('/authnz/{provider}/login', controller='authnz', action='login', provider=None)
     webapp.add_route('/authnz/{provider}/callback', controller='authnz', action='callback', provider=None)
     webapp.add_route('/authnz/{provider}/disconnect', controller='authnz', action='disconnect', provider=None)
+    webapp.add_route('/authnz/{provider}/logout', controller='authnz', action='logout', provider=None)
+    # Returns the provider specific logout url for currently logged in provider
+    webapp.add_route('/authnz/logout', controller='authnz', action='get_logout_url')
 
     # These two routes handle our simple needs at the moment
     webapp.add_route('/async/{tool_id}/{data_id}/{data_secret}', controller='async', action='index', tool_id=None, data_id=None, data_secret=None)
@@ -940,6 +943,8 @@ def populate_api_routes(webapp, app):
     webapp.mapper.connect('common_problems', '/api/jobs/{id}/common_problems', controller='jobs', action='common_problems', conditions=dict(method=['GET']))
     # Job metrics and parameters by job id or dataset id (for slightly different accessibility checking)
     webapp.mapper.connect('metrics', '/api/jobs/{job_id}/metrics', controller='jobs', action='metrics', conditions=dict(method=['GET']))
+    webapp.mapper.connect('show_job_lock', '/api/job_lock', controller='jobs', action='show_job_lock', conditions=dict(method=['GET']))
+    webapp.mapper.connect('update_job_lock', '/api/job_lock', controller='jobs', action='update_job_lock', conditions=dict(method=['PUT']))
     webapp.mapper.connect('dataset_metrics', '/api/datasets/{dataset_id}/metrics', controller='jobs', action='metrics', conditions=dict(method=['GET']))
     webapp.mapper.connect('parameters_display', '/api/jobs/{job_id}/parameters_display', controller='jobs', action='parameters_display', conditions=dict(method=['GET']))
     webapp.mapper.connect('dataset_parameters_display', '/api/datasets/{dataset_id}/parameters_display', controller='jobs', action='parameters_display', conditions=dict(method=['GET']))

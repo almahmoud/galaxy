@@ -30,7 +30,7 @@ class ShedToolStatic(BaseUIController):
         .. image:: some_image.jpg
         .. image:: /deep/some_image.png
         """
-        guid = '/'.join([shed, 'repos', owner, repo, tool, version])
+        guid = '/'.join((shed, 'repos', owner, repo, tool, version))
         tool = trans.app.toolbox.get_tool(guid)
         repo_path = os.path.abspath(tool._repository_dir)
         asset_path = os.path.abspath(join(repo_path, image_file))
