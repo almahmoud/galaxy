@@ -119,6 +119,8 @@ class AuthnzManager(object):
             'client_secret': config_xml.find('client_secret').text,
             'redirect_uri': config_xml.find('redirect_uri').text,
             'enable_idp_logout': asbool(config_xml.findtext('enable_idp_logout', 'false'))}
+        if config_xml.find('post_logout_redirect_uri') is not None:
+            rtv['post_logout_redirect_uri'] = config_xml.find('post_logout_redirect_uri').text
         if config_xml.find('prompt') is not None:
             rtv['prompt'] = config_xml.find('prompt').text
         return rtv
@@ -131,6 +133,8 @@ class AuthnzManager(object):
             'redirect_uri': config_xml.find('redirect_uri').text,
             'realm': config_xml.find('realm').text,
             'enable_idp_logout': asbool(config_xml.findtext('enable_idp_logout', 'false'))}
+        if config_xml.find('post_logout_redirect_uri') is not None:
+            rtv['post_logout_redirect_uri'] = config_xml.find('post_logout_redirect_uri').text
         if config_xml.find('well_known_oidc_config_uri') is not None:
             rtv['well_known_oidc_config_uri'] = config_xml.find('well_known_oidc_config_uri').text
         if config_xml.find('idphint') is not None:
