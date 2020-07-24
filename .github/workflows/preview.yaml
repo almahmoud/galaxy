@@ -11,8 +11,11 @@ jobs:
 
       - name: save kubeconfig
         shell: bash
-        run: echo "${{ secrets.KUBECONFIG}}" > ~/.kubeconfig
-
+        run: echo "${{ secrets.KUBECONFIG}}" > ~/.kube/config
+      - name: get changed files
+        uses: lots0logs/gh-action-get-changed-files@2.1.4
+        with:
+          token: GITHUB_TOKEN
       - name: deploy
         id: deploy
         run: sh .github/scripts/generate_config.sh
@@ -27,7 +30,7 @@ jobs:
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
-          body: | 
+          body: |
             ```
             Done!
             ```
