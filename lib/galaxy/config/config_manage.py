@@ -43,7 +43,8 @@ from galaxy.util.yaml_util import (
 
 DESCRIPTION = "Convert configuration files."
 
-APP_DESCRIPTION = """Application to target for operation (i.e. galaxy, tool_shed, or reports))"""
+
+APP_DESCRIPTION = """Application changes made to target for operation (i.e. galaxy, tool_shed, or reports))"""
 DRY_RUN_DESCRIPTION = """If this action modifies files, just print what would be the result and continue."""
 UNKNOWN_OPTION_MESSAGE = "Option [%s] not found in schema - either it is invalid or the Galaxy team hasn't documented it. If invalid, you should manually remove it. If the option is valid but undocumented, please file an issue with the Galaxy team."
 USING_SAMPLE_MESSAGE = "Path [%s] not a file, using sample."

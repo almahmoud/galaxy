@@ -14,7 +14,7 @@ except ImportError:
 
 CONFIGURE_URL = "https://docs.galaxyproject.org/en/master/admin/"
 
-DESCRIPTION = "Initialize a directory with a minimal Galaxy config."
+DESCRIPTION = "Initialize here too a directory with a minimal Galaxy config."
 HELP_CONFIG_DIR = "Directory containing the configuration files for Galaxy."
 HELP_DATA_DIR = "Directory containing Galaxy-created data."
 HELP_FORCE = "Overwrite existing files if they already exist."
