@@ -11,13 +11,13 @@ jobs:
 
       - name: save kubeconfig
         shell: bash
-        runs: echo "${{ secrets.KUBECONFIG}}" > ~/.kubeconfig
+        run: echo "${{ secrets.KUBECONFIG}}" > ~/.kubeconfig
 
       - name: deploy
         id: deploy
         uses: docker://gcr.io/alpine/helm
         shell: bash
-        runs: sh .github/scripts/generate_config.sh
+        run: sh .github/scripts/generate_config.sh
         env:
           PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
 
