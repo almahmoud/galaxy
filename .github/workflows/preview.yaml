@@ -8,6 +8,9 @@ jobs:
       image: dtzar/helm-kubectl:latest
       env:
         PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
+        PR_NUMBER2: ${{ github.event.client_payload.pull_request.id }}
+        PR_HEAD: ${{ github.event.client_payload.pull_request.head.ref }}
+        PR_BASE: ${{ github.event.client_payload.pull_request.base.ref }}
     name: Preview
     runs-on: ubuntu-latest
     steps:
@@ -16,10 +19,6 @@ jobs:
       - name: save kubeconfig
         shell: bash
         run: mkdir -p ~/.kube && echo "${{ secrets.KUBECONFIG}}" > ~/.kube/config
-      - name: get changed files
-        uses: lots0logs/gh-action-get-changed-files@2.1.4
-        with:
-          token: GITHUB_TOKEN
       - name: deploy
         id: deploy
         run: sh .github/scripts/generate_config.sh
