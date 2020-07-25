@@ -1,7 +1,5 @@
 #!/bin/bash
 
-helm repo add gxy https://raw.githubusercontent.com/cloudve/helm-charts/master/
-
 git diff --name-status "$PR_BASE" "$PR_HEAD"
 
 # Abort if anything but modified and added
@@ -10,13 +8,19 @@ abort=$(git diff --name-status "$PR_BASE" "$PR_HEAD" | cut -c1 | grep -E "C|D|R|
 echo "Starting"
 
 if [[ ! -n $abort ]]; then
+
+    curl -O https://raw.githubusercontent.com/galaxyproject/galaxy-helm/master/galaxy/values.yaml
+
+    helm repo add gxy https://raw.githubusercontent.com/cloudve/helm-charts/master/
+
     echo "Starting making list"
     git diff --name-only "$PR_BASE" "$PR_HEAD" > filelist
 
     while IFS= read -r line; do echo -n $line | base64; done < filelist > encfilelist
     sed -i -e 's/\=//g' encfilelist
     sed -E 's#.+#--set-file configs."#g' filelist > start
-    paste -d "\0\"=" start encfilelist /dev/null filelist > setfilelist
+    sed -E 's#.+#=#g' filelist > middle
+    paste -d "\0\"" start encfilelist middle filelist > setfilelist
     PROJMAN_SET=$(paste -s -d ' ' setfilelist)
 
     echo helm upgrade --install "galaxy-preview-injection-$PR_NUM" gxy/projman --set projectName="galaxy-$PR_NUM" $PROJMAN_SET
@@ -30,8 +34,7 @@ extraVolumes:
       items:
 EOF
 
-    sed -E 's#--set-file configs.("[^"]+")=./galaxy/(.+)#        - key: \1\\
-              path: "\2"#g' setfilelist >> vols.yaml
+    sed -E 's#--set-file configs.("[^"]+")=(.+)#        - key: \1\n          path: "\2"#g' setfilelist >> vols.yaml
 
     cat <<EOF >> vols.yaml
 extraVolumeMounts:
