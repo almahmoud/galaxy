@@ -7,7 +7,7 @@ helm repo add gxy https://raw.githubusercontent.com/cloudve/helm-charts/master/
 git diff --name-status "$PR_BASE" "$PR_HEAD"
 
 # Abort if anything but modified and added
-abort=$(git diff --name-status "$PR_BASE" "$PR_HEAD" | cut -c1 | grep -E "C|D|R|T|U|X|B")
+abort=$(git diff --name-status "$PR_BASE" "$PR_HEAD" | cut -c1 | grep -E "C|D|R|T|U|X|B|M" )
 
 echo $abort
 
