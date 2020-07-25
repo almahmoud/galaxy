@@ -8,6 +8,8 @@ jobs:
       image: alpine/helm:latest
       env:
         PR_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
+    name: Preview
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
 
