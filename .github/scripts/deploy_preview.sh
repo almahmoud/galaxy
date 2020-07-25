@@ -19,7 +19,7 @@ if [[ ! -n $abort ]]; then
     paste -d "\0\"=" start encfilelist /dev/null filelist > setfilelist
     PROJMAN_SET=$(paste -s -d ' ' setfilelist)
 
-    echo helm upgrade --install galaxy-preview-injection-$PR_NUM gxy/projman --set projectName="galaxy-$PR_NUM" $PROJMAN_SET
+    echo helm upgrade --install "galaxy-preview-injection-$PR_NUM" gxy/projman --set projectName="galaxy-$PR_NUM" $PROJMAN_SET
     helm upgrade --install galaxy-preview-injection-$PR_NUM gxy/projman --set projectName="galaxy-$PR_NUM" $PROJMAN_SET
 
     cat <<EOF > vols.yaml
@@ -39,7 +39,7 @@ extraVolumeMounts:
     mountPath: "/galaxy/server"
 EOF
 
-    echo helm upgrade --install galaxy-preview-$PR_NUM gxy/galaxy -f values.yaml -f vols.yaml
+    echo helm upgrade --install "galaxy-preview-$PR_NUM" gxy/galaxy -f values.yaml -f vols.yaml
     helm upgrade --install galaxy-preview-$PR_NUM gxy/galaxy -f values.yaml -f vols.yaml
 
 fi
