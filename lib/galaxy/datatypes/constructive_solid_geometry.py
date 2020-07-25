@@ -26,8 +26,10 @@ class Ply(object):
     """
     subtype = ''
     # Add metadata elements.
-    MetadataElement(name="file_format", default=None, desc="File format",
-                    readonly=True, optional=True, visible=True, no_value=None)
+    MetadataElement(name="file_format",
+                    default=None, desc="File format",
+                    readonly=True, optional=True,
+                    visible=True, no_value=None)
     MetadataElement(name="vertex", default=None, desc="Vertex",
                     readonly=True, optional=True, visible=True, no_value=None)
     MetadataElement(name="face", default=None, desc="Face",
