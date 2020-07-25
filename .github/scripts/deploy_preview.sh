@@ -5,7 +5,7 @@ set -e
 helm repo add gxy https://raw.githubusercontent.com/cloudve/helm-charts/master/
 
 # Abort if anything but modified and added
-abort=$(git diff --name-status | cut -c1 | grep -E "(C|D|R|T|U|X|B)")
+abort=$(git diff --name-status "$PR_BASE" "$PR_HEAD" | cut -c1 | grep -E "C|D|R|T|U|X|B")
 
 if [[ ! -n $abort ]]; then
     git diff --name-only "$PR_BASE" "$PR_HEAD" > filelist
