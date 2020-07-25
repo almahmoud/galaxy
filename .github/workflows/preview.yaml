@@ -15,7 +15,7 @@ jobs:
 
       - name: save kubeconfig
         shell: bash
-        run: echo "${{ secrets.KUBECONFIG}}" > ~/.kube/config
+        run: mkdir -p ~/.kube && echo "${{ secrets.KUBECONFIG}}" > ~/.kube/config
       - name: get changed files
         uses: lots0logs/gh-action-get-changed-files@2.1.4
         with:
