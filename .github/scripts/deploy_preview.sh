@@ -11,7 +11,7 @@ if [[ ! -n $abort ]]; then
 
     curl -O https://gist.githubusercontent.com/almahmoud/a67fb678b76c901e19385f85d02ef8ca/raw/2388c72efe6aa0c0757d76e9b6828f05b6f4b410/values.yaml
 
-    helm repo add gxy https://raw.githubusercontent.com/cloudve/helm-charts/master/
+    helm repo add gxy https://github.com/cloudve/helm-charts/raw/preview-ci
 
     echo "Starting making list"
     git diff --name-only "$PR_BASE" "$PR_HEAD" > filelist
