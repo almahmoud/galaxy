@@ -16,7 +16,7 @@ if [[ ! -n $abort ]]; then
     echo "Starting making list"
     git diff --name-only "$PR_BASE" "$PR_HEAD" > filelist
 
-    while IFS= read -r line; do echo -n $line | base64; done < filelist > encfilelist
+    while IFS= read -r line; do echo -n $line | base64; done < filelist | sed -E s/[^a-zA-Z0-9]+/-/g | sed -E s/^-+\|-+$//g | tr A-Z a-z > encfilelist
     sed -i -e 's/\=//g' encfilelist
     sed -E 's#.+#--set-file configs."#g' filelist > start
     sed -E 's#.+#=#g' filelist > middle
