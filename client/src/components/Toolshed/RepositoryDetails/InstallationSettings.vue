@@ -81,9 +81,9 @@ export default {
         return {
             modalShow: true,
             advancedShow: false,
-            installToolDependencies: true,
-            installRepositoryDependencies: true,
-            installResolverDependencies: true,
+            installToolDependencies: false,
+            installRepositoryDependencies: false,
+            installResolverDependencies: false,
             toolConfigs: [],
             toolConfig: null,
             toolSections: [],
