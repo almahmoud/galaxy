@@ -9,15 +9,15 @@ import random
 import socket
 import string
 import time
+from http.cookies import CookieError
 from importlib import import_module
+from urllib.parse import urlparse
 
 import mako.lookup
 import mako.runtime
 from babel import Locale
 from babel.support import Translations
 from Cheetah.Template import Template
-from six.moves.http_cookies import CookieError
-from six.moves.urllib.parse import urlparse
 from sqlalchemy import and_, true
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
@@ -277,6 +277,21 @@ class GalaxyWebTransaction(base.DefaultWebTransaction,
         t = Translations.load(dirname='locale', locales=locales, domain='ginga')
         self.template_context.update(dict(_=t.ugettext, n_=t.ugettext, N_=t.ungettext))
 
+    def set_cors_allow(self, name=None, value=None):
+        acr = 'Access-Control-Request-'
+        if name is None:
+            for key in self.request.headers.keys():
+                if key.startswith(acr):
+                    self.set_cors_allow(name=key[len(acr):], value=value)
+        else:
+            resp_name = 'Access-Control-Allow-{}'.format(name)
+            if value is None:
+                value = self.request.headers.get(acr + name, None)
+            if value:
+                self.response.headers[resp_name] = value
+            elif resp_name in self.response.headers:
+                del self.response.headers[resp_name]
+
     def set_cors_origin(self, origin=None):
         if origin is None:
             origin = self.request.headers.get("Origin", None)
@@ -374,7 +389,7 @@ class GalaxyWebTransaction(base.DefaultWebTransaction,
         try:
             self.response.cookies[name]['httponly'] = True
         except CookieError as e:
-            log.warning("Error setting httponly attribute in cookie '{}': {}".format(name, e))
+            log.warning(f"Error setting httponly attribute in cookie '{name}': {e}")
         if self.app.config.cookie_domain is not None:
             self.response.cookies[name]['domain'] = self.app.config.cookie_domain
 

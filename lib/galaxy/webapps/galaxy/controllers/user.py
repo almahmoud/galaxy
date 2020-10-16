@@ -4,9 +4,9 @@ Contains the user interface in the Universe class
 
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 
 from markupsafe import escape
-from six.moves.urllib.parse import unquote
 from sqlalchemy import (
     func,
     or_
@@ -88,7 +88,7 @@ class User(BaseUIController, UsesFormDefinitionsMixin, CreatesApiKeysMixin):
         try:
             autoreg = trans.app.auth_manager.check_auto_registration(trans, login, password)
         except Conflict as conflict:
-            return "Auto-registration failed, {}".format(conflict), None
+            return f"Auto-registration failed, {conflict}", None
         user = None
         if autoreg["auto_reg"]:
             email = autoreg["email"]
@@ -138,7 +138,8 @@ class User(BaseUIController, UsesFormDefinitionsMixin, CreatesApiKeysMixin):
             trans.app.model.User.table.c.email == login,
             trans.app.model.User.table.c.username == login
         )).first()
-        if not user and login.lower() != login:
+        if not user:
+            # Try a case-insensitive match on the email
             user = trans.sa_session.query(trans.app.model.User).filter(
                 func.lower(trans.app.model.User.table.c.email) == login.lower()
             ).first()
