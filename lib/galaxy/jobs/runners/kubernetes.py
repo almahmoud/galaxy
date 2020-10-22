@@ -104,8 +104,8 @@ class KubernetesJobRunner(AsynchronousJobRunner):
         # where galaxy will expect results.
         log.debug("Starting queue_job for job " + job_wrapper.get_id_tag())
         ajs = AsynchronousJobState(files_dir=job_wrapper.working_directory,
-                                   job_wrapper=job_wrapper,
-                                   job_destination=job_wrapper.job_destination)
+                                    job_wrapper=job_wrapper,
+                                    job_destination=job_wrapper.job_destination)
 
         if not self.prepare_job(job_wrapper,
                                 include_metadata=False,
@@ -140,6 +140,10 @@ class KubernetesJobRunner(AsynchronousJobRunner):
         job_wrapper.set_external_id(job_id)
         self.monitor_queue.put(ajs)
 
+    def __get_overridable_params(self, job_wrapper, param_key):
+        dest_params = self.__get_destination_params(job_wrapper)
+        return dest_params.get(param_key, self.runner_params[param_key])
+
     def __get_pull_policy(self):
         return pull_policy(self.runner_params)
 
@@ -167,7 +171,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 return int(self.runner_params["k8s_supplemental_group_id"])
             except Exception:
                 log.warning("Supplemental group passed for Kubernetes runner needs to be an integer, value "
-                         + self.runner_params["k8s_supplemental_group_id"] + " passed is invalid")
+                        + self.runner_params["k8s_supplemental_group_id"] + " passed is invalid")
                 return None
         return None
 
@@ -177,7 +181,7 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 return int(self.runner_params["k8s_fs_group_id"])
             except Exception:
                 log.warning("FS group passed for Kubernetes runner needs to be an integer, value "
-                         + self.runner_params["k8s_fs_group_id"] + " passed is invalid")
+                        + self.runner_params["k8s_fs_group_id"] + " passed is invalid")
                 return None
         return None
 
@@ -227,8 +231,10 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 "containers": self.__get_k8s_containers(ajs),
                 "priorityClassName": self.runner_params['k8s_pod_priority_class'],
                 "tolerations": yaml.safe_load(self.runner_params['k8s_tolerations'] or "[]"),
-                "affinity": yaml.safe_load(self.runner_params['k8s_affinity'] or "{}"),
-                "nodeSelector": yaml.safe_load(self.runner_params['k8s_node_selector'] or "{}")
+                "affinity": yaml.safe_load(self.__get_overridable_params(ajs.job_wrapper,
+                                                                            'k8s_affinity') or "{}"),
+                "nodeSelector": yaml.safe_load(self.__get_overridable_params(ajs.job_wrapper,
+                                                                                'k8s_node_selector') or "{}")
             }
         }
         # TODO include other relevant elements that people might want to use from
@@ -254,11 +260,11 @@ class KubernetesJobRunner(AsynchronousJobRunner):
 
     def __get_k8s_containers(self, ajs):
         """Fills in all required for setting up the docker containers to be used, including setting a pull policy if
-           this has been set.
-           $GALAXY_VIRTUAL_ENV is set to None to avoid the galaxy virtualenv inside the tool container.
-           $GALAXY_LIB is set to None to avoid changing the python path inside the container.
-           Setting these variables changes the described behaviour in the job file shell script
-           used to execute the tool inside the container.
+            this has been set.
+            $GALAXY_VIRTUAL_ENV is set to None to avoid the galaxy virtualenv inside the tool container.
+            $GALAXY_LIB is set to None to avoid changing the python path inside the container.
+            Setting these variables changes the described behaviour in the job file shell script
+            used to execute the tool inside the container.
         """
         k8s_container = {
             "name": self.__get_k8s_container_name(ajs.job_wrapper),
@@ -390,6 +396,16 @@ class KubernetesJobRunner(AsynchronousJobRunner):
                 cleaned_id = "x%sx" % cleaned_id
             return cleaned_id
         return "job-container"
+
+    def __get_destination_params(self, job_wrapper):
+        """Obtains allowable runner param overrides from the destination"""
+        job_destination = job_wrapper.job_destination
+        OVERRIDABLE_PARAMS = ["k8s_node_selector", "k8s_affinity"]
+        new_params = {}
+        for each_param in OVERRIDABLE_PARAMS:
+            if each_param in job_destination.params:
+                new_params[each_param] = job_destination.params[each_param]
+        return new_params
 
     def check_watched_item(self, job_state):
         """Checks the state of a job already submitted on k8s. Job state is an AsynchronousJobState"""
