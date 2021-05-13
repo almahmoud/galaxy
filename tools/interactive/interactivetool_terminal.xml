@@ -1,0 +1,26 @@
+<tool id="interactive_tool_terminal" tool_type="interactive" name="Terminal" version="0.1">
+    <requirements>
+        <container type="docker">cloudve/ttyd:latest</container>
+    </requirements>
+    <entry_points>
+        <entry_point name="Terminal" requires_domain="false">
+            <port>7681</port>
+            <url>terminal</url>
+        </entry_point>
+    </entry_points>
+    <environment_variables>
+        <environment_variable name="REMOTE_HOST">${__app__.config.galaxy_infrastructure_url}</environment_variable>
+        <environment_variable name="GALAXY_WEB_PORT">80</environment_variable>
+        <environment_variable name="GALAXY_URL">$__galaxy_url__</environment_variable>
+        <environment_variable name="DEBUG">true</environment_variable>
+        <environment_variable name="DISABLE_AUTH">true</environment_variable>
+        <environment_variable name="API_KEY" inject="api_key" />
+    </environment_variables>
+    <command detect_errors="aggressive"><![CDATA[
+        bash -c "ttyd --base-path \$INTERACTIVETOOL_PATH bash"
+    ]]>
+    </command>
+    <inputs>
+        <!--<param name="input" type="data" optional="true" label="Include data into the environment"/>-->
+    </inputs>
+</tool>
