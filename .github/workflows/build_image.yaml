@@ -1,0 +1,29 @@
+name: Build Image
+on: push
+jobs:
+  test:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      # https://stackoverflow.com/questions/59810838/how-to-get-the-short-sha-for-the-github-workflow
+      - name: Set outputs
+        id: vars
+        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+      - name: Login to docker hub
+        uses: actions-hub/docker/login@master
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      - run: docker build . -t galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} -f .k8s_ci.Dockerfile
+      - run: docker push galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }}
+      - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} galaxy/galaxy-anvil:${GITHUB_REF##*/} && docker push galaxy/galaxy-anvil:${GITHUB_REF##*/}
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+      - run: gcloud services enable containerregistry.googleapis.com
+      - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/} && docker push gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/}
+      - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }} && docker push gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
