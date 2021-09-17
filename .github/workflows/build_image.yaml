@@ -10,6 +10,9 @@ jobs:
       - name: Set outputs
         id: vars
         run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+      - name: Set branch name
+        id: branch
+        run: echo "::set-output name=name::$(echo ${GITHUB_REF##*/})
       - name: Login to docker hub
         uses: actions-hub/docker/login@master
         env:
@@ -39,7 +42,7 @@ jobs:
           registry: gcr.io
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           image_name: galaxy
-          image_tag: ${GITHUB_REF##*/}
+          image_tag: ${{ steps.vars.outputs.sha_short }}
           push_only: true
       - uses: RafikFarhad/push-to-gcr-github-action@v4
         with:
@@ -47,5 +50,5 @@ jobs:
           registry: gcr.io
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           image_name: galaxy
-          image_tag: ${{ steps.vars.outputs.sha_short }}
+          image_tag: ${{ steps.branch.outputs.name }}
           push_only: true
