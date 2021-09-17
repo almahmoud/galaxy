@@ -31,15 +31,21 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           service_account_key: ${{ secrets.GCP_SA_KEY }}
           export_default_credentials: true
-      - run: gcloud auth configure-docker --quiet
      # - run: gcloud services enable containerregistry.googleapis.com
       - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/} && docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
-      - name: Push to GCR with branch name
-        uses: actions-hub/docker@master
+      - uses: RafikFarhad/push-to-gcr-github-action@v4
         with:
-          args: push gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/}
-      - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/} && docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
-      - name: Push to GCR with commit id
-        uses: actions-hub/docker@master
+          gcloud_service_key: ${{ secrets.GCP_SA_KEY }}
+          registry: gcr.io
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          image_name: galaxy
+          image_tag: ${GITHUB_REF##*/}
+          push_only: true
+      - uses: RafikFarhad/push-to-gcr-github-action@v4
         with:
-          args: push gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
+          gcloud_service_key: ${{ secrets.GCP_SA_KEY }}
+          registry: gcr.io
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          image_name: galaxy
+          image_tag: ${{ steps.vars.outputs.sha_short }}
+          push_only: true
