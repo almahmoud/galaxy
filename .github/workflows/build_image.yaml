@@ -31,7 +31,7 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           service_account_key: ${{ secrets.GCP_SA_KEY }}
           export_default_credentials: true
-      - run: gcloud services enable containerregistry.googleapis.com
+     # - run: gcloud services enable containerregistry.googleapis.com
       - run: docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${GITHUB_REF##*/} && docker tag galaxy/galaxy-anvil:${{ steps.vars.outputs.sha_short }} gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
       - name: Push to GCR with branch name
         uses: actions-hub/docker@master
