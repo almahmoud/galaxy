@@ -41,4 +41,4 @@ jobs:
       - name: Push to GCR with commit id
         uses: actions-hub/docker@master
         with:
-          args: push cr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
+          args: push gcr.io/anvil-galaxy/galaxy:${{ steps.vars.outputs.sha_short }}
