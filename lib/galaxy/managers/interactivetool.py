@@ -269,7 +269,7 @@ class InteractiveToolManager:
         entry_point_prefix = self.app.config.interactivetools_prefix
         entry_point_token = entry_point.token
         if self.app.config.interactivetools_shorten_url:
-            return f'{entry_point_encoded_id}-{entry_point_token[:10]}.{entry_point_prefix}'
+            return f'{entry_point_token[:10]}.{entry_point_prefix}'
         return f'{entry_point_encoded_id}-{entry_point_token}.{entry_point_class}.{entry_point_prefix}'
 
     def get_entry_point_path(self, trans, entry_point):
