@@ -13,6 +13,7 @@ import operator
 import os
 import pwd
 import random
+import requests
 import string
 from collections import defaultdict
 from collections.abc import Callable
@@ -2233,8 +2234,38 @@ class InteractiveToolEntryPoint(Base, Dictifiable, RepresentById):
         self.info = self.info or {}
 
     @property
+    def target(self):
+        request_host = "yes4cure.launch.bioconductor.org"
+        protocol = "https:"
+        
+        def get_entry_point_subdomain(entry_point):
+            entry_point_prefix = "its"
+            entry_point_token = entry_point.token
+            return f"{entry_point_token[:10]}.{entry_point_prefix}"
+
+        rval = f"{protocol}//{get_entry_point_subdomain(self)}.{request_host}/"
+        if self.entry_url:
+            rval = "{}/{}".format(rval.rstrip("/"), self.entry_url.lstrip("/"))
+        log.debug("ALEX TARGET")
+        log.warning("ALEX TARGET")
+        log.debug(rval)
+        log.warning(rval)
+        return rval
+    
+    @property
     def active(self):
-        if self.configured and not self.deleted:
+        def __is_up(url):
+          log.debug("ALEXentering active")
+          log.warning("ALEXentering active")
+          try:	
+            r = requests.get(url)	
+          except requests.exceptions.SSLError:	
+            return False	
+          if r.status_code == 200:	
+            return True	
+          else:	
+            return False
+        if self.configured and not self.deleted and __is_up(self.target):
             # FIXME: don't included queued?
             return not self.job.finished
         return False
