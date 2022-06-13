@@ -311,11 +311,19 @@ export default {
                         this.entryPoints = jobResponse.jobs;
                     }
                     const nJobs = jobResponse && jobResponse.jobs ? jobResponse.jobs.length : 0;
+                    const nOutputs = jobResponse && jobResponse.outputs ? jobResponse.outputs.length : 0;
                     if (nJobs > 0) {
-                        this.showForm = false;
-                        this.showSuccess = true;
-                        this.jobDef = jobDef;
-                        this.jobResponse = jobResponse;
+                        if (nOutputs > 0) {
+                            this.showForm = false;
+                            this.showSuccess = true;
+                            this.jobDef = jobDef;
+                            this.jobResponse = jobResponse;
+                        } else {
+                            this.showForm = false;
+                            this.showSuccess = false;
+                            this.jobDef = jobDef;
+                            this.jobResponse = jobResponse;
+                        }
                     } else {
                         this.showError = true;
                         this.showForm = true;
