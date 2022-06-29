@@ -21,7 +21,7 @@ ARG SERVER_DIR=$ROOT_DIR/server
 ARG STAGE1_BASE=python:3.7-slim
 ARG FINAL_STAGE_BASE=$STAGE1_BASE
 ARG GALAXY_USER=galaxy
-ARG GALAXY_PLAYBOOK_REPO=https://github.com/galaxyproject/galaxy-docker-k8s
+ARG GALAXY_PLAYBOOK_REPO=https://github.com/almahmoud/galaxy-docker-k8s
 ARG GALAXY_PLAYBOOK_BRANCH=v2.0.0
 
 ARG GIT_COMMIT=unspecified
