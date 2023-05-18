@@ -28,6 +28,7 @@
 
 <script>
 import { clearPolling, pollUntilActive } from "mvc/entrypoints/poll";
+import { getGalaxyInstance } from "app";
 import { getAppRoot } from "onload/loadConfig";
 
 export default {
@@ -62,6 +63,11 @@ export default {
                 console.error(e);
             };
             pollUntilActive(onUpdate, onError, { job_id: this.jobId });
+            redirectToUsersITs();
+        },
+        redirectToUsersITs: function () {
+            const Galaxy = getGalaxyInstance();
+            Galaxy.page.router.push(`${getAppRoot()}interactivetool_entry_points/list`);
         },
     },
 };

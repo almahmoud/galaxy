@@ -72,7 +72,6 @@ import _l from "utils/localization";
 
 export default {
     components: {
-        UploadButton,
         FavoritesButton,
         PanelViewButton,
         ToolSection,
