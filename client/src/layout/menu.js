@@ -77,77 +77,6 @@ export function fetchMenu(options = {}) {
     //
     // Workflow tab.
     //
-    menu.push({
-        id: "workflow",
-        title: _l("Workflow"),
-        tooltip: _l("Chain tools into workflows"),
-        disabled: !Galaxy.user.id,
-        url: "workflows/list",
-        target: "__use_router__",
-    });
-
-    //
-    // Visualization tab.
-    //
-    if (Galaxy.config.visualizations_visible) {
-        if (Galaxy.config.visualizations_visible) {
-            menu.push({
-                id: "visualization",
-                title: _l("Visualize"),
-                tooltip: _l("Visualize datasets"),
-                disabled: !Galaxy.user.id,
-                url: "visualizations",
-                target: "__use_router__",
-            });
-        }
-    }
-
-    //
-    // 'Shared Items' or Libraries tab.
-    //
-    if (Galaxy.config.single_user) {
-        // Single user can still use libraries, especially as we may grow that
-        // functionality as a representation for external data.  The rest is
-        // hidden though.
-        menu.push({
-            title: _l("Data Libraries"),
-            url: "libraries",
-            id: "libraries",
-        });
-    } else {
-        menu.push({
-            id: "shared",
-            title: _l("Shared Data"),
-            url: "javascript:void(0)",
-            tooltip: _l("Access published resources"),
-            menu: [
-                {
-                    title: _l("Data Libraries"),
-                    url: "libraries",
-                },
-                {
-                    title: _l("Histories"),
-                    url: "histories/list_published",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Workflows"),
-                    url: "workflows/list_published",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Visualizations"),
-                    url: "visualizations/list_published",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Pages"),
-                    url: "pages/list_published",
-                    target: "__use_router__",
-                },
-            ],
-        });
-    }
 
     //
     // Admin.
@@ -172,53 +101,25 @@ export function fetchMenu(options = {}) {
         tooltip: _l("Support, contact, and community"),
         menu: [
             {
-                title: _l("Galaxy Help"),
-                url: options.helpsite_url,
-                target: "_blank",
-                hidden: !options.helpsite_url,
-            },
-            {
-                title: _l("Support"),
-                url: options.support_url,
-                target: "_blank",
-                hidden: !options.support_url,
-            },
-            {
-                title: _l("Search"),
-                url: options.search_url,
-                target: "_blank",
-                hidden: !options.search_url,
-            },
-            {
-                title: _l("Mailing Lists"),
-                url: options.mailing_lists,
-                target: "_blank",
-                hidden: !options.mailing_lists,
-            },
-            {
-                title: _l("Videos"),
-                url: options.screencasts_url,
-                target: "_blank",
-                hidden: !options.screencasts_url,
-            },
-            {
-                title: _l("Wiki"),
-                url: options.wiki_url,
-                target: "_blank",
-                hidden: !options.wiki_url,
-            },
-            {
-                title: _l("How to Cite Galaxy"),
-                url: options.citation_url,
+                title: _l("See Welcome Page"),
+                url: "https://workshop.bioconductor.org/static/welcome.html",
                 target: "_blank",
             },
             {
-                title: _l("Interactive Tours"),
-                url: "tours",
+                title: _l("Bioconductor Support"),
+                url: "https://support.bioconductor.org",
+                target: "_blank",
+            },
+            
+            {
+                title: _l("Join Bioconductor Slack"),
+                url: "https://slack.bioconductor.org",
+                target: "_blank",
             },
             {
-                title: _l("Introduction to Galaxy"),
-                url: "welcome/new",
+                title: _l("About Bioconductor"),
+                url: "https://bioconductor.org/about",
+                target: "_blank",
             },
             {
                 title: _l("Galaxy Version: " + Galaxy.config.version_major),
