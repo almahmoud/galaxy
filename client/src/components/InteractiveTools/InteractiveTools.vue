@@ -1,7 +1,7 @@
 <template>
     <div>
         <b-alert v-for="(message, index) in messages" :key="index" :show="3" variant="danger">{{ message }}</b-alert>
-        <h2>Active Interactive Tools</h2>
+        <h2>Active Workshops</h2>
         <b-row class="mb-3">
             <b-col cols="6">
                 <b-input
@@ -47,7 +47,7 @@
                 <UtcDate :date="row.item.modified_time" mode="elapsed" />
             </template>
         </b-table>
-        <label v-if="isActiveToolsListEmpty">You do not have active interactive tools yet </label>
+        <label v-if="isActiveToolsListEmpty">You do not have active workshops yet.</label>
         <div v-if="showNotFound">
             No matching entries found for: <span class="font-weight-bold">{{ this.filter }}</span
             >.
