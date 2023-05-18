@@ -1,7 +1,7 @@
 <template>
     <div class="donemessagelarge">
         <p>
-            Successfully queued <b>{{ toolName }}</b>. The status will be updated in the windows above.
+            Successfully queued <b>{{ toolName }}</b>. The status will be updated in the text box above.
         </p>
     </div>
 </template>
