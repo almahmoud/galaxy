@@ -171,61 +171,18 @@ export function fetchMenu(options = {}) {
                     title: `${_l("Logged in as")} ${Galaxy.user.get("email")}`,
                     disabled: true,
                 },
-                {
-                    title: _l("Preferences"),
-                    url: "user",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Custom Builds"),
-                    url: "custom_builds",
-                    target: "__use_router__",
-                },
                 { divider: true },
                 {
                     title: _l("Logout"),
                     onclick: userLogout,
                     hidden: Galaxy.config.single_user,
                 },
-                {
-                    title: _l("Datasets"),
-                    url: "datasets/list",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Histories"),
-                    url: "histories/list",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Histories shared with me"),
-                    url: "histories/list_shared",
-                    target: "__use_router__",
-                    hidden: Galaxy.config.single_user,
-                },
-                {
-                    title: _l("Pages"),
-                    url: "pages/list",
-                    target: "__use_router__",
-                },
-                {
-                    title: _l("Workflow Invocations"),
-                    url: "workflows/invocations",
-                    target: "__use_router__",
-                },
             ],
         };
-        if (Galaxy.config.visualizations_visible) {
-            userTab.menu.push({
-                title: _l("Visualizations"),
-                url: "visualizations/list",
-                target: "__use_router__",
-            });
-        }
         if (Galaxy.config.interactivetools_enable) {
             userTab.menu.push({ divider: true });
             userTab.menu.push({
-                title: _l("Active InteractiveTools"),
+                title: _l("Active Workshops"),
                 url: "interactivetool_entry_points/list",
                 target: "__use_router__",
             });
