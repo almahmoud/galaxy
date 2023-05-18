@@ -1,24 +1,7 @@
 <template>
     <div class="donemessagelarge">
         <p>
-            Executed <b>{{ toolName }}</b> and successfully added {{ nJobsText }} to the queue.
-        </p>
-        <p>The tool uses {{ nInputsText }}:</p>
-        <ul>
-            <li v-for="item of inputs" :key="item.hid">
-                <b>{{ item.hid }}: {{ item.name }}</b>
-            </li>
-        </ul>
-        <p>It produces {{ nOutputsText }}:</p>
-        <ul>
-            <li v-for="item of jobResponse.outputs" :key="item.hid">
-                <b>{{ item.hid }}: {{ item.name }}</b>
-            </li>
-        </ul>
-        <p>
-            You can check the status of queued jobs and view the resulting data by refreshing the History panel. When
-            the job has been run the status will change from 'running' to 'finished' if completed successfully or
-            'error' if problems were encountered.
+            Successfully queued <b>{{ toolName }}</b>. The status will be updated in the windows above.
         </p>
     </div>
 </template>
