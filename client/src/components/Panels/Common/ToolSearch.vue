@@ -24,7 +24,7 @@ export default {
         },
         placeholder: {
             type: String,
-            default: "search tools",
+            default: "search workshops",
         },
     },
     data() {

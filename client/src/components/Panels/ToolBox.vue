@@ -79,7 +79,7 @@ export default {
             showSections: false,
             buttonText: "",
             buttonIcon: "",
-            titleSearchTools: _l("search tools"),
+            titleSearchTools: _l("search workshops"),
         };
     },
     props: {

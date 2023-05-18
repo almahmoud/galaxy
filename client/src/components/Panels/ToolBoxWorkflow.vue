@@ -16,7 +16,7 @@
         <div class="unified-panel-controls">
             <tool-search
                 :current-panel-view="currentPanelView"
-                placeholder="search tools"
+                placeholder="search workshops"
                 @onQuery="onQuery"
                 @onResults="onResults"
             />
