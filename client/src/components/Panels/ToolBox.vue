@@ -57,7 +57,6 @@ import ToolSection from "./Common/ToolSection";
 import ToolSearch from "./Common/ToolSearch";
 import { UploadButton, openGlobalUploadModal } from "components/Upload";
 import FavoritesButton from "./Buttons/FavoritesButton";
-import PanelViewButton from "./Buttons/PanelViewButton";
 import { filterToolSections, filterTools } from "./utilities";
 import { getGalaxyInstance } from "app";
 import { getAppRoot } from "onload";
@@ -66,7 +65,6 @@ import _l from "utils/localization";
 export default {
     components: {
         FavoritesButton,
-        PanelViewButton,
         ToolSection,
         ToolSearch,
     },
