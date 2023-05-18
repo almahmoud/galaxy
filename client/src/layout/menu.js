@@ -71,7 +71,7 @@ export function fetchMenu(options = {}) {
     menu.push({
         id: "analysis",
         url: "",
-        tooltip: _l("Tools and Current History"),
+        tooltip: _l("Workshops"),
         icon: "fa-home",
     });
     //
