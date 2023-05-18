@@ -4,10 +4,13 @@
         <p v-else-if="entryPoints.length == 1">
             <span v-if="entryPoints[0].active">
                 There is an InteractiveTool result view available,
-                <a :href="entryPoints[0].target">click here to display</a>.
+                <a v-b-tooltip title="Open Interactive Tool" :href="entryPoints[0].target" target="_blank">
+                    OPEN WORKSHOP
+                    <font-awesome-icon icon="external-link-alt" />
+                </a>
             </span>
             <span v-else>
-                There is an InteractiveTool result view available, waiting for view to become active...
+                An interactive tool is launching, waiting for it to become ready...
             </span>
         </p>
         <div v-else>
@@ -20,8 +23,8 @@
                 </li>
             </ul>
         </div>
-
-        You may also access all active InteractiveTools from the
+        You may only have 2 workshops active at once.
+        You may access all launched workshops and stop them from the
         <a :href="interactiveToolsLink">User menu</a>.
     </div>
 </template>
