@@ -9,7 +9,7 @@ const ToolPanel = Backbone.View.extend({
     initialize: function () {
         // components for panel definition
         this.model = new Backbone.Model({
-            title: _l("Tools"),
+            title: _l("Workshops"),
         });
     },
 
