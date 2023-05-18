@@ -11,7 +11,7 @@
                         v-if="panelViews && Object.keys(panelViews).length > 1"
                     />
                 </div>
-                <div class="panel-header-text" v-localize>Tools</div>
+                <div class="panel-header-text" v-localize>Workshops</div>
             </div>
         </div>
         <div class="unified-panel-controls">
