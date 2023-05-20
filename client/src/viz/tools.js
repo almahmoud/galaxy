@@ -313,7 +313,7 @@ var templates = {
             "<% }); %>",
             "</div>",
             '<div class="form-row form-actions">',
-            '<input type="submit" class="btn btn-primary" name="runtool_btn" value="Execute" />',
+            '<input type="submit" class="btn btn-primary" name="runtool_btn" value="Launch" />',
             "</div>",
             '<div class="toolHelp">',
             '<div class="toolHelpBody"><% tool.help %></div>',
