@@ -81,7 +81,7 @@
                         <template v-slot:buttons>
                             <ButtonSpinner
                                 id="execute"
-                                title="Execute"
+                                title="Launch"
                                 @onClick="onExecute(config, currentHistoryId)"
                                 :wait="showExecuting"
                                 :tooltip="tooltip"
