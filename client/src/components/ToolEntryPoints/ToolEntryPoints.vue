@@ -10,7 +10,7 @@
                 </a>
             </span>
             <span v-else>
-                An interactive tool is launching, waiting for it to become ready...
+                Your workshop is launching, please wait for it to become ready. This text will be replaced with a clickable link when your workshop becomes accessible.
             </span>
         </p>
         <div v-else>
@@ -23,8 +23,8 @@
                 </li>
             </ul>
         </div>
-        You may only have 2 workshops active at once.
-        You may access all launched workshops and stop them from the
+        <strong>You may only have 2 workshops active at once.</strong> Further launches will result in an indefinite wait.
+        <br>You may access all launched workshops and stop them from the
         <a :href="interactiveToolsLink">User menu</a>.
     </div>
 </template>
