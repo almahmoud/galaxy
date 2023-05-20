@@ -1,16 +1,16 @@
 <template>
     <div class="infomessagelarge">
-        <p v-if="entryPoints.length == 0">Waiting for InteractiveTool result view(s) to become available.</p>
+        <p v-if="entryPoints.length == 0">Your workshop is queued. Make sure you do not have 2 workshops already active for your workshop to launch. This text will be replaced with a clickable link when your workshop becomes available.</p>
         <p v-else-if="entryPoints.length == 1">
             <span v-if="entryPoints[0].active">
-                There is an InteractiveTool result view available,
+                Your workshop is available,
                 <a v-b-tooltip title="Open Interactive Tool" :href="entryPoints[0].target" target="_blank">
-                    OPEN WORKSHOP
+                    CLICK HERE TO OPEN.
                     <font-awesome-icon icon="external-link-alt" />
                 </a>
             </span>
             <span v-else>
-                Your workshop is launching, please wait for it to become ready. This text will be replaced with a clickable link when your workshop becomes accessible.
+                Your workshop is launching, please wait for it to become ready. This text will be replaced with a clickable link when your workshop becomes available.
             </span>
         </p>
         <div v-else>
