@@ -3,9 +3,8 @@
         <p v-if="entryPoints.length == 0">Your workshop is queued. Make sure you do not have 2 workshops already active for your workshop to launch. This text will be replaced with a clickable link when your workshop becomes available.</p>
         <p v-else-if="entryPoints.length == 1">
             <span v-if="entryPoints[0].active">
-                Your workshop is available,
-                <a v-b-tooltip title="Open Interactive Tool" :href="entryPoints[0].target" target="_blank">
-                    CLICK HERE TO OPEN.
+                <a class="btn btn-primary" v-b-tooltip title="Open Interactive Tool" :href="entryPoints[0].target" target="_blank">
+                    Your workshop is available, CLICK HERE TO OPEN
                     <font-awesome-icon icon="external-link-alt" />
                 </a>
             </span>
