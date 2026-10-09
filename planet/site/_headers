@@ -1,0 +1,39 @@
+# Response headers for Workers Static Assets (also applied by planet/scripts/serve-dist.mjs).
+# Headers from several matching rules are joined, so each header is set by one rule per path.
+# Responses built by worker.js or by the service worker set their own headers.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; media-src 'self' blob: https: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; frame-src 'self' blob:; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: accelerometer=(), browsing-topics=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+
+# Entry points and shells keep stable URLs and are revalidated on every load.
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/sw.js
+  Cache-Control: no-cache
+/static/welcome.html
+  Cache-Control: no-cache
+/static/planet/boot.js
+  Cache-Control: no-cache
+/static/planet/boot.css
+  Cache-Control: no-cache
+/static/planet/build.json
+  Cache-Control: no-cache
+/static/dist/libs.bundled.js
+  Cache-Control: no-cache
+/static/dist/analysis.bundled.js
+  Cache-Control: no-cache
+/static/dist/planet-welcome.bundled.js
+  Cache-Control: no-cache
+/static/dist/base.css
+  Cache-Control: no-cache
+
+# File names below carry a content hash.
+/static/dist/chunks/*
+  Cache-Control: public, max-age=31536000, immutable
+/static/dist/assets/*
+  Cache-Control: public, max-age=31536000, immutable

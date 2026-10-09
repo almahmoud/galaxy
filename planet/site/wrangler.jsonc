@@ -1,0 +1,13 @@
+{
+    "name": "planet",
+    "main": "worker.js",
+    // Navigations skip the Worker and get index.html from 2025-04-01 on (assets_navigation_prefers_asset_serving).
+    "compatibility_date": "2026-09-15",
+    "assets": {
+        "directory": "../dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        // Serve files only at their exact paths, without .html or trailing-slash redirects.
+        "html_handling": "none",
+    },
+}

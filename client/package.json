@@ -176,6 +176,7 @@
     "build": "NODE_ENV=development node scripts/build.mjs && vite build && pnpm run stage-build",
     "build-production": "NODE_ENV=production node scripts/build.mjs && vite build && pnpm run stage-build",
     "build-production-maps": "GXY_BUILD_SOURCEMAPS=1 NODE_ENV=production node scripts/build.mjs && vite build && pnpm run stage-build",
+    "build:planet": "node ../planet/scripts/build-site.mjs",
     "icons": "node scripts/build.mjs icons",
     "plugins": "node scripts/build.mjs plugins",
     "plugins-rebuild": "node scripts/build.mjs plugins --force",
