@@ -1,0 +1,58 @@
+# Planet's built-in toolbox. planet_runtime.generate.toolbox reads this file.
+#
+# Repository tools are fetched from `repository` at `commit` and published under their
+# Tool Shed GUID (<tool_shed>/repos/<owner>/<name>/<tool id>/<version>). Owner and name
+# come from the tool directory's .shed.yml unless the entry sets `owner` and `name`.
+# `galaxy:` entries are tools shipped in this Galaxy checkout and keep their plain id.
+tool_shed: toolshed.g2.bx.psu.edu
+repository: galaxyproject/tools-iuc
+commit: cac0a26705bc20c444a43710daa036594f01ccb7
+
+sections:
+  - id: getext
+    name: Get Data
+    tools:
+      - galaxy: tools/data_source/upload.xml
+
+  - id: textutil
+    name: Text Manipulation
+    tools:
+      - path: tools/column_maker/column_maker.xml
+      - path: tools/column_remove_by_header/column_remove_by_header.xml
+      - path: tools/column_order_header_sort/column_order_header_sort.xml
+      - path: tools/add_input_name_as_column/add_input_name_as_column.xml
+      - path: tools/join_files_by_id/join_files_by_id.xml
+      - path: tools/query_tabular/query_tabular.xml
+
+  - id: datamash
+    name: Datamash
+    tools:
+      - path: tools/datamash/datamash-ops.xml
+      - path: tools/datamash/datamash-transpose.xml
+      - path: tools/datamash/datamash-reverse.xml
+
+  - id: fastq_qc
+    name: FASTQ Quality Control
+    tools:
+      - path: tools/fastp/fastp.xml
+      - path: tools/fastqc/rgFastQC.xml
+
+  - id: mapping
+    name: Mapping
+    tools:
+      - path: tools/bwa_mem2/bwa-mem2.xml
+      - path: tools/bowtie2/bowtie2_wrapper.xml
+      - path: tools/minimap2/minimap2.xml
+
+  - id: sam_bam
+    name: SAM/BAM
+    tools:
+      - path: tool_collections/samtools/samtools_sort/samtools_sort.xml
+      - path: tool_collections/samtools/samtools_view/samtools_view.xml
+      - path: tool_collections/samtools/samtools_stats/samtools_stats.xml
+      - path: tool_collections/samtools/samtools_flagstat/samtools_flagstat.xml
+
+  - id: reports
+    name: Reports
+    tools:
+      - path: tools/multiqc/multiqc.xml

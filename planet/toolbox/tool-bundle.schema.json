@@ -1,0 +1,986 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:planet:schema:tool-bundle:1",
+    "title": "Planet tool bundle",
+    "description": "A Galaxy tool parsed by Galaxy's tool_util, as served to the Planet form engine and job stage-in. See planet/docs/tool-bundle.md.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "format_version",
+        "id",
+        "old_id",
+        "version",
+        "versions",
+        "name",
+        "description",
+        "profile",
+        "python_template_version",
+        "tool_type",
+        "model_class",
+        "form_style",
+        "hidden",
+        "display_interface",
+        "require_login",
+        "is_workflow_compatible",
+        "has_parameters",
+        "icon",
+        "license",
+        "creator",
+        "funding",
+        "edam_operations",
+        "edam_topics",
+        "xrefs",
+        "tool_tags",
+        "citations",
+        "help",
+        "requirements",
+        "containers",
+        "resource_requirements",
+        "javascript_requirements",
+        "credentials",
+        "command",
+        "shell_command",
+        "base_command",
+        "arguments",
+        "version_command",
+        "stdio",
+        "configfiles",
+        "environment_variables",
+        "home_target",
+        "tmp_target",
+        "tmp_directory_vars",
+        "docker_env_pass_through",
+        "template_macro_params",
+        "options",
+        "provided_metadata",
+        "required_files",
+        "code",
+        "form",
+        "display",
+        "inputs",
+        "inputs_by_page",
+        "outputs",
+        "parameter_models",
+        "data_tables",
+        "tool_dir",
+        "tool_shed_repository",
+        "source"
+    ],
+    "properties": {
+        "format_version": { "const": 1 },
+        "id": { "type": "string", "minLength": 1, "description": "Tool id; a Tool Shed GUID for repository tools." },
+        "old_id": { "type": ["string", "null"], "description": "The id attribute of the tool XML." },
+        "version": { "type": "string", "minLength": 1 },
+        "versions": { "type": "array", "items": { "type": "string" }, "description": "Versions of this tool's lineage, oldest first." },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "profile": { "type": "string" },
+        "python_template_version": { "type": "string" },
+        "tool_type": { "type": "string" },
+        "model_class": { "type": "string" },
+        "form_style": { "enum": ["regular", "special"] },
+        "hidden": { "type": ["boolean", "string"], "description": "Empty string when the tool does not set it, as in Galaxy." },
+        "display_interface": { "type": "boolean" },
+        "require_login": { "type": "boolean" },
+        "is_workflow_compatible": { "type": "boolean" },
+        "has_parameters": { "type": "boolean" },
+        "icon": { "type": ["string", "null"] },
+        "license": { "type": ["string", "null"] },
+        "creator": { "type": "array", "items": { "type": "object" } },
+        "funding": { "type": "array", "items": { "type": "object" } },
+        "edam_operations": { "$ref": "#/$defs/strings" },
+        "edam_topics": { "$ref": "#/$defs/strings" },
+        "xrefs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["type", "value"],
+                "properties": { "type": { "type": "string" }, "value": { "type": "string" } }
+            }
+        },
+        "tool_tags": { "$ref": "#/$defs/strings" },
+        "citations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "content"],
+                "properties": { "type": { "type": "string" }, "content": { "type": "string" } }
+            }
+        },
+        "help": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["format", "content", "html", "rendered"],
+                    "properties": {
+                        "format": { "enum": ["restructuredtext", "plain_text", "markdown"] },
+                        "content": { "type": "string", "description": "Help as written in the tool." },
+                        "html": {
+                            "type": ["string", "null"],
+                            "description": "docutils rendering of reStructuredText help, with ${static_path} and ${host_url} left in place; null when not rendered."
+                        },
+                        "rendered": { "type": "boolean", "description": "False when reStructuredText help could not be rendered at build time." }
+                    }
+                }
+            ]
+        },
+        "requirements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "type": { "type": "string" },
+                    "version": { "type": ["string", "null"] },
+                    "specs": { "type": "array" }
+                }
+            }
+        },
+        "containers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["identifier", "type"],
+                "properties": {
+                    "identifier": { "type": "string" },
+                    "type": { "type": "string" },
+                    "resolve_dependencies": { "type": "boolean" },
+                    "shell": { "type": "string" }
+                }
+            }
+        },
+        "resource_requirements": { "type": "array", "items": { "type": "object" } },
+        "javascript_requirements": { "type": "array", "items": { "type": "object" } },
+        "credentials": { "type": "array", "items": { "type": "object" } },
+        "command": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "interpreter", "strict", "detect_errors", "oom_exit_code", "use_shared_home", "attributes"],
+            "properties": {
+                "text": { "type": ["string", "null"], "description": "Cheetah template with leading whitespace removed." },
+                "interpreter": { "type": ["string", "null"] },
+                "strict": { "type": "boolean", "description": "Run the command with set -e (parse_strict_shell)." },
+                "detect_errors": { "type": ["string", "null"] },
+                "oom_exit_code": { "type": ["string", "null"] },
+                "use_shared_home": { "type": ["string", "null"] },
+                "attributes": { "$ref": "#/$defs/attributes" }
+            }
+        },
+        "shell_command": { "type": ["string", "null"] },
+        "base_command": { "type": ["array", "null"], "items": { "type": "string" } },
+        "arguments": { "type": ["array", "null"], "items": { "type": "string" } },
+        "version_command": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command", "interpreter"],
+                    "properties": { "command": { "type": "string" }, "interpreter": { "type": ["string", "null"] } }
+                }
+            ]
+        },
+        "stdio": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["exit_codes", "regexes"],
+            "properties": {
+                "exit_codes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["class", "range_start", "range_end", "error_level", "desc"],
+                        "properties": {
+                            "class": { "const": "ToolStdioExitCode" },
+                            "range_start": { "type": ["number", "string"] },
+                            "range_end": { "type": ["number", "string"] },
+                            "error_level": { "type": "number", "description": "StdioErrorLevel: 0 none, 1 log, 1.1 qc, 2 warning, 3 fatal, 4 fatal_oom." },
+                            "desc": { "type": ["string", "null"] }
+                        }
+                    }
+                },
+                "regexes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["class", "match", "stdout_match", "stderr_match", "error_level", "desc"],
+                        "properties": {
+                            "class": { "const": "ToolStdioRegex" },
+                            "match": { "type": "string" },
+                            "stdout_match": { "type": "boolean" },
+                            "stderr_match": { "type": "boolean" },
+                            "error_level": { "type": "number", "description": "StdioErrorLevel: 0 none, 1 log, 1.1 qc, 2 warning, 3 fatal, 4 fatal_oom." },
+                            "desc": { "type": ["string", "null"] }
+                        }
+                    }
+                }
+            }
+        },
+        "configfiles": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["configfiles", "inputs", "file_sources"],
+            "properties": {
+                "configfiles": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["content"],
+                        "properties": {
+                            "name": { "type": ["string", "null"] },
+                            "filename": { "type": ["string", "null"] },
+                            "content": { "type": "string" },
+                            "eval_engine": { "type": "string" }
+                        }
+                    }
+                },
+                "inputs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["content"],
+                        "properties": {
+                            "name": { "type": ["string", "null"] },
+                            "filename": { "type": ["string", "null"] },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "format": { "const": "json" },
+                                    "handle_files": { "type": ["string", "null"] },
+                                    "type": { "const": "inputs" }
+                                }
+                            }
+                        }
+                    }
+                },
+                "file_sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["content"],
+                        "properties": {
+                            "name": { "type": ["string", "null"] },
+                            "filename": { "type": ["string", "null"] },
+                            "content": { "type": "object", "properties": { "type": { "const": "files" } } }
+                        }
+                    }
+                }
+            }
+        },
+        "environment_variables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "template", "inject", "strip"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "template": { "type": ["string", "null"] },
+                    "inject": { "type": ["string", "null"] },
+                    "strip": { "type": "boolean" }
+                }
+            }
+        },
+        "home_target": { "type": ["string", "null"] },
+        "tmp_target": { "type": ["string", "null"] },
+        "tmp_directory_vars": { "$ref": "#/$defs/strings" },
+        "docker_env_pass_through": { "type": ["array", "null"], "items": { "type": "string" } },
+        "template_macro_params": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+        "options": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sanitize", "refresh"],
+            "properties": { "sanitize": { "type": "boolean" }, "refresh": { "type": "boolean" } }
+        },
+        "provided_metadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "style", "explicit"],
+            "properties": {
+                "file": { "type": "string" },
+                "style": { "enum": ["legacy", "default"] },
+                "explicit": { "type": "boolean" }
+            }
+        },
+        "required_files": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["includes", "excludes", "extend_default_excludes"],
+                    "properties": {
+                        "includes": { "type": "array", "items": { "type": "object" } },
+                        "excludes": { "type": "array", "items": { "type": "object" } },
+                        "extend_default_excludes": { "type": "boolean" }
+                    }
+                }
+            ]
+        },
+        "code": {
+            "type": "array",
+            "description": "<code file> hooks. Planet does not execute them.",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["file", "hooks"],
+                "properties": {
+                    "file": { "type": ["string", "null"] },
+                    "hooks": { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+            }
+        },
+        "form": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check_values", "method", "action", "nginx_upload"],
+            "properties": {
+                "check_values": { "type": "boolean" },
+                "method": { "type": "string" },
+                "action": { "type": "string" },
+                "nginx_upload": { "type": "boolean" }
+            }
+        },
+        "display": { "type": ["string", "null"] },
+        "inputs": { "$ref": "#/$defs/inputs" },
+        "inputs_by_page": {
+            "type": ["array", "null"],
+            "description": "Set only for multi-page tools; inputs then holds the first page.",
+            "items": { "$ref": "#/$defs/inputs" }
+        },
+        "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } },
+        "parameter_models": {
+            "type": ["array", "null"],
+            "description": "Galaxy's typed parameter models (galaxy.tool_util.parameters); null when the tool cannot be modelled.",
+            "items": { "type": "object", "required": ["parameter_type", "name"] }
+        },
+        "data_tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "comment_char", "allow_duplicate_entries", "columns", "files"],
+                "properties": {
+                    "name": { "type": ["string", "null"] },
+                    "comment_char": { "type": "string" },
+                    "allow_duplicate_entries": { "type": "boolean" },
+                    "columns": { "$ref": "#/$defs/strings" },
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["path", "sample", "entries"],
+                            "properties": {
+                                "path": { "type": "string" },
+                                "sample": { "type": ["string", "null"] },
+                                "entries": { "type": "array", "items": { "$ref": "#/$defs/strings" } }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "tool_dir": { "type": ["string", "null"] },
+        "tool_shed_repository": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "owner", "changeset_revision", "tool_shed"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "owner": { "type": "string" },
+                        "changeset_revision": { "type": ["string", "null"] },
+                        "tool_shed": { "type": "string" }
+                    }
+                }
+            ]
+        },
+        "source": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["repository", "commit", "path", "tool_file", "repo_tar"],
+                    "properties": {
+                        "repository": { "type": ["string", "null"] },
+                        "commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+                        "path": { "type": "string" },
+                        "tool_file": { "type": "string", "description": "Tool XML file name inside repo.tar." },
+                        "repo_tar": {
+                            "oneOf": [
+                                { "type": "null" },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["path", "sha256", "size"],
+                                    "properties": {
+                                        "path": { "type": "string" },
+                                        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                                        "size": { "type": "integer", "minimum": 0 }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        },
+        "panel_entry": {
+            "type": "object",
+            "description": "GET /api/tools/{id} payload (ToolPanelEntry); set for tools in Planet's built-in toolbox.",
+            "required": ["model_class", "id", "name", "version", "link", "panel_section_id", "panel_section_name", "form_style"]
+        }
+    },
+    "$defs": {
+        "strings": { "type": "array", "items": { "type": "string" } },
+        "attributes": {
+            "type": "object",
+            "description": "XML attributes of the element, verbatim.",
+            "additionalProperties": { "type": "string" }
+        },
+        "element": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tag", "attributes"],
+            "properties": {
+                "tag": { "type": "string" },
+                "attributes": { "$ref": "#/$defs/attributes" },
+                "text": { "type": "string" },
+                "children": { "type": "array", "items": { "$ref": "#/$defs/element" } }
+            }
+        },
+        "inputs": {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    { "$ref": "#/$defs/parameter" },
+                    { "$ref": "#/$defs/repeat" },
+                    { "$ref": "#/$defs/section" },
+                    { "$ref": "#/$defs/conditional" },
+                    { "$ref": "#/$defs/upload_dataset" }
+                ]
+            }
+        },
+        "repeat": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_class", "type", "name", "title", "help", "default", "min", "max", "inputs"],
+            "properties": {
+                "model_class": { "const": "Repeat" },
+                "type": { "const": "repeat" },
+                "name": { "type": "string" },
+                "title": { "type": "string" },
+                "help": { "type": ["string", "null"] },
+                "default": { "type": "integer", "minimum": 0 },
+                "min": { "type": "integer", "minimum": 0 },
+                "max": { "type": ["integer", "null"], "description": "null when unbounded." },
+                "inputs": { "$ref": "#/$defs/inputs" }
+            }
+        },
+        "section": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_class", "type", "name", "title", "help", "expanded", "inputs"],
+            "properties": {
+                "model_class": { "const": "Section" },
+                "type": { "const": "section" },
+                "name": { "type": "string" },
+                "title": { "type": ["string", "null"] },
+                "help": { "type": ["string", "null"] },
+                "expanded": { "type": "boolean" },
+                "inputs": { "$ref": "#/$defs/inputs" }
+            }
+        },
+        "conditional": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_class", "type", "name", "value_ref", "value_ref_in_group", "value_from", "test_param", "cases"],
+            "properties": {
+                "model_class": { "const": "Conditional" },
+                "type": { "const": "conditional" },
+                "name": { "type": "string" },
+                "value_ref": { "type": ["string", "null"] },
+                "value_ref_in_group": { "type": "boolean" },
+                "value_from": { "type": ["string", "null"], "description": "Python callable reference; cases are then unknown." },
+                "test_param": {
+                    "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/parameter" }]
+                },
+                "cases": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["value", "inputs"],
+                        "properties": {
+                            "value": { "type": ["string", "null"] },
+                            "inputs": { "$ref": "#/$defs/inputs" }
+                        }
+                    }
+                }
+            }
+        },
+        "upload_dataset": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_class", "type", "name", "title", "file_type_name", "default_file_type", "metadata_ref", "inputs"],
+            "properties": {
+                "model_class": { "const": "UploadDataset" },
+                "type": { "const": "upload_dataset" },
+                "name": { "type": "string" },
+                "title": { "type": ["string", "null"] },
+                "file_type_name": { "type": "string" },
+                "default_file_type": { "type": "string" },
+                "metadata_ref": { "type": "string" },
+                "inputs": { "$ref": "#/$defs/inputs" }
+            }
+        },
+        "parameter": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "model_class",
+                "type",
+                "name",
+                "argument",
+                "label",
+                "help",
+                "help_format",
+                "hidden",
+                "refresh_on_change",
+                "optional",
+                "is_dynamic",
+                "sanitizer",
+                "validators",
+                "attributes"
+            ],
+            "properties": {
+                "model_class": {
+                    "enum": [
+                        "TextToolParameter",
+                        "IntegerToolParameter",
+                        "FloatToolParameter",
+                        "BooleanToolParameter",
+                        "GenomeBuildParameter",
+                        "SelectToolParameter",
+                        "ColorToolParameter",
+                        "SelectTagParameter",
+                        "ColumnListParameter",
+                        "HiddenToolParameter",
+                        "HiddenDataToolParameter",
+                        "BaseURLToolParameter",
+                        "FileToolParameter",
+                        "FTPFileToolParameter",
+                        "DataToolParameter",
+                        "DataCollectionToolParameter",
+                        "RulesListToolParameter",
+                        "DirectoryUriToolParameter",
+                        "DrillDownSelectToolParameter"
+                    ]
+                },
+                "type": {
+                    "enum": [
+                        "text",
+                        "integer",
+                        "float",
+                        "boolean",
+                        "genomebuild",
+                        "select",
+                        "color",
+                        "group_tag",
+                        "data_column",
+                        "hidden",
+                        "hidden_data",
+                        "baseurl",
+                        "file",
+                        "ftpfile",
+                        "data",
+                        "data_collection",
+                        "rules",
+                        "directory_uri",
+                        "drill_down"
+                    ]
+                },
+                "name": { "type": "string", "minLength": 1 },
+                "argument": { "type": ["string", "null"] },
+                "label": { "type": ["string", "null"] },
+                "help": { "type": ["string", "null"] },
+                "help_format": { "type": "string" },
+                "hidden": { "type": "boolean" },
+                "refresh_on_change": { "type": "boolean" },
+                "optional": { "type": "boolean" },
+                "is_dynamic": { "type": "boolean" },
+                "sanitizer": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sanitizer" }] },
+                "validators": { "type": "array", "items": { "$ref": "#/$defs/validator" } },
+                "attributes": { "$ref": "#/$defs/attributes" },
+                "value": { "type": ["string", "null"] },
+                "area": { "type": "boolean" },
+                "datalist": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["label", "value"],
+                        "properties": { "label": { "type": ["string", "null"] }, "value": { "type": ["string", "null"] } }
+                    }
+                },
+                "multiple": { "type": "boolean" },
+                "optionality_inferred": { "type": "boolean" },
+                "min": { "type": ["number", "string", "null"] },
+                "max": { "type": ["number", "string", "null"] },
+                "truevalue": { "type": "string" },
+                "falsevalue": { "type": "string" },
+                "checked": { "type": ["boolean", "null"] },
+                "rgb": { "type": "boolean" },
+                "display": { "type": ["string", "null"] },
+                "separator": { "type": "string" },
+                "dynamic_options": { "type": ["string", "null"], "description": "Python expression; not evaluated by Planet." },
+                "options": {
+                    "description": "Dynamic options for select-like and data parameters; the static option tree for drill_down.",
+                    "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/dynamic_options" }, { "type": "array" }]
+                },
+                "data_ref": { "type": ["string", "null"] },
+                "static_options": {
+                    "type": ["array", "null"],
+                    "items": {
+                        "type": "array",
+                        "prefixItems": [{ "type": ["string", "null"] }, { "type": ["string", "null"] }, { "type": "boolean" }],
+                        "minItems": 3,
+                        "maxItems": 3
+                    },
+                    "description": "[label, value, selected] triples."
+                },
+                "legal_values": { "type": "array", "items": { "type": ["string", "null"] } },
+                "tag_key": { "type": ["string", "boolean"] },
+                "accept_default": { "type": "boolean" },
+                "default_value": { "type": ["string", "null"] },
+                "numerical": { "type": "boolean" },
+                "usecolnames": { "type": "boolean" },
+                "hierarchy": { "type": "string" },
+                "from_file": { "type": ["string", "null"] },
+                "extensions": { "$ref": "#/$defs/strings" },
+                "options_filter_attribute": { "type": ["string", "null"] },
+                "default_object": { "type": ["object", "null"] },
+                "load_contents": { "type": "integer" },
+                "no_validation": { "type": "boolean" },
+                "tag": { "type": ["string", "null"] },
+                "allow_uri_if_protocol": { "$ref": "#/$defs/strings" },
+                "conversions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "extension"],
+                        "properties": { "name": { "type": "string" }, "extension": { "type": "string" } }
+                    }
+                },
+                "collection_types": { "type": ["array", "null"], "items": { "type": "string" } },
+                "fields": { "type": ["string", "null"] },
+                "column_definitions": { "type": ["string", "null"] }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "type": { "enum": ["text", "integer", "float"] } } },
+                    "then": { "required": ["value", "area", "datalist", "multiple", "optionality_inferred"] }
+                },
+                {
+                    "if": { "properties": { "type": { "enum": ["integer", "float"] } } },
+                    "then": { "required": ["min", "max"] }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "boolean" } } },
+                    "then": { "required": ["truevalue", "falsevalue", "checked"] }
+                },
+                {
+                    "if": { "properties": { "type": { "enum": ["hidden", "baseurl", "color", "directory_uri"] } } },
+                    "then": { "required": ["value"] }
+                },
+                {
+                    "if": { "properties": { "type": { "enum": ["select", "genomebuild", "group_tag", "data_column"] } } },
+                    "then": {
+                        "required": ["multiple", "display", "separator", "dynamic_options", "options", "data_ref", "static_options", "legal_values"]
+                    }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "group_tag" } } },
+                    "then": { "required": ["tag_key", "accept_default", "default_value"] }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "data_column" } } },
+                    "then": { "required": ["numerical", "accept_default", "default_value", "usecolnames"] }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "drill_down" } } },
+                    "then": { "required": ["multiple", "display", "hierarchy", "separator", "from_file", "dynamic_options", "options"] }
+                },
+                {
+                    "if": { "properties": { "type": { "enum": ["data", "hidden_data", "data_collection"] } } },
+                    "then": {
+                        "required": ["min", "max", "extensions", "options", "options_filter_attribute", "default_object", "multiple", "tag"]
+                    }
+                },
+                {
+                    "if": { "properties": { "type": { "enum": ["data", "hidden_data"] } } },
+                    "then": { "required": ["load_contents", "no_validation", "allow_uri_if_protocol", "conversions"] }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "data_collection" } } },
+                    "then": { "required": ["collection_types", "fields", "column_definitions"] }
+                },
+                {
+                    "if": { "properties": { "type": { "const": "rules" } } },
+                    "then": { "required": ["data_ref"] }
+                }
+            ]
+        },
+        "validator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "negate", "implicit"],
+            "properties": {
+                "type": {
+                    "enum": [
+                        "expression",
+                        "regex",
+                        "in_range",
+                        "length",
+                        "metadata",
+                        "dataset_metadata_equal",
+                        "unspecified_build",
+                        "no_options",
+                        "empty_field",
+                        "empty_dataset",
+                        "empty_extra_files_path",
+                        "dataset_metadata_in_data_table",
+                        "dataset_metadata_not_in_data_table",
+                        "dataset_metadata_in_range",
+                        "value_in_data_table",
+                        "value_not_in_data_table",
+                        "dataset_ok_validator",
+                        "dataset_metadata_in_file"
+                    ]
+                },
+                "message": { "type": ["string", "null"] },
+                "negate": { "type": "boolean" },
+                "implicit": { "type": "boolean", "description": "Added by Galaxy (min/max ranges, data metadata check), not written in the tool." },
+                "expression": { "type": "string", "description": "Regular expression, or Python expression for type expression." },
+                "min": { "type": ["number", "null"] },
+                "max": { "type": ["number", "null"] },
+                "exclude_min": { "type": "boolean" },
+                "exclude_max": { "type": "boolean" },
+                "check": { "type": ["array", "null"], "items": { "type": "string" } },
+                "skip": { "type": ["array", "null"], "items": { "type": "string" } },
+                "metadata_name": { "type": ["string", "null"] },
+                "metadata_column": { "type": ["integer", "string", "null"] },
+                "value": {},
+                "table_name": { "type": ["string", "null"] },
+                "filename": { "type": ["string", "null"] },
+                "line_startswith": { "type": ["string", "null"] },
+                "split": { "type": ["string", "null"] }
+            }
+        },
+        "sanitizer": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["invalid_char", "sanitize", "valid", "mapping", "xml"],
+            "properties": {
+                "invalid_char": { "type": "string" },
+                "sanitize": { "type": "boolean" },
+                "valid": { "$ref": "#/$defs/sanitizer_rules" },
+                "mapping": { "$ref": "#/$defs/sanitizer_rules" },
+                "xml": { "type": "string" }
+            }
+        },
+        "sanitizer_rules": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["initial", "actions"],
+                "properties": {
+                    "initial": { "type": "string" },
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["action"],
+                            "properties": { "action": { "type": "string" } },
+                            "additionalProperties": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        },
+        "dynamic_options": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "from_dataset",
+                "from_file",
+                "from_data_table",
+                "from_parameter",
+                "from_url",
+                "transform_lines",
+                "meta_file_key",
+                "options_filter_attribute",
+                "separator",
+                "startswith",
+                "columns",
+                "filters",
+                "validators",
+                "xml"
+            ],
+            "properties": {
+                "from_dataset": { "type": ["string", "null"] },
+                "from_file": { "type": ["string", "null"] },
+                "from_data_table": { "type": ["string", "null"] },
+                "from_parameter": { "type": ["string", "null"] },
+                "from_url": {
+                    "oneOf": [
+                        { "type": "null" },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["url", "request", "postprocess_expression"],
+                            "properties": {
+                                "url": { "type": "string" },
+                                "request": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/element" }] },
+                                "postprocess_expression": { "type": ["object", "null"] }
+                            }
+                        }
+                    ]
+                },
+                "transform_lines": { "type": ["string", "null"] },
+                "meta_file_key": { "type": ["string", "null"] },
+                "options_filter_attribute": { "type": ["string", "null"] },
+                "separator": { "type": "string" },
+                "startswith": { "type": ["string", "null"] },
+                "columns": { "type": "object", "additionalProperties": { "type": "integer" } },
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["type"],
+                        "properties": {
+                            "type": { "type": "string" },
+                            "children": { "type": "array", "items": { "$ref": "#/$defs/element" } }
+                        },
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
+                "validators": { "type": "array", "items": { "$ref": "#/$defs/validator" } },
+                "xml": { "type": "string", "description": "The <options> element, for Galaxy's DynamicOptions in the job pod." }
+            }
+        },
+        "actions": {
+            "oneOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["element", "xml"],
+                    "properties": {
+                        "element": { "$ref": "#/$defs/element" },
+                        "xml": { "type": "string", "description": "The <actions> element, for Galaxy's ToolOutputActionGroup." }
+                    }
+                }
+            ]
+        },
+        "discover_datasets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["discover_via"],
+                "properties": { "discover_via": { "enum": ["pattern", "tool_provided_metadata"] } }
+            }
+        },
+        "output": {
+            "type": "object",
+            "required": ["model_class", "name", "label", "hidden", "output_type", "filters", "actions"],
+            "properties": {
+                "model_class": { "enum": ["ToolOutput", "ToolOutputCollection", "ToolExpressionOutput"] },
+                "name": { "type": "string", "minLength": 1 },
+                "label": { "type": ["string", "null"] },
+                "hidden": { "type": "boolean" },
+                "output_type": { "type": "string" },
+                "format": { "type": ["string", "null"] },
+                "filters": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Python expressions over the tool state." },
+                "actions": { "$ref": "#/$defs/actions" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "model_class": { "const": "ToolOutput" } } },
+                    "then": {
+                        "required": [
+                            "format",
+                            "format_source",
+                            "default_identifier_source",
+                            "metadata_source",
+                            "parent",
+                            "count",
+                            "from_work_dir",
+                            "discover_datasets",
+                            "change_format",
+                            "precreate_directory",
+                            "from_expression"
+                        ],
+                        "properties": {
+                            "discover_datasets": { "$ref": "#/$defs/discover_datasets" },
+                            "change_format": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["value", "format", "input", "input_dataset", "check_attribute"],
+                                    "properties": {
+                                        "value": { "type": ["string", "null"] },
+                                        "format": { "type": ["string", "null"] },
+                                        "input": { "type": ["string", "null"], "description": "Cheetah expression compared with value." },
+                                        "input_dataset": { "type": ["string", "null"] },
+                                        "check_attribute": { "type": ["string", "null"] }
+                                    }
+                                }
+                            },
+                            "count": { "type": "integer" },
+                            "edam_format": { "type": ["string", "null"] },
+                            "edam_data": { "type": ["string", "null"] }
+                        }
+                    }
+                },
+                {
+                    "if": { "properties": { "model_class": { "const": "ToolOutputCollection" } } },
+                    "then": {
+                        "required": ["structure", "outputs", "default_format", "inherit_format", "inherit_metadata"],
+                        "properties": {
+                            "structure": {
+                                "type": "object",
+                                "required": ["collection_type", "collection_type_source", "structured_like", "discover_datasets"],
+                                "properties": {
+                                    "collection_type": { "type": ["string", "null"] },
+                                    "collection_type_source": { "type": ["string", "null"] },
+                                    "collection_type_from_rules": { "type": ["string", "null"] },
+                                    "structured_like": { "type": ["string", "null"] },
+                                    "discover_datasets": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/discover_datasets" }] }
+                                }
+                            },
+                            "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } }
+                        }
+                    }
+                },
+                {
+                    "if": { "properties": { "model_class": { "const": "ToolExpressionOutput" } } },
+                    "then": { "required": ["from_expression", "path"] }
+                }
+            ]
+        }
+    }
+}
