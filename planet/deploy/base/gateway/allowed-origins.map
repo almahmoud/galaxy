@@ -1,0 +1,3 @@
+# Origins allowed to call the gateway, matched exactly: scheme, host and port, no path.
+"https://planet.example.org" 1;
+"http://localhost:8787" 1;

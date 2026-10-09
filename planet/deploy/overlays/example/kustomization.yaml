@@ -1,0 +1,18 @@
+# Production example: one HTTPS origin, storage in R2 or S3, base quotas.
+# Exposure over HTTPS (Cloudflare Tunnel or a Gateway API implementation): see
+# planet/docs/cluster-setup.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# components:
+#   - ../../components/cloudflare-tunnel
+
+configMapGenerator:
+  - name: planet-gateway
+    namespace: planet
+    behavior: merge
+    files:
+      - allowed-origins.map

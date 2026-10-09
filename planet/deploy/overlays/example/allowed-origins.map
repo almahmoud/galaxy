@@ -1,0 +1,3 @@
+# Origins allowed to call the gateway, matched exactly: scheme, host and port, no path.
+# Replace with the origin that serves Planet.
+"https://planet.example.org" 1;

@@ -1,0 +1,67 @@
+# Identity used by the browser. Its token is the only credential the gateway forwards.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: planet-client
+  namespace: planet
+automountServiceAccountToken: false
+---
+# Identity of tool job pods. It has no RoleBinding.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: planet-job
+  namespace: planet
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: planet-gateway
+  namespace: planet
+automountServiceAccountToken: false
+---
+# Long-lived token for planet-client, filled in by the token controller.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: planet-client-token
+  namespace: planet
+  annotations:
+    kubernetes.io/service-account.name: planet-client
+type: kubernetes.io/service-account-token
+---
+# SelfSubjectRulesReview and /version need no grant here: the built-in system:basic-user and
+# system:public-info-viewer ClusterRoles allow them for every authenticated user.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: planet-client
+  namespace: planet
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: planet-client
+  namespace: planet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: planet-client
+subjects:
+  - kind: ServiceAccount
+    name: planet-client
+    namespace: planet

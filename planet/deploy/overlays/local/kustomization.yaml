@@ -1,0 +1,57 @@
+# Local kind cluster: Planet served from port 8787 on this machine, Garage for storage and
+# small quotas. Used by planet/scripts/dev-cluster.sh.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/garage
+
+configMapGenerator:
+  - name: planet-gateway
+    namespace: planet
+    behavior: merge
+    files:
+      - allowed-origins.map
+
+patches:
+  - target:
+      kind: ResourceQuota
+      name: planet-compute
+    patch: |-
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: planet-compute
+      spec:
+        hard:
+          pods: "10"
+          requests.cpu: "4"
+          requests.memory: 8Gi
+          limits.memory: 12Gi
+          requests.ephemeral-storage: 40Gi
+          limits.ephemeral-storage: 50Gi
+          persistentvolumeclaims: "4"
+          requests.storage: 40Gi
+          count/jobs.batch: "200"
+  - target:
+      kind: LimitRange
+      name: planet-defaults
+    patch: |-
+      - op: replace
+        path: /spec/limits/0/max
+        value:
+          memory: 8Gi
+          ephemeral-storage: 30Gi
+      - op: replace
+        path: /spec/limits/1/max/storage
+        value: 20Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: garage-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 10Gi

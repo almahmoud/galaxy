@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planet-gateway
+  namespace: planet
+  labels:
+    app.kubernetes.io/name: planet-gateway
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: planet-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: planet-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: planet
+    spec:
+      serviceAccountName: planet-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: planet-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.30.5-alpine-slim@sha256:3af0c10d960cc2502427fe1219c52989d309e7d65596869c60a34fd2fa2406f0
+          command: ["/bin/sh", "/etc/nginx/planet/start.sh"]
+          env:
+            - name: PLANET_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: health
+              containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+              ephemeral-storage: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/planet
+              readOnly: true
+            - name: rendered
+              mountPath: /etc/nginx/conf.d
+            - name: kube-ca
+              mountPath: /etc/planet/kube-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: planet-gateway
+        - name: rendered
+          emptyDir:
+            sizeLimit: 1Mi
+        # Published in every namespace by kube-controller-manager; verifies the API server.
+        - name: kube-ca
+          configMap:
+            name: kube-root-ca.crt
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: planet-gateway
+  namespace: planet
+  labels:
+    app.kubernetes.io/name: planet-gateway
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: planet-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

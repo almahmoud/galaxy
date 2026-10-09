@@ -1,0 +1,8 @@
+# Single-node kind cluster for Planet development (planet/scripts/dev-cluster.sh).
+# The gateway handles CORS, so the API server needs no CORS flags.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: planet
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5

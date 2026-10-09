@@ -1,0 +1,83 @@
+# Job creation rights would otherwise let a caller mount any Secret in the namespace, run with
+# another ServiceAccount's token, or start pods that never end.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: planet-job-template
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: containers
+      expression: >-
+        variables.pod.containers +
+        (has(variables.pod.initContainers) ? variables.pod.initContainers : [])
+    - name: volumes
+      expression: "has(variables.pod.volumes) ? variables.pod.volumes : []"
+  validations:
+    - expression: >-
+        has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == 'planet-job' &&
+        (!has(variables.pod.serviceAccount) || variables.pod.serviceAccount == 'planet-job')
+      message: spec.template.spec.serviceAccountName must be planet-job.
+      reason: Forbidden
+    - expression: >-
+        has(variables.pod.automountServiceAccountToken) &&
+        variables.pod.automountServiceAccountToken == false
+      message: spec.template.spec.automountServiceAccountToken must be false.
+      reason: Forbidden
+    - expression: variables.volumes.all(v, !has(v.secret))
+      message: Secret volumes are not allowed.
+      reason: Forbidden
+    - expression: >-
+        variables.volumes.all(v, !has(v.projected) || !has(v.projected.sources) ||
+        v.projected.sources.all(s, !has(s.secret) && !has(s.serviceAccountToken)))
+      message: Projected volumes must not contain secret or serviceAccountToken sources.
+      reason: Forbidden
+    - expression: variables.volumes.all(v, !has(v.hostPath))
+      message: hostPath volumes are not allowed.
+      reason: Forbidden
+    - expression: >-
+        variables.containers.all(c, !has(c.env) ||
+        c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)))
+      message: Environment variables must not reference Secrets (valueFrom.secretKeyRef).
+      reason: Forbidden
+    - expression: variables.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef)))
+      message: envFrom must not reference Secrets (secretRef).
+      reason: Forbidden
+    - expression: >-
+        has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds <= 604800
+      message: spec.activeDeadlineSeconds must be set and at most 604800 (7 days).
+      reason: Invalid
+    - expression: has(object.spec.ttlSecondsAfterFinished)
+      message: spec.ttlSecondsAfterFinished must be set.
+      reason: Invalid
+    # Pods keep the batch.kubernetes.io/job-name label that the NetworkPolicies select on.
+    - expression: "!has(object.spec.manualSelector) || object.spec.manualSelector == false"
+      message: spec.manualSelector must not be true.
+      reason: Forbidden
+    - expression: >-
+        !has(variables.pod.priorityClassName) ||
+        !(variables.pod.priorityClassName == 'planet-service' ||
+        variables.pod.priorityClassName.startsWith('system-'))
+      message: Jobs must not use the planet-service or system-* priority classes.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: planet-job-template
+spec:
+  policyName: planet-job-template
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: planet
+        app.kubernetes.io/component: compute

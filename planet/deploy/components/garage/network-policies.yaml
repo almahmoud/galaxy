@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: planet-storage
+  labels:
+    app.kubernetes.io/part-of: planet
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The gateway's S3 listener and job pods (presigned cluster-endpoint URLs) reach Garage.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-s3-ingress
+  namespace: planet-storage
+  labels:
+    app.kubernetes.io/part-of: planet
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: garage
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: planet
+              app.kubernetes.io/component: compute
+      ports:
+        - protocol: TCP
+          port: 3900
+---
+# Cilium does not match in-cluster pods with ipBlock rules, so planet-jobs-egress alone does
+# not admit Garage there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: planet-jobs-egress-storage
+  namespace: planet
+  labels:
+    app.kubernetes.io/part-of: planet
+spec:
+  podSelector:
+    matchExpressions:
+      - key: batch.kubernetes.io/job-name
+        operator: Exists
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: planet
+              app.kubernetes.io/component: storage
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: garage
+      ports:
+        - protocol: TCP
+          port: 3900

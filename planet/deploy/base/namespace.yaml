@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: planet
+  labels:
+    app.kubernetes.io/part-of: planet
+    app.kubernetes.io/component: compute
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# Lets DiskPressure and memory-pressure eviction take job pods before the gateway and storage.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: planet-service
+value: 100000
+preemptionPolicy: Never
+globalDefault: false
+description: Planet gateway and storage pods.

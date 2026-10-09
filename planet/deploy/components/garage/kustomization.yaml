@@ -1,0 +1,53 @@
+# In-cluster S3 (Garage, single node) in namespace planet-storage, published through a second
+# gateway listener on port 8081. Requires the Secret planet-storage/garage-credentials, see
+# planet/docs/storage-setup.md.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - garage.yaml
+  - network-policies.yaml
+
+configMapGenerator:
+  - name: garage
+    namespace: planet-storage
+    options:
+      labels:
+        app.kubernetes.io/part-of: planet
+    files:
+      - garage.toml
+  - name: planet-gateway
+    namespace: planet
+    behavior: merge
+    files:
+      - s3.conf.template
+
+patches:
+  - target:
+      kind: Deployment
+      name: planet-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/ports/-
+        value:
+          name: s3
+          containerPort: 8081
+  - target:
+      kind: Service
+      name: planet-gateway
+    patch: |-
+      - op: add
+        path: /spec/ports/-
+        value:
+          name: s3
+          port: 8081
+          targetPort: s3
+  - target:
+      kind: NetworkPolicy
+      name: planet-gateway-ingress
+    patch: |-
+      - op: add
+        path: /spec/ingress/0/ports/-
+        value:
+          protocol: TCP
+          port: 8081

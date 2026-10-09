@@ -1,0 +1,113 @@
+# Kubernetes API listener. start.sh substitutes PLANET_NAMESPACE, the gateway's own namespace.
+# The browser's bearer token is forwarded unchanged; the gateway holds no credential.
+
+upstream kube_api {
+    server kubernetes.default.svc:443;
+    keepalive 8;
+}
+
+limit_req_zone $binary_remote_addr zone=kube_api_req:1m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=kube_api_conn:1m;
+
+# Matched against the normalized path ($uri: percent-decoded, dot segments resolved, slashes
+# merged), which is also the path forwarded upstream.
+map "$request_method $uri" $kube_route_allowed {
+    default 0;
+    "~^GET /version$" 1;
+    "~^POST /apis/authorization\.k8s\.io/v1/selfsubjectrulesreviews$" 1;
+    "~^(GET|POST) /apis/batch/v1/namespaces/${PLANET_NAMESPACE}/jobs$" 1;
+    "~^(GET|DELETE) /apis/batch/v1/namespaces/${PLANET_NAMESPACE}/jobs/[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" 1;
+    "~^GET /api/v1/namespaces/${PLANET_NAMESPACE}/pods$" 1;
+    "~^GET /api/v1/namespaces/${PLANET_NAMESPACE}/pods/[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?(/log)?$" 1;
+    "~^GET /api/v1/namespaces/${PLANET_NAMESPACE}/events$" 1;
+}
+
+# The API server reads DeleteOptions from the body when there is one and then ignores the
+# query string, so a DELETE body would override the forced propagationPolicy.
+map "$request_method:$http_content_length:$http_transfer_encoding" $kube_body_rejected {
+    default 0;
+    "~^(GET|DELETE):0*[1-9]" 1;
+    "~^(GET|DELETE):[^:]*:." 1;
+}
+
+# The API server decodes parameter names, so encoded names could hide a rejected parameter.
+map $args $kube_args_rejected {
+    default 0;
+    "~(^|&)[^=&]*%" 1;
+    "~*(^|&)insecureSkipTLSVerifyBackend(=|&|$)" 1;
+}
+
+server {
+    listen 8080;
+    client_max_body_size 1m;
+
+    set $planet_cors_methods "GET, POST, DELETE";
+    set $planet_cors_headers "Authorization, Content-Type, Accept";
+    set $planet_cors_expose "Date, Warning, Audit-Id, Retry-After";
+
+    if ($origin_rejected) {
+        return 403 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"origin not allowed by the Planet gateway","reason":"Forbidden","code":403}';
+    }
+    # Preflights are answered here and never reach the API server.
+    if ($cors_preflight) {
+        return 204;
+    }
+
+    limit_req zone=kube_api_req burst=40 nodelay;
+    limit_req_status 429;
+    limit_conn kube_api_conn 64;
+    limit_conn_status 429;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host kubernetes.default.svc;
+    proxy_set_header Origin "";
+    proxy_set_header Cookie "";
+    proxy_set_header Impersonate-User "";
+    proxy_set_header Impersonate-Group "";
+    proxy_set_header Impersonate-Uid "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-Ip "";
+
+    proxy_ssl_trusted_certificate /etc/planet/kube-ca/ca.crt;
+    proxy_ssl_verify on;
+    proxy_ssl_verify_depth 3;
+    proxy_ssl_name kubernetes.default.svc;
+    proxy_ssl_server_name on;
+    proxy_ssl_session_reuse on;
+
+    # Watches and log follows stream; the read timeout exceeds the API server's watch timeout.
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 3700s;
+
+    error_page 429 @rate_limited;
+    error_page 502 503 504 =503 @unavailable;
+
+    location / {
+        if ($kube_route_allowed = 0) {
+            return 403 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"request not allowed by the Planet gateway","reason":"Forbidden","code":403}';
+        }
+        if ($kube_args_rejected) {
+            return 403 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"query parameter not allowed by the Planet gateway","reason":"Forbidden","code":403}';
+        }
+        if ($kube_body_rejected) {
+            return 400 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"GET and DELETE requests must not have a body","reason":"BadRequest","code":400}';
+        }
+        # Batch Jobs default to orphaning their pods on DELETE.
+        if ($request_method = DELETE) {
+            set $args propagationPolicy=Background;
+        }
+        proxy_pass https://kube_api$uri$is_args$args;
+    }
+
+    location @rate_limited {
+        return 429 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"rate limit exceeded at the Planet gateway","reason":"TooManyRequests","code":429}';
+    }
+
+    location @unavailable {
+        return 503 '{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"the Planet gateway cannot reach the Kubernetes API server","reason":"ServiceUnavailable","code":503}';
+    }
+}

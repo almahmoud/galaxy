@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: planet
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - job-policy.yaml
+  - network-policies.yaml
+  - quota.yaml
+  - gateway.yaml
+
+configMapGenerator:
+  - name: planet-gateway
+    namespace: planet
+    files:
+      - gateway/nginx.conf
+      - gateway/kube-api.conf.template
+      - gateway/allowed-origins.map
+      - gateway/start.sh

@@ -1,0 +1,41 @@
+# pods bounds concurrency: finished pods do not count. count/jobs.batch bounds stored Job
+# objects, including finished ones kept until the browser or the TTL deletes them.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: planet-compute
+  namespace: planet
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "16"
+    requests.memory: 64Gi
+    limits.memory: 64Gi
+    requests.ephemeral-storage: 200Gi
+    limits.ephemeral-storage: 256Gi
+    persistentvolumeclaims: "10"
+    requests.storage: 500Gi
+    count/jobs.batch: "500"
+---
+# No default CPU limit: requests already share CPU between pods, and a limit throttles tools.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: planet-defaults
+  namespace: planet
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+        ephemeral-storage: 1Gi
+      default:
+        memory: 1Gi
+        ephemeral-storage: 4Gi
+      max:
+        memory: 32Gi
+        ephemeral-storage: 200Gi
+    - type: PersistentVolumeClaim
+      max:
+        storage: 200Gi

@@ -1,0 +1,7 @@
+# Cloudflare Tunnel (cloudflared) in namespace planet-edge, publishing the gateway over HTTPS.
+# Requires the Secret planet-edge/cloudflared-token, see planet/docs/cluster-setup.md.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - cloudflared.yaml
