@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:planet:job-protocol:1:results",
+  "title": "Planet results.json",
+  "description": "Written last by the pod; its presence commits the job. Dataset records are also stored as datasets/<uuid>/meta.json.",
+  "type": "object",
+  "required": [
+    "protocol", "kind", "job_id", "attempt", "state", "exit_code", "termination", "job_messages",
+    "tool_stdout", "tool_stderr", "job_stdout", "job_stderr", "outputs", "discovered", "output_collections",
+    "filtered_outputs", "errors", "timings"
+  ],
+  "properties": {
+    "protocol": { "const": 1 },
+    "kind": { "enum": ["tool", "upload", "set_metadata", "tool_install"] },
+    "job_id": { "type": "string" },
+    "attempt": { "type": "integer" },
+    "state": { "enum": ["ok", "error"], "description": "Galaxy job state." },
+    "exit_code": { "type": ["integer", "null"] },
+    "termination": {
+      "enum": ["normal", "oom", "walltime", "signal", "not_started"],
+      "description": "How the tool container ended: normal (exit code recorded), walltime (the wrapper's deadline fired), signal (all tool processes died without an exit code: memory limit, eviction or kill), not_started (the tool did not start within limits.start_timeout_seconds). oom is reserved for the browser when pod status reports OOMKilled."
+    },
+    "command_line": { "type": ["string", "null"] },
+    "command_version": { "type": ["string", "null"] },
+    "job_messages": {
+      "type": "array",
+      "description": "Galaxy job messages (galaxy.tool_util.output_checker).",
+      "items": {
+        "type": "object",
+        "required": ["type", "desc"],
+        "properties": {
+          "type": { "type": "string" },
+          "desc": { "type": ["string", "null"] },
+          "code_desc": { "type": ["string", "null"] },
+          "error_level": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "tool_stdout": { "$ref": "#/$defs/stream" },
+    "tool_stderr": { "$ref": "#/$defs/stream" },
+    "job_stdout": { "$ref": "#/$defs/stream" },
+    "job_stderr": { "$ref": "#/$defs/stream" },
+    "filtered_outputs": { "type": "array", "items": { "type": "string" } },
+    "outputs": {
+      "type": "object",
+      "description": "Declared outputs by name.",
+      "additionalProperties": { "$ref": "#/$defs/dataset" }
+    },
+    "discovered": {
+      "type": "array",
+      "description": "Datasets discovered after the tool ran, in slot order.",
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/dataset" },
+          {
+            "type": "object",
+            "required": ["slot"],
+            "properties": {
+              "slot": { "type": "integer", "minimum": 0 },
+              "output": { "type": ["string", "null"], "description": "Declared output the dataset was discovered for." },
+              "designation": { "type": ["string", "null"] },
+              "collection": { "type": ["string", "null"], "description": "Output collection holding the dataset." },
+              "element_identifiers": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        ]
+      }
+    },
+    "output_collections": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["collection_type", "populated_state", "elements"],
+        "properties": {
+          "name": { "type": ["string", "null"] },
+          "collection_type": { "type": "string" },
+          "populated_state": { "enum": ["new", "ok", "failed"] },
+          "populated_state_message": { "type": ["string", "null"] },
+          "elements": { "type": "array", "items": { "$ref": "#/$defs/collection_element" } }
+        }
+      }
+    },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "traceback": { "type": "string" },
+    "timings": {
+      "type": "object",
+      "properties": {
+        "tool_start": { "type": ["string", "null"] },
+        "tool_end": { "type": ["string", "null"] },
+        "stage_out_start": { "type": "string" },
+        "stage_out_end": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "required": ["text", "size"],
+      "properties": {
+        "text": { "type": "string", "description": "At most 32 KiB, shortened in the middle like Galaxy's set_streams." },
+        "size": { "type": "integer", "minimum": 0, "description": "Size of the full stream in bytes." }
+      }
+    },
+    "collection_element": {
+      "type": "object",
+      "required": ["element_identifier"],
+      "properties": {
+        "element_identifier": { "type": "string" },
+        "slot": { "type": "integer" },
+        "output": { "type": "string" },
+        "collection_type": { "type": "string" },
+        "elements": { "type": "array", "items": { "$ref": "#/$defs/collection_element" } },
+        "columns": {}
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "required": [
+        "uuid", "state", "name", "ext", "dbkey", "visible", "info", "blurb", "peek", "metadata", "metadata_files",
+        "size", "total_size", "extra_files", "sanitized", "errors"
+      ],
+      "properties": {
+        "uuid": { "type": "string", "format": "uuid" },
+        "state": {
+          "enum": ["ok", "error", "failed_metadata", "empty"],
+          "description": "empty: the job succeeded and the dataset has no content; its Galaxy state is ok."
+        },
+        "name": { "type": ["string", "null"] },
+        "ext": { "type": "string" },
+        "dbkey": { "type": ["string", "null"] },
+        "visible": { "type": "boolean" },
+        "info": { "type": ["string", "null"] },
+        "blurb": { "type": ["string", "null"] },
+        "peek": { "type": ["string", "null"] },
+        "display_peek": { "type": ["string", "null"], "description": "HTML peek from the datatype." },
+        "metadata": { "type": "object", "description": "Galaxy metadata in external JSON form, without metadata files." },
+        "metadata_files": {
+          "type": "object",
+          "description": "Metadata files by element name; index is the position in the dataset's metadata_files targets.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["index", "size"],
+            "properties": { "index": { "type": "integer" }, "size": { "type": "integer" } }
+          }
+        },
+        "size": { "type": "integer", "minimum": 0 },
+        "total_size": { "type": "integer", "minimum": 0 },
+        "extra_files": {
+          "description": "Index of extra.tar: byte offset and size of every member's data.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["size", "entries"],
+              "properties": {
+                "size": { "type": "integer" },
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["path", "type"],
+                    "properties": {
+                      "path": { "type": "string" },
+                      "type": { "enum": ["file", "directory", "symlink"] },
+                      "offset": { "type": "integer" },
+                      "size": { "type": "integer" },
+                      "target": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "created_from_basename": { "type": ["string", "null"] },
+        "tool_version": { "type": ["string", "null"] },
+        "sanitized": { "type": "boolean", "description": "A sanitized HTML copy was written to the sanitized target." },
+        "data": {
+          "type": "object",
+          "required": ["mode", "size"],
+          "properties": {
+            "mode": { "enum": ["put", "multipart", "none"] },
+            "size": { "type": "integer" },
+            "etag": { "type": ["string", "null"] },
+            "part_size": { "type": "integer" },
+            "parts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["part_number", "etag", "size"],
+                "properties": {
+                  "part_number": { "type": "integer", "minimum": 1 },
+                  "etag": { "type": ["string", "null"] },
+                  "size": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "errors": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

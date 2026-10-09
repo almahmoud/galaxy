@@ -1,0 +1,28 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=77.0.0"]
+
+[project]
+name = "planet-runtime"
+version = "0.1.0"
+description = "Stager for Planet job pods: Galaxy templating, finishing and S3 transfers"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "galaxy-data",
+    "galaxy-job-execution",
+    "galaxy-tool-util",
+    "galaxy-util[template]",
+]
+
+[project.scripts]
+planet-stager = "planet_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["planet_runtime*"]
+
+[tool.setuptools.package-data]
+planet_runtime = ["data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

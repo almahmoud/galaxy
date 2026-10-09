@@ -1,0 +1,101 @@
+# syntax=docker/dockerfile:1
+# planet-runtime: Galaxy's job execution libraries from this checkout plus the
+# Planet stager. Based on packages/job_execution/Dockerfile (RUNTIME_SOURCE=source).
+# Build from the repository root:
+#   docker build -f planet/runtime/Dockerfile -t planet-runtime:dev .
+ARG PYTHON_IMAGE=python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
+
+FROM ${PYTHON_IMAGE} AS build-base
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 PIP_ROOT_USER_ACTION=ignore
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /venv
+COPY planet/runtime/requirements/ /tmp/requirements/
+RUN /venv/bin/pip install --require-hashes --no-deps -r /tmp/requirements/build.txt
+
+FROM build-base AS build
+RUN /venv/bin/pip install --require-hashes --no-deps --no-build-isolation -r /tmp/requirements/runtime.txt
+COPY lib /galaxy/lib
+COPY packages /galaxy/packages
+# setuptools-scm cannot discover package data without the Git checkout.
+RUN for package in util tool_util_models config schema tool_util files objectstore data job_execution; do \
+        printf 'graft src\nglobal-exclude *.py[cod]\n' > /galaxy/packages/$package/MANIFEST.in; \
+    done \
+    && /venv/bin/pip install --no-deps --no-build-isolation \
+        /galaxy/packages/util \
+        /galaxy/packages/tool_util_models \
+        /galaxy/packages/config \
+        /galaxy/packages/schema \
+        /galaxy/packages/tool_util \
+        /galaxy/packages/files \
+        /galaxy/packages/objectstore \
+        /galaxy/packages/data \
+        /galaxy/packages/job_execution
+COPY planet/runtime/pyproject.toml /src/planet-runtime/pyproject.toml
+COPY planet/runtime/planet_runtime /src/planet-runtime/planet_runtime
+RUN /venv/bin/pip install --no-deps --no-build-isolation /src/planet-runtime \
+    && /venv/bin/pip check \
+    && /venv/bin/pip uninstall -y pip wheel setuptools-scm vcs-versioning
+# Galaxy files the stager loads that are not part of any Galaxy package.
+RUN set -eu; cd /galaxy/lib; \
+    for path in \
+        galaxy/tools/wrappers.py \
+        galaxy/tools/data_fetch.py \
+        galaxy/tools/parameters/wrapped_json.py \
+        galaxy/tools/parameters/sanitize.py \
+        galaxy/jobs/runners/util/job_script/DEFAULT_JOB_FILE_TEMPLATE.sh \
+        galaxy/jobs/runners/util/job_script/CLUSTER_SLOTS_STATEMENT.sh \
+        galaxy/jobs/runners/util/job_script/MEMORY_STATEMENT_TEMPLATE.sh \
+        galaxy/config/sample/datatypes_conf.xml.sample; \
+    do install -D -m 0644 "$path" "/opt/planet/galaxy/lib/$path"; done
+
+FROM build-base AS test-deps
+RUN /venv/bin/pip install --require-hashes --no-deps --target /opt/planet-test -r /tmp/requirements/test.txt
+
+FROM ${PYTHON_IMAGE} AS runtime
+ARG GIT_COMMIT=unspecified
+ARG BUILD_DATE=unspecified
+LABEL org.opencontainers.image.title="planet-runtime" \
+      org.opencontainers.image.description="Planet job pod runtime: Galaxy job execution libraries and the Planet stager" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/almahmoud/galaxy" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    PATH="/venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PLANET_GALAXY_LIB=/opt/planet/galaxy/lib \
+    HOME=/planet/stager \
+    TMPDIR=/planet/tmp \
+    XDG_CACHE_HOME=/planet/cache
+RUN apt-get update && apt-get install -y --no-install-recommends libmagic1t64 libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/local/lib/python3.*/site-packages/pip /usr/local/lib/python3.*/site-packages/pip-* /usr/local/bin/pip* \
+    && groupadd --gid 10001 planet \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /planet/stager --shell /usr/sbin/nologin planet
+COPY --from=build /venv /venv
+COPY --from=build /opt/planet /opt/planet
+RUN HOME=/tmp TMPDIR=/tmp XDG_CACHE_HOME=/tmp/planet-build-cache python -c "\
+import pysam, h5py; \
+from galaxy.datatypes import sniff; sniff.guess_ext('/etc/hostname', []); \
+from galaxy.metadata.set_metadata import set_metadata; \
+from planet_runtime import galaxy_env; galaxy_env.install(); galaxy_env.data_fetch(); galaxy_env.registry()" \
+    && rm -rf /tmp/planet-build-cache \
+    && mkdir -p /etc/planet \
+    && python -c "from importlib.metadata import distributions; print('\n'.join(sorted(d.metadata['Name'] + '==' + d.version for d in distributions())))" > /etc/planet/requirements.txt
+USER 10001:10001
+WORKDIR /
+CMD ["planet-stager", "--help"]
+
+FROM runtime AS test
+COPY --from=test-deps /opt/planet-test /opt/planet-test
+COPY planet/runtime/tests /src/planet-runtime/tests
+COPY planet/runtime/schemas /src/planet-runtime/schemas
+COPY planet/runtime/pyproject.toml /src/planet-runtime/pyproject.toml
+ENV PYTHONPATH=/opt/planet-test PLANET_SCHEMAS=/src/planet-runtime/schemas \
+    HOME=/tmp TMPDIR=/tmp XDG_CACHE_HOME=/tmp/planet-cache
+WORKDIR /src/planet-runtime
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q"]
+
+FROM runtime

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:planet:job-protocol:1:prepare",
+  "title": "Planet prepare.json",
+  "description": "Written by stage-in right after templating, before the tool runs. Its output decisions are authoritative.",
+  "type": "object",
+  "required": ["protocol", "state", "errors", "timings"],
+  "properties": {
+    "protocol": { "const": 1 },
+    "job_id": { "type": "string" },
+    "attempt": { "type": "integer" },
+    "state": { "enum": ["ok", "error"] },
+    "command_line": { "type": ["string", "null"], "description": "Evaluated command, without the version command." },
+    "version_command": { "type": ["string", "null"] },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["filtered", "format", "label"],
+        "properties": {
+          "filtered": { "type": "boolean", "description": "A <filter> rejected the output; Galaxy does not create it." },
+          "format": { "type": ["string", "null"], "description": "Datatype after format=\"input\", format_source and change_format; null for collections." },
+          "label": { "type": "string", "description": "Rendered output label, or Galaxy's default name." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "environment": { "type": "array", "items": { "type": "string" } },
+    "configfiles": { "type": "array", "items": { "type": "string" } },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phase", "message"],
+        "properties": { "phase": { "type": "string" }, "message": { "type": "string" } }
+      }
+    },
+    "timings": {
+      "type": "object",
+      "properties": {
+        "stage_in_start": { "type": "string" },
+        "stage_in_end": { "type": "string" }
+      }
+    }
+  }
+}

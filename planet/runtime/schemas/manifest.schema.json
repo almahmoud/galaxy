@@ -1,0 +1,1127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:planet:job-protocol:1:manifest",
+  "title": "Planet job manifest",
+  "description": "Everything a job pod needs, written by the browser and read by the stager through PLANET_MANIFEST_URL. See planet/docs/job-protocol.md.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "kind",
+    "job"
+  ],
+  "properties": {
+    "protocol": {
+      "const": 1
+    },
+    "kind": {
+      "enum": [
+        "tool",
+        "upload",
+        "set_metadata",
+        "tool_install"
+      ]
+    },
+    "job": {
+      "$ref": "#/$defs/job"
+    },
+    "tool": {
+      "$ref": "#/$defs/tool"
+    },
+    "params": {
+      "type": "object",
+      "description": "Job tool state in Galaxy's basic form: conditionals as objects (with __current_case__), repeats as arrays of objects (with __index__), sections as objects. Data values are {src, key} references into inputs or collections. Implicit keys (dbkey, chromInfo, __input_ext, <name>|__identifier__) are computed when absent."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Input datasets by key.",
+      "additionalProperties": {
+        "$ref": "#/$defs/input_dataset"
+      }
+    },
+    "collections": {
+      "type": "object",
+      "description": "Input collections by key.",
+      "additionalProperties": {
+        "$ref": "#/$defs/input_collection"
+      }
+    },
+    "input_datasets": {
+      "type": "object",
+      "description": "Galaxy job input dataset association names (such as queries_0|input2) mapped to input keys. Derived from params when absent.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "Declared outputs with pre-allocated datasets. For uploads and set_metadata jobs, the datasets the job writes.",
+      "items": {
+        "$ref": "#/$defs/output"
+      }
+    },
+    "output_collections": {
+      "type": "object",
+      "description": "Output collections by tool output name. Elements reference outputs by name; discovered collections start empty.",
+      "additionalProperties": {
+        "$ref": "#/$defs/output_collection"
+      }
+    },
+    "slots": {
+      "type": "array",
+      "description": "Pool of pre-allocated datasets for outputs discovered after the tool ran, used in order.",
+      "items": {
+        "$ref": "#/$defs/dataset_targets"
+      }
+    },
+    "job_files": {
+      "type": "object",
+      "properties": {
+        "prepare": {
+          "$ref": "#/$defs/request"
+        },
+        "results": {
+          "$ref": "#/$defs/request"
+        },
+        "stdout": {
+          "$ref": "#/$defs/request"
+        },
+        "stderr": {
+          "$ref": "#/$defs/request"
+        }
+      }
+    },
+    "user": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        }
+      }
+    },
+    "datatypes": {
+      "type": "object",
+      "description": "Datatype registry the job uses. Only the configuration built into the image is supported.",
+      "properties": {
+        "source": {
+          "const": "builtin"
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_discovered_files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_metadata_value_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_timeout_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "description": "kind upload: the body of POST /api/tools/fetch. Elements with src \"planet\" name an entry of files.",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "type": "object",
+          "required": [
+            "targets"
+          ]
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "request"
+            ],
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/request"
+              },
+              "size": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "set_metadata": {
+      "type": "object",
+      "description": "kind set_metadata: datasets to set metadata on.",
+      "properties": {
+        "datasets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "input",
+              "output"
+            ],
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "Key in inputs."
+              },
+              "output": {
+                "type": "string",
+                "description": "Name in outputs whose meta and metadata file targets receive the result."
+              },
+              "ext": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "New datatype."
+              },
+              "detect": {
+                "type": "boolean",
+                "description": "Sniff the datatype first."
+              },
+              "overwrite": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "tool"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "tool",
+          "outputs",
+          "job_files"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "upload"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "upload",
+          "outputs",
+          "job_files"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "set_metadata"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "set_metadata",
+          "inputs",
+          "outputs",
+          "job_files"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "request": {
+      "description": "A presigned request. Headers, when given, are sent as they are (for example signed Content-Type).",
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uri"
+        },
+        {
+          "type": "object",
+          "required": [
+            "url"
+          ],
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "job": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "history_id": {
+          "type": "string"
+        },
+        "galaxy_url": {
+          "type": "string"
+        },
+        "walltime_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "slots": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "shell": {
+          "type": "string",
+          "description": "Shell running the job script and tool_script.sh; default /bin/bash."
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "id",
+        "command"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "python_template_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "description": "Raw Cheetah command template, or the bundle's {text, interpreter, strict, ...}.",
+          "oneOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "version_command": {
+          "oneOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "interpreter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "interpreter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strict_shell": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "object",
+          "properties": {
+            "sanitize": {
+              "type": "boolean"
+            }
+          }
+        },
+        "template_macro_params": {
+          "type": "object"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/parameter"
+          }
+        },
+        "outputs": {
+          "description": "ToolOutput.to_dict() / ToolOutputCollection.to_dict() by name, plus filters (Python expressions), change_format and precreate_directory. A list in Galaxy's order is accepted as well.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/tool_output"
+              }
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tool_output"
+              }
+            }
+          ]
+        },
+        "configfiles": {
+          "description": "Flat list, or the bundle's {inputs, configfiles, file_sources}.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "filename": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "enum": [
+                      "configfile",
+                      "inputs",
+                      "files"
+                    ]
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "eval_engine": {
+                    "enum": [
+                      "cheetah",
+                      null
+                    ]
+                  },
+                  "handle_files": {
+                    "enum": [
+                      "paths",
+                      "staging_path_and_source_path",
+                      null
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "inputs": {
+                  "type": "array"
+                },
+                "configfiles": {
+                  "type": "array"
+                },
+                "file_sources": {
+                  "type": "array"
+                }
+              }
+            }
+          ]
+        },
+        "environment_variables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inject": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "strip": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "stdio": {
+          "type": "object",
+          "description": "ToolStdioExitCode.to_dict() and ToolStdioRegex.to_dict() lists.",
+          "properties": {
+            "exit_codes": {
+              "type": "array"
+            },
+            "regexes": {
+              "type": "array"
+            }
+          }
+        },
+        "home_target": {
+          "enum": [
+            "job_home",
+            "shared_home",
+            "pwd",
+            null
+          ]
+        },
+        "tmp_target": {
+          "enum": [
+            "job_tmp",
+            "job_tmp_if_explicit",
+            null
+          ]
+        },
+        "tmp_directory_vars": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provided_metadata_file": {
+          "type": "string"
+        },
+        "provided_metadata_style": {
+          "enum": [
+            "default",
+            "legacy",
+            null
+          ]
+        },
+        "requires_galaxy_python_environment": {
+          "type": "boolean"
+        },
+        "archive": {
+          "type": "object",
+          "description": "Tar archive holding the tool directory.",
+          "required": [
+            "request"
+          ],
+          "properties": {
+            "request": {
+              "$ref": "#/$defs/request"
+            },
+            "directory": {
+              "type": "string",
+              "description": "Tool directory inside the archive."
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "provided_metadata": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "style": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      },
+      "description": "A tool bundle as produced by planet_runtime.generate (planet/docs/tool-bundle.md), or the flat form whose fields are described here. Bundle fields with another shape (command, version_command, configfiles, outputs as a list, provided_metadata) are accepted."
+    },
+    "parameter": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "A tool parameter definition (the bundle's input with raw attributes).",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "description": "Parameter or group type: text, integer, float, boolean, select, genomebuild, color, group_tag, data_column, hidden, hidden_data, baseurl, data, data_collection, drill_down, directory_uri, rules, repeat, section, conditional."
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "optionality_inferred": {
+          "type": "boolean"
+        },
+        "multiple": {
+          "type": "boolean"
+        },
+        "separator": {
+          "type": "string"
+        },
+        "truevalue": {
+          "type": "string"
+        },
+        "falsevalue": {
+          "type": "string"
+        },
+        "sanitizer": {
+          "description": "The <sanitizer> element as XML, or the bundle's object with its xml.",
+          "oneOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "xml": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "description": "Static options as {label, value, selected} (select) or a drill_down tree; other values are ignored."
+        },
+        "option_fields": {
+          "type": "object",
+          "description": "Columns of dynamic options by option value, for $param.fields.<column>.",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "is_dynamic": {
+          "type": "boolean"
+        },
+        "hierarchy": {
+          "enum": [
+            "exact",
+            "recurse"
+          ]
+        },
+        "rgb": {
+          "type": "boolean"
+        },
+        "formats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "load_contents": {
+          "type": "integer"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/parameter"
+          }
+        },
+        "test_param": {
+          "$ref": "#/$defs/parameter"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/parameter"
+                }
+              }
+            }
+          }
+        },
+        "model_class": {
+          "type": "string",
+          "description": "Bundle groups are identified by model_class (Repeat, Section, Conditional)."
+        },
+        "static_options": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "[label, value, selected] triples."
+        }
+      }
+    },
+    "input_dataset": {
+      "type": "object",
+      "required": [
+        "uuid"
+      ],
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "hid": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ext": {
+          "type": "string"
+        },
+        "dbkey": {
+          "type": "string"
+        },
+        "info": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "element_identifier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_from_basename": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Galaxy metadata in external JSON form, without metadata files."
+        },
+        "metadata_files": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/request"
+          }
+        },
+        "data": {
+          "$ref": "#/$defs/request"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extra": {
+          "$ref": "#/$defs/request",
+          "description": "extra.tar of the dataset's extra files."
+        }
+      }
+    },
+    "input_collection": {
+      "type": "object",
+      "required": [
+        "collection_type",
+        "elements"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "hid": {
+          "type": "integer"
+        },
+        "collection_type": {
+          "type": "string"
+        },
+        "element_identifier": {
+          "type": "string",
+          "description": "Set when the value is a subcollection element."
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/input_collection_element"
+          }
+        }
+      }
+    },
+    "input_collection_element": {
+      "type": "object",
+      "required": [
+        "element_identifier"
+      ],
+      "properties": {
+        "element_identifier": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string",
+          "description": "Key in inputs."
+        },
+        "collection_type": {
+          "type": "string"
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/input_collection_element"
+          }
+        },
+        "columns": {}
+      }
+    },
+    "dataset_targets": {
+      "type": "object",
+      "required": [
+        "uuid"
+      ],
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "data": {
+          "type": "object",
+          "description": "Single PUT up to 4.99 GiB; multipart parts are uniform except the last, and the browser completes the upload.",
+          "properties": {
+            "put": {
+              "$ref": "#/$defs/request"
+            },
+            "multipart": {
+              "type": "object",
+              "required": [
+                "parts"
+              ],
+              "properties": {
+                "parts": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/request"
+                  }
+                },
+                "part_size": {
+                  "type": "integer",
+                  "minimum": 5242880,
+                  "description": "Size of every part but the last. When absent the pod uses max(5 MiB, ceil(size / parts))."
+                }
+              }
+            }
+          }
+        },
+        "meta": {
+          "$ref": "#/$defs/request"
+        },
+        "extra": {
+          "$ref": "#/$defs/request"
+        },
+        "extra_index": {
+          "$ref": "#/$defs/request"
+        },
+        "sanitized": {
+          "$ref": "#/$defs/request"
+        },
+        "metadata_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/request"
+          }
+        }
+      }
+    },
+    "output": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dataset_targets"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "uuid"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "hid": {
+              "type": "integer"
+            },
+            "object_id": {
+              "type": [
+                "integer",
+                "string"
+              ],
+              "description": "kind upload: the element object_id."
+            },
+            "ext": {
+              "type": "string",
+              "description": "Provisional datatype."
+            },
+            "dbkey": {
+              "type": "string"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "Initial metadata (output actions)."
+            }
+          }
+        }
+      ]
+    },
+    "output_collection": {
+      "type": "object",
+      "required": [
+        "collection_type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "hid": {
+          "type": "integer"
+        },
+        "collection_type": {
+          "type": "string"
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "element_identifier",
+              "output"
+            ],
+            "properties": {
+              "element_identifier": {
+                "type": "string"
+              },
+              "output": {
+                "type": "string",
+                "description": "Name in outputs."
+              },
+              "param_name": {
+                "type": "string",
+                "description": "Template variable of a static element."
+              }
+            }
+          }
+        }
+      }
+    },
+    "tool_output": {
+      "type": "object",
+      "required": [
+        "model_class",
+        "name"
+      ],
+      "properties": {
+        "model_class": {
+          "enum": [
+            "ToolOutput",
+            "ToolOutputCollection"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_work_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "precreate_directory": {
+          "type": "boolean"
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "change_format": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "input_dataset": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "check_attribute": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "format": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "discover_datasets": {
+          "type": "array"
+        },
+        "structure": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

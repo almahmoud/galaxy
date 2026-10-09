@@ -1,0 +1,4 @@
+# Build backend for the Galaxy packages and planet-runtime (installed with --no-build-isolation).
+setuptools>=77.0.0
+setuptools-scm>=8
+wheel

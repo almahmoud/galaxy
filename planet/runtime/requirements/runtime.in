@@ -1,0 +1,11 @@
+# Third-party dependencies of the Galaxy packages installed from this checkout.
+# The packages themselves are installed with --no-deps; see scripts/lock.sh.
+galaxy-util[template,image-util] @ file:///galaxy/packages/util
+galaxy-tool-util-models @ file:///galaxy/packages/tool_util_models
+galaxy-config @ file:///galaxy/packages/config
+galaxy-schema @ file:///galaxy/packages/schema
+galaxy-tool-util @ file:///galaxy/packages/tool_util
+galaxy-files @ file:///galaxy/packages/files
+galaxy-objectstore @ file:///galaxy/packages/objectstore
+galaxy-data @ file:///galaxy/packages/data
+galaxy-job-execution @ file:///galaxy/packages/job_execution
