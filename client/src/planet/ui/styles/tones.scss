@@ -1,0 +1,30 @@
+// Text and background colors for status tones; text on background meets WCAG AA contrast.
+@import "@/style/scss/theme/blue.scss";
+
+$pw-tones: (
+    "success": (
+        "text": #0b6b3a,
+        "background": #e3f6e6,
+        "accent": #25a35b,
+    ),
+    "warning": (
+        "text": #8a4300,
+        "background": #fff1e0,
+        "accent": $brand-warning,
+    ),
+    "danger": (
+        "text": #a3131a,
+        "background": #fdebeb,
+        "accent": $brand-danger,
+    ),
+    "info": (
+        "text": $brand-primary,
+        "background": #e6f1fa,
+        "accent": $brand-info,
+    ),
+    "neutral": (
+        "text": #484a52,
+        "background": #eef0f2,
+        "accent": #8f9199,
+    ),
+);
