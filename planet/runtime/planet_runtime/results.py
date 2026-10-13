@@ -2,7 +2,9 @@
 
 A dataset record is written to ``datasets/<uuid>/meta.json`` and repeated in
 ``results.json``. Data larger than the single-PUT limit goes up as uniform
-multipart parts; the browser completes the upload.
+multipart parts; the browser completes the upload. Extra files go up as one
+tar with an index and, when the dataset has enough extra object URLs, also as
+one object per file.
 """
 
 import json
@@ -11,7 +13,10 @@ import math
 import os
 import tarfile
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import (
+    as_completed,
+    ThreadPoolExecutor,
+)
 from dataclasses import (
     dataclass,
     field,
@@ -35,7 +40,20 @@ SINGLE_PUT_LIMIT = int(4.99 * 1024**3)
 MIN_PART_SIZE = 5 * 1024**2
 MAX_PART_SIZE = 5 * 1024**3
 PART_UPLOAD_CONCURRENCY = 4
+EXTRA_OBJECT_CONCURRENCY = 8
 SANITIZE_LIMIT = 64 * 1024**2
+
+
+@dataclass(frozen=True)
+class ExtraObject:
+    """A presigned PUT for one extra file and the key it stores, as recorded in ``extra.json``."""
+
+    key: str
+    request: PresignedRequest
+
+    @classmethod
+    def parse(cls, value: Mapping[str, Any]) -> "ExtraObject":
+        return cls(str(value["key"]), PresignedRequest.parse(value["request"]))
 
 
 @dataclass
@@ -50,6 +68,7 @@ class DatasetTargets:
     extra_index: PresignedRequest | None = None
     sanitized: PresignedRequest | None = None
     metadata_files: list[PresignedRequest] = field(default_factory=list)
+    extra_objects: list[ExtraObject] = field(default_factory=list)
 
     @classmethod
     def parse(cls, value: Mapping[str, Any]) -> "DatasetTargets":
@@ -68,6 +87,7 @@ class DatasetTargets:
             extra_index=optional("extra_index"),
             sanitized=optional("sanitized"),
             metadata_files=[PresignedRequest.parse(p) for p in value.get("metadata_files") or []],
+            extra_objects=[ExtraObject.parse(o) for o in value.get("extra_objects") or []],
         )
 
 
@@ -179,6 +199,47 @@ class DatasetUploader:
             parts = list(pool.map(upload, range(count)))
         return {"mode": "multipart", "size": size, "part_size": part_size, "parts": parts}
 
+    def upload_extra_objects(self, directory: Path, index: dict[str, Any], pool: list[ExtraObject]) -> list[str]:
+        """Store every extra file as its own object too and add its ``key`` to the index; returns warnings.
+
+        Files are matched to the pool in index order. When the pool is smaller than the
+        number of files, nothing is stored separately and the files are read from the tar.
+        """
+        if not pool:
+            return []
+        files = [entry for entry in index["entries"] if entry["type"] == "file"]
+        warnings = [
+            f"Extra file '{entry['path']}' is larger than a single PUT allows and is only stored in extra.tar"
+            for entry in files
+            if entry["size"] > SINGLE_PUT_LIMIT
+        ]
+        files = [entry for entry in files if entry["size"] <= SINGLE_PUT_LIMIT]
+        if len(files) > len(pool):
+            message = f"{len(files)} extra files exceed the {len(pool)} extra object URLs given"
+            return [f"{message}; extra files are only stored in extra.tar"]
+
+        def upload(entry: dict[str, Any], target: ExtraObject) -> None:
+            self.transfers.put_file(target.request, directory / entry["path"])
+            entry["key"] = target.key
+
+        failure: TransferError | None = None
+        with ThreadPoolExecutor(max_workers=EXTRA_OBJECT_CONCURRENCY) as executor:
+            futures = [executor.submit(upload, entry, target) for entry, target in zip(files, pool)]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except TransferError as e:
+                failure = e
+                for future in futures:
+                    future.cancel()
+        if failure is not None:
+            missing = sum(1 for entry in files if "key" not in entry)
+            warnings.append(
+                f"Storing extra files as separate objects failed ({failure}); "
+                f"{missing} of {len(files)} are only stored in extra.tar"
+            )
+        return warnings
+
     def upload(
         self,
         hda: model.HistoryDatasetAssociation,
@@ -219,6 +280,7 @@ class DatasetUploader:
             "tool_version": getattr(hda, "tool_version", None),
             "sanitized": False,
             "errors": [],
+            "warnings": [],
         }
         if extra:
             record.update(extra)
@@ -246,6 +308,7 @@ class DatasetUploader:
                 tar_path = self.scratch / f"extra-{uuid}.tar"
                 index = build_extra_tar(extra_dir, tar_path)
                 self.transfers.put_file(targets.extra, tar_path, content_type="application/x-tar")
+                record["warnings"].extend(self.upload_extra_objects(extra_dir, index, targets.extra_objects))
                 record["extra_files"] = index
                 record["total_size"] += sum(e.get("size", 0) for e in index["entries"])
                 if targets.extra_index is not None:

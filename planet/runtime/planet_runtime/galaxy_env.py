@@ -6,7 +6,8 @@ unmodified files the stager needs (``wrappers.py``, ``data_fetch.py``,
 commit as the installed packages, under ``PLANET_GALAXY_LIB``. They are loaded
 under their real module names; ``galaxy.tools.parameters.basic`` is replaced by
 :mod:`planet_runtime.parameters`, which implements the parameter behaviour the
-wrappers rely on.
+wrappers rely on. The generators also use ``galaxy.managers.datatypes`` and
+``galaxy.managers.dbkeys``, which the image carries the same way.
 """
 
 import functools
@@ -124,3 +125,21 @@ def install() -> None:
 def data_fetch() -> types.ModuleType:
     install()
     return _load(*_DATA_FETCH)
+
+
+@functools.cache
+def install_managers() -> None:
+    """Make the carried ``galaxy.managers`` modules importable when Galaxy's ``lib`` is not on the path."""
+    import galaxy  # noqa: F401
+
+    if "galaxy.managers" in sys.modules or importlib.util.find_spec("galaxy.managers") is not None:
+        return
+    directory = galaxy_lib() / "galaxy" / "managers"
+    spec = importlib.util.spec_from_file_location(
+        "galaxy.managers", directory / "__init__.py", submodule_search_locations=[str(directory)]
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    sys.modules["galaxy"].managers = module  # type: ignore[attr-defined]

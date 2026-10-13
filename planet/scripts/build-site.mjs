@@ -22,7 +22,10 @@ const distDir = join(root, "planet/dist");
 const buildDir = join(root, "planet/build");
 const logDir = join(buildDir, "logs");
 const generatedStaticDir = join(buildDir, "generated/static");
+const generatedToolReposDir = join(buildDir, "generated/toolrepos");
 const dataDir = join(generatedStaticDir, "planet/data");
+/** Site directory of the tool archives that bundles reference with source.repo_tar.path. */
+const TOOL_REPOS_PATH = "static/planet/toolrepos";
 
 /** Value compiled in place of __PLANET_BUILD_ID__ until the real id is known. */
 const PLACEHOLDER_ID = "planet-build-id-placeholder";
@@ -210,12 +213,62 @@ function sizeGroup(path) {
     if (/^static\/dist\/[^/]+$/.test(path)) {
         return "static/dist (entries)";
     }
-    for (const prefix of ["static/dist/chunks", "static/dist/assets", "static/planet/data", "static/style"]) {
+    for (const prefix of [
+        "static/dist/chunks",
+        "static/dist/assets",
+        "static/planet/data",
+        TOOL_REPOS_PATH,
+        "static/style",
+    ]) {
         if (path.startsWith(`${prefix}/`)) {
             return prefix;
         }
     }
     return "shell and other";
+}
+
+/**
+ * Checks that every tool bundle's `source.repo_tar` is in the site with the size and SHA-256 the bundle
+ * records; the browser copies the archive into the user's bucket and verifies it against the bundle.
+ */
+function checkToolArchives() {
+    const bundles = walk(join(distDir, "static/planet/data/toolbox/bundles")).filter((file) => file.endsWith(".json"));
+    const reposDir = join(distDir, TOOL_REPOS_PATH);
+    const problems = [];
+    let archives = 0;
+    for (const file of bundles) {
+        let repoTar;
+        try {
+            repoTar = JSON.parse(readFileSync(file, "utf8")).source?.repo_tar;
+        } catch (error) {
+            problems.push(`${sitePath(file)}: ${error.message}`);
+            continue;
+        }
+        if (!repoTar) {
+            continue;
+        }
+        const archive = resolve(reposDir, String(repoTar.path ?? ""));
+        if (!repoTar.path || !archive.startsWith(`${reposDir}${sep}`)) {
+            problems.push(`${sitePath(file)}: invalid source.repo_tar.path ${JSON.stringify(repoTar.path)}`);
+        } else if (!existsSync(archive)) {
+            problems.push(`${sitePath(file)}: ${TOOL_REPOS_PATH}/${repoTar.path} is missing`);
+        } else {
+            const data = readFileSync(archive);
+            const sha256 = createHash("sha256").update(data).digest("hex");
+            if (data.length !== repoTar.size || sha256 !== repoTar.sha256) {
+                problems.push(
+                    `${sitePath(file)}: ${TOOL_REPOS_PATH}/${repoTar.path} does not match its size or sha256`,
+                );
+            } else {
+                archives += 1;
+            }
+        }
+    }
+    if (problems.length) {
+        console.error(problems.map((problem) => `  ${problem}`).join("\n"));
+        fail(`${problems.length} tool archive problem(s); regenerate with planet/scripts/generate-data.sh`);
+    }
+    return `bundles: ${bundles.length}, archives: ${archives}`;
 }
 
 function printSummary(files, buildId, totalSeconds) {
@@ -292,6 +345,9 @@ function main() {
             warn(`generated ${name} data is missing (${relative(root, join(dataDir, file))})`);
         }
     }
+    if (!existsSync(generatedToolReposDir)) {
+        warn(`generated tool archives are missing (${relative(root, generatedToolReposDir)})`);
+    }
 
     step("client bundles", () => buildClient(PLACEHOLDER_ID));
     const scripts = Object.keys(SCRIPT_ENTRIES).filter((target) => existsSync(join(root, SCRIPT_ENTRIES[target])));
@@ -311,10 +367,15 @@ function main() {
             }
         }
         copyInto(generatedStaticDir, join(distDir, "static"));
+        if (existsSync(generatedToolReposDir)) {
+            copyInto(generatedToolReposDir, join(distDir, TOOL_REPOS_PATH));
+        }
         copyInto(join(siteDir, "index.html"), join(distDir, "index.html"));
         copyInto(join(siteDir, "welcome.html"), join(distDir, "static/welcome.html"));
         copyInto(join(siteDir, "_headers"), join(distDir, "_headers"));
     });
+
+    step("tool archives", checkToolArchives);
 
     let buildId = "";
     step("build id", () => {

@@ -508,6 +508,12 @@ docutils==0.23 \
     --hash=sha256:25d013af9bf23bc1c7b2b093dff4208166c53a94786c9e447808335ef1185fea \
     --hash=sha256:746f5060322511280a1e50eb76846ed6bf2342984b2ac04dc42caa1a8d78799e
     # via galaxy-util
+edam-ontology==1.25.3 \
+    --hash=sha256:cdea906b7885b5e553e924425ba4fb708826dfcb8a2cf186af57725998fcf8c5 \
+    --hash=sha256:deaad6c3e8bd223f8ab58e2223e8029345d4ba6573a1c5574e444ce7e0111098
+    # via
+    #   -r tmp/runtime.in
+    #   galaxy-tool-util
 email-validator==2.3.0 \
     --hash=sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4 \
     --hash=sha256:9fc05c37f2f6cf439ff414f8fc46d917929974a82244c20eb10231ba60c54426

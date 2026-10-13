@@ -63,13 +63,27 @@ def check(manifest: Any, kind: str | None = None) -> None:
         if not record.get("name"):
             raise ManifestError("Every output requires a name")
         _check_uuid(record.get("uuid"), f"output '{record['name']}'")
+        _check_extra_objects(record, f"output '{record['name']}'")
     for index, slot in enumerate(manifest.get("slots") or []):
         _check_uuid(slot.get("uuid"), f"slot {index}")
+        _check_extra_objects(slot, f"slot {index}")
     for key, record in (manifest.get("inputs") or {}).items():
         _check_uuid(record.get("uuid"), f"input '{key}'")
         for name in record.get("metadata_files") or {}:
             if not _METADATA_NAME.match(name):
                 raise ManifestError(f"Input '{key}' has an invalid metadata file name {name!r}")
+
+
+def _check_extra_objects(targets: Mapping[str, Any], what: str) -> None:
+    keys = set()
+    for item in targets.get("extra_objects") or []:
+        if not isinstance(item, Mapping) or not isinstance(item.get("key"), str) or not item["key"]:
+            raise ManifestError(f"Every extra object of {what} requires a key")
+        if not item.get("request"):
+            raise ManifestError(f"Extra object {item['key']!r} of {what} has no request")
+        if item["key"] in keys:
+            raise ManifestError(f"{what} lists extra object {item['key']!r} twice")
+        keys.add(item["key"])
 
 
 def _check_uuid(value: Any, what: str) -> None:

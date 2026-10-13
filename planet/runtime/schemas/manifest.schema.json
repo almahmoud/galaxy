@@ -599,7 +599,8 @@
             },
             "sha256": {
               "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "SHA-256 of the archive; defaults to the bundle's source.repo_tar.sha256."
             }
           }
         },
@@ -935,6 +936,28 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/request"
+          }
+        },
+        "extra_objects": {
+          "type": "array",
+          "description": "Pool of presigned PUTs that store each extra file as its own object as well as in extra.tar, used in the order of the extra.json entries. When the dataset has more extra files than the pool has entries, they are only stored in extra.tar and the dataset record says so in warnings.",
+          "items": {
+            "type": "object",
+            "required": [
+              "key",
+              "request"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Object key relative to the bucket prefix, under datasets/<uuid>/ of this dataset; copied into the file's extra.json entry."
+              },
+              "request": {
+                "$ref": "#/$defs/request"
+              }
+            },
+            "additionalProperties": false
           }
         }
       }

@@ -140,7 +140,9 @@ def new_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def dataset_targets(s3: FakeS3, uuid_: str, metadata_files: int = 2, multipart_parts: int = 0) -> dict[str, Any]:
+def dataset_targets(
+    s3: FakeS3, uuid_: str, metadata_files: int = 2, multipart_parts: int = 0, extra_objects: int = 0
+) -> dict[str, Any]:
     targets: dict[str, Any] = {
         "uuid": uuid_,
         "data": {"put": s3.request(f"datasets/{uuid_}/data")},
@@ -150,6 +152,11 @@ def dataset_targets(s3: FakeS3, uuid_: str, metadata_files: int = 2, multipart_p
         "sanitized": s3.request(f"datasets/{uuid_}/sanitized.html"),
         "metadata_files": [s3.request(f"datasets/{uuid_}/meta/{i}") for i in range(metadata_files)],
     }
+    if extra_objects:
+        targets["extra_objects"] = [
+            {"key": f"datasets/{uuid_}/extra/{i}", "request": s3.request(f"datasets/{uuid_}/extra/{i}")}
+            for i in range(extra_objects)
+        ]
     if multipart_parts:
         targets["data"]["multipart"] = {
             "parts": [s3.request(f"datasets/{uuid_}/parts/{i + 1}") for i in range(multipart_parts)]

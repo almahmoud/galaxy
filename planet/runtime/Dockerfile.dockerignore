@@ -19,6 +19,13 @@
 !lib/galaxy/tools/parameters/wrapped_json.py
 !lib/galaxy/tools/parameters/sanitize.py
 !lib/galaxy/jobs/runners/util/job_script/*.sh
+!lib/galaxy/managers/__init__.py
+!lib/galaxy/managers/datatypes.py
+!lib/galaxy/managers/dbkeys.py
+!tools
+!tool-data/shared/ucsc/builds.txt.sample
+!test/functional/tools
+!planet/toolbox/tool-bundle.schema.json
 !packages/util
 !packages/tool_util_models
 !packages/config

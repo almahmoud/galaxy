@@ -1,6 +1,8 @@
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 import time
 
 import pytest
@@ -8,6 +10,7 @@ from conftest import SCHEMAS
 
 from planet_runtime import (
     results as results_module,
+    stage_in,
     termination,
 )
 from planet_runtime.results import (
@@ -110,3 +113,33 @@ def test_schemas_are_valid(name):
 
     schema = json.loads((SCHEMAS / f"{name}.schema.json").read_text())
     jsonschema.validators.validator_for(schema).check_schema(schema)
+
+
+def _tar(members: dict[str, bytes]) -> bytes:
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        for name, payload in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    return archive.getvalue()
+
+
+def test_tool_archive_digest_defaults_to_the_bundle_repo_tar(s3, layout, transfers):
+    archive = _tar({"macros.xml": b"<macros/>"})
+    s3.put("tools/t/repo.tar", archive)
+    prepare_layout(layout)
+    tool = {"archive": {"request": s3.request("tools/t/repo.tar")}, "source": {"repo_tar": {"sha256": "0" * 64}}}
+    with pytest.raises(stage_in.StageInError, match="checksum"):
+        stage_in.fetch_tool_directory(transfers, layout, tool)
+    tool["source"]["repo_tar"]["sha256"] = hashlib.sha256(archive).hexdigest()
+    stage_in.fetch_tool_directory(transfers, layout, tool)
+    assert (layout.tool_directory / "macros.xml").read_bytes() == b"<macros/>"
+
+
+def test_tool_archive_members_cannot_leave_the_tool_directory(s3, layout, transfers):
+    s3.put("tools/t/repo.tar", _tar({"../escaped.txt": b"x"}))
+    prepare_layout(layout)
+    with pytest.raises(tarfile.FilterError):
+        stage_in.fetch_tool_directory(transfers, layout, {"archive": {"request": s3.request("tools/t/repo.tar")}})
+    assert not (layout.root / "escaped.txt").exists()

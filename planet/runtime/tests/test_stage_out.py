@@ -67,8 +67,8 @@ def tool_job(s3, tmp_path, tool_xml=TOOL_XML, job_id="e2e1"):
     tool["inputs"] = [{"name": "bam_in", "type": "data", "formats": ["bam"]}]
     outputs = []
     for name in ("table", "seqs", "aligned", "report", "split"):
-        uuid = new_uuid()
-        outputs.append({"name": name, "id": len(outputs) + 10, "hid": len(outputs) + 2, **dataset_targets(s3, uuid)})
+        targets = dataset_targets(s3, new_uuid(), extra_objects=2 if name == "report" else 0)
+        outputs.append({"name": name, "id": len(outputs) + 10, "hid": len(outputs) + 2, **targets})
     slots = [dataset_targets(s3, new_uuid()) for _ in range(6)]
     return {
         "protocol": 1,
@@ -157,6 +157,9 @@ def test_tool_job_end_to_end(s3, layout, transfers, tmp_path, monkeypatch):
     extra_tar = s3.get(f"datasets/{report['uuid']}/extra.tar")
     entry = report["extra_files"]["entries"][-1]
     assert extra_tar[entry["offset"] : entry["offset"] + entry["size"]] == b"png"
+    assert entry["key"] == f"datasets/{report['uuid']}/extra/0"
+    assert s3.get(entry["key"]) == b"png"
+    assert report["warnings"] == []
     assert s3.json(f"datasets/{report['uuid']}/extra.json") == report["extra_files"]
 
     assert outputs["split"]["state"] == "empty"

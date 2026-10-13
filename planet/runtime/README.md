@@ -24,10 +24,20 @@ docker build -f planet/runtime/Dockerfile -t planet-runtime:dev .
 Multi-architecture images are built with
 `docker buildx build --platform linux/amd64,linux/arm64 ...`. The image runs as uid
 10001 and works with a read-only root filesystem when `/planet` is a writable
-volume. Galaxy files that no package ships (`galaxy/tools/wrappers.py`,
-`data_fetch.py`, `parameters/sanitize.py`, `parameters/wrapped_json.py`, the
-job script templates and `datatypes_conf.xml.sample`) are copied unmodified
-to `/opt/planet/galaxy/lib`.
+volume. Galaxy files that no package ships are copied unmodified to
+`/opt/planet/galaxy`, a partial Galaxy root (`GALAXY_INCLUDES_ROOT`):
+`galaxy/tools/wrappers.py`, `data_fetch.py`, `parameters/sanitize.py`,
+`parameters/wrapped_json.py`, the job script templates,
+`datatypes_conf.xml.sample`, `galaxy/managers/datatypes.py` and `dbkeys.py`
+under `lib/`, Galaxy's `tools/` and `tool-data/shared/ucsc/builds.txt.sample`.
+
+## Static data generators
+
+`planet_runtime.generate` produces the datatype, genome and toolbox files the
+site serves; `planet/scripts/generate-data.sh` runs it in this image, so the data
+and the job pods come from the same Galaxy code. Tool bundles are validated
+against `planet/toolbox/tool-bundle.schema.json` in the test stage, the only
+stage with `jsonschema`.
 
 ## Dependencies
 
@@ -49,6 +59,9 @@ docker run --rm planet-runtime:test
 planet/runtime/tests/integration/run-tool.sh planet-runtime:dev
 ```
 
-The pytest suite runs inside the image. `run-tool.sh` runs the tool wrapper as
-PID 1 of a busybox container next to a waiting stage-out container, covering
-normal and failing exits, the walltime and a killed container.
+The pytest suite runs inside the image and covers the stager (`tests/`) and the
+generators (`tests/generate/`); the test stage adds Galaxy's
+`test/functional/tools` and the bundle schema to the Galaxy root. `run-tool.sh`
+runs the tool wrapper as PID 1 of a busybox container next to a waiting
+stage-out container, covering normal and failing exits, the walltime and a
+killed container.

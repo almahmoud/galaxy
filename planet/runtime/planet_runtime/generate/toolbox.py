@@ -17,7 +17,8 @@ Writes, below ``OUT_DIR``:
   that ``$__tool_directory__`` points to, without test data
 
 Panels are rendered with Galaxy's own panel, view and filter classes; tools are
-represented by their ``ToolPanelEntry`` payloads.
+represented by their ``ToolPanelEntry`` payloads. DOI citations get their BibTeX from
+doi.org (see :mod:`.citations`) unless ``--no-doi`` is given.
 """
 
 import argparse
@@ -81,6 +82,10 @@ from ._common import (
     write_json,
 )
 from .bundle import build_bundle
+from .citations import (
+    add_bibtex,
+    DoiResolver,
+)
 from .datatypes import load_registry
 from .github import (
     GitHubRepository,
@@ -416,7 +421,9 @@ def to_dict_in_panel(rendered: ToolPanelElements) -> list[dict[str, Any]]:
 # --- driver -------------------------------------------------------------------------------
 
 
-def generate(config_path: Path, out_dir: Path, cache_dir: Path, galaxy_root: Path) -> dict[str, Any]:
+def generate(
+    config_path: Path, out_dir: Path, cache_dir: Path, galaxy_root: Path, doi_resolver: DoiResolver | None = None
+) -> dict[str, Any]:
     config = yaml.safe_load(config_path.read_text())
     registry = load_registry(str(galaxy_root))
     repo = GitHubRepository(config["repository"], config["commit"], cache_dir)
@@ -470,6 +477,8 @@ def generate(config_path: Path, out_dir: Path, cache_dir: Path, galaxy_root: Pat
 
                 relative = safe_relative_path(bundle["id"], bundle["version"])
                 bundle_path = data_dir / "bundles" / relative.parent / f"{relative.name}.json"
+                if doi_resolver is not None:
+                    add_bibtex(bundle, doi_resolver)
                 bundle_sizes[bundle["id"]] = write_json(bundle_path, bundle)
                 if loaded.repo_tar is not None:
                     repo_tar = bundle["source"]["repo_tar"]
@@ -519,12 +528,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, required=True, help="generated output root (planet/build/generated)")
     parser.add_argument("--cache", type=Path, help="download cache (default: <out>/../cache/github)")
     parser.add_argument("--galaxy-root", type=Path, help="Galaxy checkout (default: the one providing galaxy)")
+    parser.add_argument("--doi-cache", type=Path, help="BibTeX cache (default: <out>/../cache/doi)")
+    parser.add_argument("--no-doi", action="store_true", help="do not resolve DOI citations to BibTeX")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     galaxy_root = args.galaxy_root or Path(galaxy_directory())
     cache_dir = args.cache or args.out.parent / "cache" / "github"
-    summary = generate(args.config, args.out, cache_dir, galaxy_root)
+    doi_resolver = None if args.no_doi else DoiResolver(args.doi_cache or args.out.parent / "cache" / "doi")
+    summary = generate(args.config, args.out, cache_dir, galaxy_root, doi_resolver)
     log.info("toolbox: %s", summary)
 
 

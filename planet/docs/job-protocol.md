@@ -22,6 +22,7 @@ All keys are relative to the configured bucket prefix.
 | `datasets/<uuid>/meta.json` | pod | The dataset record also found in `results.json`. |
 | `datasets/<uuid>/meta/<n>` | pod | Metadata files such as `bam_index`. |
 | `datasets/<uuid>/extra.tar`, `extra.json` | pod | Extra files as an uncompressed tar and its index. |
+| `datasets/<uuid>/extra/<n>` | pod | Optional copy of each extra file as its own object. |
 
 The browser chooses every key and presigns one URL per object. The manifest
 carries only presigned requests, `{"url": ..., "headers": {...}}` or a bare URL
@@ -134,7 +135,9 @@ uploaded its result document, whatever the job's state.
 
 `tool` is the tool's bundle ([tool-bundle.md](tool-bundle.md)) as the generator
 wrote it, plus `archive`: the tar of the tool directory (`request`, the tool's
-`directory` inside it and an optional `sha256`). The stager reads the command,
+`directory` inside it and an optional `sha256`, which defaults to the bundle's
+`source.repo_tar.sha256`). Stage-in checks the digest and extracts the tar with
+the `data` filter of Python's `tarfile`. The stager reads the command,
 config files, environment variables, version command, `profile`,
 `python_template_version`, `options.sanitize`, `template_macro_params`,
 `stdio`, `outputs` (with `filters`, `change_format` and
@@ -160,11 +163,26 @@ provisional `ext` and its targets: `data.put` (up to 4.99 GiB) and/or
 `data.multipart` (presigned UploadPart URLs of an upload the browser created,
 and optionally the `part_size` to use; by default max(5 MiB, size / parts)),
 `meta`, `extra`, `extra_index`, `sanitized` (sanitized copy of HTML
-outputs) and a pool of `metadata_files` requests used in name order.
-`output_collections` gives the structure of output collections; collections
-populated by discovery start with no elements. `slots` is the pool of datasets
-for discovered outputs, used in order; discovering more datasets than slots
-fails the job with Galaxy's `max_discovered_files` message.
+outputs), a pool of `metadata_files` requests used in name order and an
+optional `extra_objects` pool. `output_collections` gives the structure of
+output collections; collections populated by discovery start with no elements.
+`slots` is the pool of datasets for discovered outputs, used in order;
+discovering more datasets than slots fails the job with Galaxy's
+`max_discovered_files` message. Slots take the same targets as outputs.
+
+`extra_objects` lists `{"key", "request"}` pairs: a presigned PUT and the
+object key it writes, relative to the bucket prefix and inside the dataset's
+own `datasets/<uuid>/` (for example `datasets/<uuid>/extra/0`). Keys must be
+unique. The pod still uploads `extra.tar`, then stores each extra file up to
+4.99 GiB as its own object, taking pool entries in `extra.json` entry order, and
+copies the key into the file's entry. The service worker serves files that
+have a key through presigned URLs, which media and members over 2 MiB inside
+HTML reports need, and reads other members from the tar by range. A dataset with more extra files than pool entries keeps the tar
+only and its record gets a `warnings` entry; so does a file over 4.99 GiB. A
+failed upload of one object leaves the remaining files tar-only with a warning
+and does not fail the job. Each pool entry adds about 0.5 KiB to the manifest,
+which may not exceed 64 MiB, so give pools to outputs that may hold reports or
+media, sized for their expected file count.
 
 `job_files` holds the PUTs of `prepare.json`, `results.json`, `stdout` and
 `stderr`. `user` gives `$__user_email__` and `$__user_name__`.
@@ -215,7 +233,8 @@ A dataset record has `uuid`, `state` (`ok`, `error`, `failed_metadata`, or
 `metadata` (external JSON form without metadata files), `metadata_files`
 (`{name: {index, size}}`, the index into the dataset's `metadata_files`
 targets), `size`, `total_size`, `extra_files` (`{size, entries}` with each
-member's data `offset` in `extra.tar`), `sanitized`, `created_from_basename`,
-`tool_version` and `data` (`mode` `put`, `multipart` or `none`; for multipart
-the uniform `part_size` and each part's `part_number`, `etag` and `size`, for
-the browser to complete the upload).
+member's data `offset` in `extra.tar` and, for files also stored on their own,
+its `key`), `sanitized`, `created_from_basename`, `tool_version`, `errors`,
+`warnings` and `data` (`mode` `put`, `multipart` or `none`; for multipart the
+uniform `part_size` and each part's `part_number`, `etag` and `size`, for the
+browser to complete the upload).

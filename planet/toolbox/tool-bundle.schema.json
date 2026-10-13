@@ -105,7 +105,11 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["type", "content"],
-                "properties": { "type": { "type": "string" }, "content": { "type": "string" } }
+                "properties": {
+                    "type": { "type": "string" },
+                    "content": { "type": "string" },
+                    "bibtex": { "type": "string", "description": "BibTeX of a doi citation, resolved when the bundle was made." }
+                }
             }
         },
         "help": {

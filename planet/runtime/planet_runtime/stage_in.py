@@ -67,13 +67,20 @@ def extract_tar(archive: Path, destination: Path) -> None:
         tar.extractall(destination, filter="data")
 
 
+def archive_sha256(tool: Mapping[str, Any]) -> str | None:
+    """Expected digest of the tool archive: its own, else the bundle's ``source.repo_tar``."""
+    archive = tool.get("archive") or {}
+    repo_tar = (tool.get("source") or {}).get("repo_tar") or {}
+    return archive.get("sha256") or repo_tar.get("sha256")
+
+
 def fetch_tool_directory(transfers: Transfers, layout: Layout, tool: Mapping[str, Any]) -> None:
     archive = tool.get("archive")
     if not archive:
         return
     path = layout.stager / "tool.tar"
     transfers.download(PresignedRequest.parse(archive["request"]), path)
-    if expected := archive.get("sha256"):
+    if expected := archive_sha256(tool):
         digest = hashlib.sha256()
         with open(path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):

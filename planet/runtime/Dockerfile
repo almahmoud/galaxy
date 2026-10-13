@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # planet-runtime: Galaxy's job execution libraries from this checkout plus the
-# Planet stager. Based on packages/job_execution/Dockerfile (RUNTIME_SOURCE=source).
+# Planet stager and static data generators. Based on packages/job_execution/Dockerfile
+# (RUNTIME_SOURCE=source).
 # Build from the repository root:
 #   docker build -f planet/runtime/Dockerfile -t planet-runtime:dev .
 ARG PYTHON_IMAGE=python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
@@ -31,23 +32,32 @@ RUN for package in util tool_util_models config schema tool_util files objectsto
         /galaxy/packages/objectstore \
         /galaxy/packages/data \
         /galaxy/packages/job_execution
+COPY tools /galaxy/tools
+COPY tool-data/shared/ucsc/builds.txt.sample /galaxy/tool-data/shared/ucsc/builds.txt.sample
+# Galaxy files the stager and the generators load that are not part of any Galaxy
+# package, in a partial Galaxy root (GALAXY_INCLUDES_ROOT).
+RUN set -eu; cd /galaxy; \
+    for path in \
+        lib/galaxy/tools/wrappers.py \
+        lib/galaxy/tools/data_fetch.py \
+        lib/galaxy/tools/parameters/wrapped_json.py \
+        lib/galaxy/tools/parameters/sanitize.py \
+        lib/galaxy/jobs/runners/util/job_script/DEFAULT_JOB_FILE_TEMPLATE.sh \
+        lib/galaxy/jobs/runners/util/job_script/CLUSTER_SLOTS_STATEMENT.sh \
+        lib/galaxy/jobs/runners/util/job_script/MEMORY_STATEMENT_TEMPLATE.sh \
+        lib/galaxy/config/sample/datatypes_conf.xml.sample \
+        lib/galaxy/managers/__init__.py \
+        lib/galaxy/managers/datatypes.py \
+        lib/galaxy/managers/dbkeys.py \
+        tool-data/shared/ucsc/builds.txt.sample; \
+    do install -D -m 0644 "$path" "/opt/planet/galaxy/$path"; done; \
+    cp -R tools /opt/planet/galaxy/tools; \
+    chmod -R a+rX,go-w /opt/planet/galaxy
 COPY planet/runtime/pyproject.toml /src/planet-runtime/pyproject.toml
 COPY planet/runtime/planet_runtime /src/planet-runtime/planet_runtime
 RUN /venv/bin/pip install --no-deps --no-build-isolation /src/planet-runtime \
     && /venv/bin/pip check \
     && /venv/bin/pip uninstall -y pip wheel setuptools-scm vcs-versioning
-# Galaxy files the stager loads that are not part of any Galaxy package.
-RUN set -eu; cd /galaxy/lib; \
-    for path in \
-        galaxy/tools/wrappers.py \
-        galaxy/tools/data_fetch.py \
-        galaxy/tools/parameters/wrapped_json.py \
-        galaxy/tools/parameters/sanitize.py \
-        galaxy/jobs/runners/util/job_script/DEFAULT_JOB_FILE_TEMPLATE.sh \
-        galaxy/jobs/runners/util/job_script/CLUSTER_SLOTS_STATEMENT.sh \
-        galaxy/jobs/runners/util/job_script/MEMORY_STATEMENT_TEMPLATE.sh \
-        galaxy/config/sample/datatypes_conf.xml.sample; \
-    do install -D -m 0644 "$path" "/opt/planet/galaxy/lib/$path"; done
 
 FROM build-base AS test-deps
 RUN /venv/bin/pip install --require-hashes --no-deps --target /opt/planet-test -r /tmp/requirements/test.txt
@@ -66,6 +76,7 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLANET_GALAXY_LIB=/opt/planet/galaxy/lib \
+    GALAXY_INCLUDES_ROOT=/opt/planet/galaxy \
     HOME=/planet/stager \
     TMPDIR=/planet/tmp \
     XDG_CACHE_HOME=/planet/cache
@@ -80,7 +91,8 @@ RUN HOME=/tmp TMPDIR=/tmp XDG_CACHE_HOME=/tmp/planet-build-cache python -c "\
 import pysam, h5py; \
 from galaxy.datatypes import sniff; sniff.guess_ext('/etc/hostname', []); \
 from galaxy.metadata.set_metadata import set_metadata; \
-from planet_runtime import galaxy_env; galaxy_env.install(); galaxy_env.data_fetch(); galaxy_env.registry()" \
+from planet_runtime import galaxy_env; galaxy_env.install(); galaxy_env.data_fetch(); galaxy_env.registry(); \
+from planet_runtime.generate import datatypes, genomes, toolbox; datatypes.load_registry()" \
     && rm -rf /tmp/planet-build-cache \
     && mkdir -p /etc/planet \
     && python -c "from importlib.metadata import distributions; print('\n'.join(sorted(d.metadata['Name'] + '==' + d.version for d in distributions())))" > /etc/planet/requirements.txt
@@ -90,6 +102,9 @@ CMD ["planet-stager", "--help"]
 
 FROM runtime AS test
 COPY --from=test-deps /opt/planet-test /opt/planet-test
+# The generator tests build bundles for Galaxy's own tools and check them against the bundle schema.
+COPY test/functional/tools /opt/planet/galaxy/test/functional/tools
+COPY planet/toolbox/tool-bundle.schema.json /opt/planet/galaxy/planet/toolbox/tool-bundle.schema.json
 COPY planet/runtime/tests /src/planet-runtime/tests
 COPY planet/runtime/schemas /src/planet-runtime/schemas
 COPY planet/runtime/pyproject.toml /src/planet-runtime/pyproject.toml
