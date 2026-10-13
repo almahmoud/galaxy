@@ -72,6 +72,16 @@ describe("testCluster", () => {
         );
     });
 
+    it("never uses the saved token for another gateway URL", async () => {
+        const kube = fakeKube();
+        const services = deps({ kubeClient: kube.factory });
+        const form = { ...clusterForm(saved), gateway_url: "https://gateway.example.org" };
+        const report = await testCluster(form, saved, services);
+        expect(report.checks.at(-1)?.code).toBe("missing_token");
+        expect(kube.configs.map((config) => config.token)).toEqual([""]);
+        expect(services.runChecks).not.toHaveBeenCalled();
+    });
+
     it("asks for a token once the saved one is being removed", async () => {
         const services = deps({ kubeClient: fakeKube().factory });
         const report = await testCluster({ ...clusterForm(saved), clear_token: true }, saved, services);
@@ -111,6 +121,15 @@ describe("testStorage", () => {
         const request = services.runChecks.mock.calls[0]![0];
         expect(request.settings.storage).toMatchObject({ endpoint: GARAGE.endpoint, bucket: "planet" });
         expect(request.settings.storage).not.toHaveProperty("secret_access_key");
+    });
+
+    it("never uses the saved secret for another bucket", async () => {
+        const s3 = fakeS3();
+        const services = deps({ s3Client: s3.factory });
+        const report = await testStorage({ ...storageForm(saved), bucket: "other-bucket" }, saved, services);
+        expect(report.checks.some((check) => check.code === "missing_secret")).toBe(true);
+        expect(services.runChecks).not.toHaveBeenCalled();
+        expect(s3.factory).not.toHaveBeenCalled();
     });
 
     it("stops when a local endpoint does not answer", async () => {

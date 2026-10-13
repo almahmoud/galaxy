@@ -32,6 +32,9 @@ export interface DatatypeShow {
     edam_data?: string;
     converters?: string[];
     preferred_visualization?: { visualization: string };
+    /** The class attributes `compressed` and `compressed_format`, when the generator exports them. */
+    compressed?: boolean;
+    compressed_format?: string | null;
 }
 
 // ---------------------------------------------------------------------------------------------------------

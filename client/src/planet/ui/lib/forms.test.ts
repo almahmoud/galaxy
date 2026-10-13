@@ -8,11 +8,15 @@ import {
     clusterDirty,
     clusterForm,
     clusterTarget,
+    clusterTokenRebound,
+    clusterTokenSource,
     secretSource,
     storageChange,
     storageConfig,
     storageDirty,
     storageForm,
+    storageSecretRebound,
+    storageSecretSource,
     storageValues,
     validateClusterForm,
     validateStorageForm,
@@ -48,6 +52,17 @@ describe("cluster form", () => {
         expect(clusterChange({ ...form, clear_token: true }).token).toBeNull();
         expect(clusterDirty({ ...form, clear_token: true }, saved)).toBe(true);
         expect(clusterDirty({ ...form, token: "abc" }, saved)).toBe(true);
+    });
+
+    it("does not carry the saved token over to another gateway URL", () => {
+        const form = clusterForm(saved);
+        expect(clusterTokenRebound({ ...form, gateway_url: "HTTP://127.0.0.1:8001/" }, saved)).toBe(false);
+        expect(clusterTokenSource({ ...form, namespace: "jobs" }, saved)).toBe("saved");
+        const moved = { ...form, gateway_url: "https://gateway.example.org" };
+        expect(clusterTokenRebound(moved, saved)).toBe(true);
+        expect(clusterTokenSource(moved, saved)).toBe("cleared");
+        expect(clusterTokenSource({ ...moved, token: "typed" }, saved)).toBe("typed");
+        expect(clusterTokenRebound(moved, { ...saved, has_token: false })).toBe(false);
     });
 
     it("trims values and parses the walltime", () => {
@@ -177,6 +192,17 @@ describe("storage form", () => {
         expect(storageChange(form)).not.toHaveProperty("secret_access_key");
         expect(storageChange({ ...form, clear_secret: true }).secret_access_key).toBeNull();
         expect(storageDirty({ ...form, bucket: "other" }, saved)).toBe(true);
+        for (const change of [
+            { bucket: "other" },
+            { access_key_id: "GK2" },
+            { cluster_endpoint: "http://garage.planet.svc:3900" },
+            { provider: "custom" as const, endpoint: "https://s3.example.org" },
+        ]) {
+            expect(storageSecretRebound({ ...form, ...change }, saved), JSON.stringify(change)).toBe(true);
+            expect(storageSecretSource({ ...form, ...change }, saved)).toBe("cleared");
+        }
+        expect(storageSecretRebound({ ...form, prefix: "other" }, saved)).toBe(false);
+        expect(storageSecretSource({ ...form, prefix: "other" }, saved)).toBe("saved");
         expect(storageConfig({ ...form, secret_access_key: " s " })).toEqual({
             endpoint: GARAGE.endpoint,
             clusterEndpoint: "",

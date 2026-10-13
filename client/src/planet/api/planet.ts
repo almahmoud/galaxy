@@ -1,4 +1,5 @@
 import { settings } from "@/planet/db";
+import { rebindsSecret, rebindsToken } from "@/planet/db/secretBindings";
 import type { SettingsUpdate } from "@/planet/db/settings";
 import type { KubeClient, KubeClientConfig } from "@/planet/k8s";
 import type { S3Client, S3Config } from "@/planet/s3";
@@ -84,13 +85,18 @@ function parseCheckRequest(body: unknown): ParsedCheckRequest {
     return parsed;
 }
 
-/** Runs the connection checks with the stored settings and secrets, overridden by `request.settings`. */
+/**
+ * Runs the connection checks with the stored settings and secrets, overridden by `request.settings`. A stored
+ * secret is used only with the settings it was saved for, as saving would keep it.
+ */
 async function runChecks(request: ParsedCheckRequest, clients: PlanetClients): Promise<CheckReport> {
     const [stored, secrets] = await Promise.all([settings.getStored(), settings.getSecrets()]);
     const { token, ...clusterOverride } = request.settings?.cluster ?? {};
     const { secret_access_key: secretOverride, ...storageOverride } = request.settings?.storage ?? {};
     const cluster = { ...stored.cluster, ...clusterOverride };
     const storage = { ...stored.storage, ...storageOverride };
+    const storedToken = rebindsToken(clusterOverride, stored.cluster) ? null : secrets.cluster_token;
+    const storedSecret = rebindsSecret(storageOverride, stored.storage) ? null : secrets.storage_secret_access_key;
     const options = { context: "worker" as const, mode: request.mode, ...clients };
     const { targets } = request;
     const [clusterReport, storageReport] = await Promise.all([
@@ -99,7 +105,7 @@ async function runChecks(request: ParsedCheckRequest, clients: PlanetClients): P
                   {
                       gatewayUrl: cluster.gateway_url,
                       namespace: cluster.namespace,
-                      token: (token === undefined ? secrets.cluster_token : token) ?? "",
+                      token: (token === undefined ? storedToken : token) ?? "",
                   },
                   options,
               )
@@ -114,8 +120,7 @@ async function runChecks(request: ParsedCheckRequest, clients: PlanetClients): P
                       region: storage.region,
                       pathStyle: storage.path_style,
                       accessKeyId: storage.access_key_id,
-                      secretAccessKey:
-                          (secretOverride === undefined ? secrets.storage_secret_access_key : secretOverride) ?? "",
+                      secretAccessKey: (secretOverride === undefined ? storedSecret : secretOverride) ?? "",
                   },
                   options,
               )
@@ -150,7 +155,9 @@ async function status(): Promise<PlanetStatus> {
  *
  * - `GET /api/planet/build`: `{build_id}` of this Service Worker, read by the boot gate.
  * - `GET /api/planet/settings`: settings without secrets; `has_token` and `has_secret` tell whether they are set.
- * - `PUT /api/planet/settings`: partial update. Secrets are write-only; an empty string or null removes one.
+ * - `PUT /api/planet/settings`: partial update. Secrets are write-only; an empty string or null removes one, and
+ *   so does a change to the gateway URL (token) or to the storage endpoints, bucket or access key ID (secret
+ *   access key) that does not supply a new one.
  * - `POST /api/planet/settings/check`: connection checks with the stored secrets. The body is a `CheckRequest`
  *   (`@/planet/ui/lib/api`); its `settings` replace stored values for this check only.
  * - `GET /api/planet/status`: which components are configured.

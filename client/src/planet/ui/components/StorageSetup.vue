@@ -17,6 +17,7 @@ import {
     storageDirty,
     type StorageForm,
     storageForm,
+    storageSecretRebound,
     storageValues,
     validateStorageForm,
 } from "../lib/forms";
@@ -56,6 +57,7 @@ const root = ref<HTMLElement | null>(null);
 const baseline = shallowRef(props.settings);
 const saved = computed(() => baseline.value.storage);
 const dirty = computed(() => storageDirty(form.value, saved.value));
+const secretRebound = computed(() => storageSecretRebound(form.value, saved.value));
 const values = computed(() => storageValues(form.value));
 const origin = computed(() => services.origin ?? window.location.origin);
 const cors = computed(() => {
@@ -396,6 +398,7 @@ defineExpose({ test, focus });
                     help="Planet keeps it in this browser and gives job pods only links to single objects."
                     placeholder="Paste the secret access key"
                     :saved="saved.has_secret"
+                    :rebound="secretRebound ? 'the endpoint, bucket or access key ID changed' : ''"
                     :error="errors['storage.secret_access_key']" />
             </div>
 

@@ -38,6 +38,8 @@ const SCRIPT_ENTRIES = {
     boot: "client/src/planet/boot/boot.ts",
 };
 const REPO_STATIC = ["style/jquery-ui", "favicon.svg", "favicon.ico", "robots.txt"];
+/** Stable-named files a page loads before Galaxy's entries, precached with them. */
+const BOOT_FILES = ["static/planet/boot.js", "static/planet/boot.css", "static/welcome.html"];
 const GENERATED_DATA = {
     datatypes: "datatypes/index.json",
     toolbox: "toolbox/panel.json",
@@ -197,6 +199,50 @@ function staticImportGraph(entry) {
     return seen;
 }
 
+/** True for files whose name carries a content hash (the client build's chunk and asset names). */
+function isContentHashed(path) {
+    return /^\/static\/dist\/(?:chunks|assets)\//.test(path);
+}
+
+function sha256(file) {
+    return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
+
+/**
+ * The build description the service worker installs from (client/src/planet/util/build.ts, BuildInfo):
+ * - files: stable-named files a page or the worker needs, with their SHA-256. The worker fetches them past the
+ *   HTTP cache and rejects copies of another build.
+ * - boot: content-hashed files the entries import statically, precached with the files.
+ * - lazy: the other content-hashed files, cached in the background after activation.
+ */
+function buildDescription(buildId) {
+    const site = (file) => `/${sitePath(file)}`;
+    const dist = walk(join(distDir, "static/dist")).filter((file) => !file.endsWith(".map"));
+    const stable = [
+        ...dist.filter((file) => !isContentHashed(site(file))),
+        ...BOOT_FILES.map((path) => join(distDir, path)).filter((file) => existsSync(file)),
+        ...walk(join(distDir, "static/style")),
+        ...walk(join(distDir, "static/planet/data")),
+    ];
+    const entries = [...CLIENT_ENTRIES, "planet-welcome.bundled.js"]
+        .filter((entry) => entry.endsWith(".js"))
+        .map((entry) => join(distDir, "static/dist", entry))
+        .filter((file) => existsSync(file));
+    const imported = new Set(
+        entries.flatMap((entry) => [...staticImportGraph(entry)]).filter((file) => isContentHashed(site(file))),
+    );
+    const files = Object.fromEntries(
+        stable.map((file) => [site(file), sha256(file)]).sort(([a], [b]) => (a < b ? -1 : 1)),
+    );
+    const hashed = dist.filter((file) => isContentHashed(site(file))).sort();
+    return {
+        build_id: buildId,
+        files,
+        boot: hashed.filter((file) => imported.has(file)).map(site),
+        lazy: hashed.filter((file) => !imported.has(file)).map(site),
+    };
+}
+
 function filesContaining(files, needle) {
     const bytes = Buffer.from(needle);
     return files.filter((file) => readFileSync(file).includes(bytes));
@@ -271,7 +317,7 @@ function checkToolArchives() {
     return `bundles: ${bundles.length}, archives: ${archives}`;
 }
 
-function printSummary(files, buildId, totalSeconds) {
+function printSummary(files, buildId, description, totalSeconds) {
     const groups = new Map();
     let largest = { path: "", bytes: 0 };
     for (const file of files) {
@@ -306,6 +352,12 @@ function printSummary(files, buildId, totalSeconds) {
     }
     console.log(line("total", total));
     console.log(`  largest file: ${largest.path} (${formatBytes(largest.bytes)})`);
+    const bytesOf = (paths) => paths.reduce((sum, path) => sum + statSync(join(distDir, path)).size, 0);
+    const install = [...Object.keys(description.files), ...description.boot];
+    console.log(
+        `  service worker: ${install.length} files (${formatBytes(bytesOf(install))}) at install, ` +
+            `${description.lazy.length} (${formatBytes(bytesOf(description.lazy))}) in the background`,
+    );
     console.log(`  built in ${totalSeconds.toFixed(1)} s`);
     if (warnings.length) {
         console.log(`\n${warnings.length} warning(s):`);
@@ -378,6 +430,7 @@ function main() {
     step("tool archives", checkToolArchives);
 
     let buildId = "";
+    let description;
     step("build id", () => {
         buildId = `${gitShortSha()}-${contentHash(walk(distDir)).slice(0, 10)}`;
         return buildId;
@@ -397,15 +450,9 @@ function main() {
             const file = join(distDir, shell);
             writeFileSync(file, readFileSync(file, "utf8").replaceAll(HTML_TOKEN, buildId));
         }
-        const assets = walk(join(distDir, "static/dist"))
-            .map((file) => `/${sitePath(file)}`)
-            .filter((path) => !path.endsWith(".map"))
-            .sort();
+        description = buildDescription(buildId);
         mkdirSync(join(distDir, "static/planet"), { recursive: true });
-        writeFileSync(
-            join(distDir, "static/planet/build.json"),
-            `${JSON.stringify({ build_id: buildId, assets }, null, 2)}\n`,
-        );
+        writeFileSync(join(distDir, "static/planet/build.json"), `${JSON.stringify(description, null, 2)}\n`);
         return rebuilt.length ? `rebuilt ${rebuilt.join(", ")}` : undefined;
     });
 
@@ -432,7 +479,7 @@ function main() {
         }
     }
 
-    printSummary(files, buildId, (performance.now() - started) / 1000);
+    printSummary(files, buildId, description, (performance.now() - started) / 1000);
 }
 
 main();

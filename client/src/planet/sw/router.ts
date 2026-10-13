@@ -8,7 +8,8 @@
  * The worker receives navigations into its scope from any site (links, frames, form posts), while other
  * sites' subresource requests never reach it. Navigations therefore reach only routes registered as
  * `navigable` (read-only documents and downloads), and requests that change state are refused when they
- * carry another origin.
+ * carry another origin or do not come from a script's `fetch` or `XMLHttpRequest` (markup such as
+ * `<link rel=prefetch>` and `<a ping>` sends same-origin requests in `no-cors` mode).
  */
 
 import type { GalaxyApiPaths } from "@/api/schema";
@@ -129,9 +130,9 @@ export interface RouteOptions {
      */
     navigable?: boolean;
     /**
-     * Marks a GET route that changes state (Galaxy's legacy controllers). It gets the origin checks of the
-     * other methods, which always count as changing state, and answers only `fetch` and `XMLHttpRequest`
-     * calls, not images, scripts or styles.
+     * Marks a GET route that changes state (Galaxy's legacy controllers). It gets the checks of the other
+     * methods, which always count as changing state: same origin, and only `fetch` and `XMLHttpRequest`
+     * calls, not navigations, images, scripts, styles, prefetches or pings.
      */
     changesState?: boolean;
 }
@@ -165,6 +166,7 @@ const NAME = "[A-Za-z_][A-Za-z0-9_]*";
 const PLACEHOLDER = new RegExp(`\\{(${NAME})(?::(path))?\\}`, "g");
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const SCRIPTED_MODES = new Set<RequestMode>(["cors", "same-origin"]);
 
 const NAVIGATION_FORM_REFUSED = "Planet does not accept form submissions.";
 const NAVIGATION_REFUSED = "This Planet address cannot be opened as a page, link or frame.";
@@ -323,7 +325,8 @@ function refusalFor(request: Request, url: URL, method: string, found: RouteMatc
     if (isForeign(request, url.origin)) {
         return CROSS_ORIGIN_REFUSED;
     }
-    if (READ_METHODS.has(method) && request.destination !== "") {
+    // Scripts send "cors" (or "same-origin") requests with an empty destination; markup sends "no-cors" ones.
+    if (!SCRIPTED_MODES.has(request.mode) || request.destination !== "") {
         return NOT_SCRIPTED_REFUSED;
     }
     return null;

@@ -104,6 +104,36 @@ describe("GET and PUT /api/planet/settings", () => {
         expect((await settings.getSecrets()).cluster_token).toBeNull();
     });
 
+    it("removes the token when the gateway URL changes without a new one", async () => {
+        await put(CONFIGURED);
+        expect((await put({ cluster: { gateway_url: "http://127.0.0.1:8001/" } })).body.cluster.has_token).toBe(true);
+        const moved = await put({ cluster: { gateway_url: "https://gateway.example.org" } });
+        expect(moved.body.cluster.has_token).toBe(false);
+        expect((await settings.getSecrets()).cluster_token).toBeNull();
+        const retyped = await put({ cluster: { gateway_url: "https://k8s.example.org", token: "new-token" } });
+        expect(retyped.body.cluster.has_token).toBe(true);
+        expect((await settings.getSecrets()).cluster_token).toBe("new-token");
+    });
+
+    it.each([
+        ["endpoint", "https://s3.example.org"],
+        ["cluster_endpoint", "http://minio.storage.svc:9000"],
+        ["bucket", "other-bucket"],
+        ["access_key_id", "AKIAOTHERKEY"],
+    ])("removes the secret access key when %s changes without a new one", async (field, value) => {
+        await put(CONFIGURED);
+        expect((await put({ storage: { [field]: value } })).body.storage.has_secret).toBe(false);
+        expect((await settings.getSecrets()).storage_secret_access_key).toBeNull();
+        expect((await settings.getSecrets()).cluster_token).toBe(TOKEN);
+    });
+
+    it("keeps the secret access key for other storage changes or when the change supplies one", async () => {
+        await put(CONFIGURED);
+        expect((await put({ storage: { prefix: "other", region: "us-east-1" } })).body.storage.has_secret).toBe(true);
+        await put({ storage: { bucket: "other-bucket", secret_access_key: "other-secret" } });
+        expect((await settings.getSecrets()).storage_secret_access_key).toBe("other-secret");
+    });
+
     it("normalizes URLs and the key prefix", async () => {
         const { body } = await put({
             cluster: { gateway_url: "HTTP://LOCALHOST:8001/" },
@@ -242,11 +272,29 @@ describe("POST /api/planet/settings/check", () => {
 
     it("uses settings from the request for this check only", async () => {
         await put(CONFIGURED);
-        await check({ targets: ["cluster"], settings: { cluster: { gateway_url: "https://k8s.example.org/" } } });
-        expect(kube.configs[0]).toEqual({ gatewayUrl: "https://k8s.example.org", namespace: "planet", token: "" });
+        await check({ targets: ["cluster"], settings: { cluster: { namespace: "jobs" } } });
+        expect(kube.configs[0]).toEqual({ gatewayUrl: "http://127.0.0.1:8001", namespace: "jobs", token: "" });
         expect(kube.configs[1]?.token).toBe(TOKEN);
         const stored = await (await call("GET", "/api/planet/settings")).json();
-        expect(stored.cluster.gateway_url).toBe("http://127.0.0.1:8001");
+        expect(stored.cluster.namespace).toBe("planet");
+    });
+
+    it("never sends the stored token to another gateway or the stored secret to other storage", async () => {
+        await put(CONFIGURED);
+        const report = await check({
+            settings: {
+                cluster: { gateway_url: "https://k8s.example.org/" },
+                storage: { endpoint: "https://s3.example.org" },
+            },
+        });
+        expect(kube.configs).toEqual([{ gatewayUrl: "https://k8s.example.org", namespace: "planet", token: "" }]);
+        expect(report.cluster?.checks.find((item) => item.id === "token")?.code).toBe("missing_token");
+        expect(s3.configs.map((config) => config.secretAccessKey)).not.toContain(SECRET);
+        await check({
+            targets: ["cluster"],
+            settings: { cluster: { gateway_url: "https://k8s.example.org", token: "typed" } },
+        });
+        expect(kube.configs.at(-1)?.token).toBe("typed");
     });
 
     it("asks for a test from the setup page when the worker cannot reach a local gateway", async () => {

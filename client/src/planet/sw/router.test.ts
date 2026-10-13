@@ -124,6 +124,7 @@ describe("Router responses", () => {
         for (const response of responses) {
             expect(response.headers.get("Cache-Control")).toBe("no-store");
             expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+            expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
         }
         expect(responses[1]!.status).toBe(302);
         expect(responses[1]!.headers.get("Location")).toBe("/static/welcome.html");
@@ -319,6 +320,29 @@ describe("Router request guards", () => {
         expect((await router.handle(subresource("/datasets/d1/display", "image"))).status).toBe(200);
     });
 
+    it("refuses state changes from markup: link prefetches and pings are same-origin no-cors requests", async () => {
+        const { router, calls } = guardedRouter();
+        const markup = (path: string, method: string) => {
+            const sent = request(path, { method, headers: { "Sec-Fetch-Site": "same-origin" } });
+            Object.defineProperty(sent, "mode", { value: "no-cors" });
+            return sent;
+        };
+        for (const [path, method] of [
+            ["/history/create_new_current", "GET"],
+            ["/history/create_new_current", "HEAD"],
+            ["/api/histories", "POST"],
+            ["/api/histories", "DELETE"],
+        ] as const) {
+            const refused = await router.handle(markup(path, method));
+            expect(refused.status, `${method} ${path}`).toBe(403);
+        }
+        expect(calls).toEqual([]);
+        const scripted = request("/api/histories", { method: "POST", mode: "same-origin" });
+        expect((await router.handle(scripted)).status).toBe(200);
+        expect((await router.handle(markup("/api/histories", "GET"))).status).toBe(200);
+        expect(calls).toEqual(["POST", "GET"]);
+    });
+
     it("accepts navigable only on read-only GET routes and reports the options", () => {
         const router = new Router();
         expect(() => router.untyped("/a", "post", () => null, { navigable: true })).toThrow(/read-only GET/);
@@ -353,6 +377,7 @@ describe("finalize", () => {
         expect(response.status).toBe(302);
         expect(response.headers.get("Location")).toBe(`${ORIGIN}/static/welcome.html`);
         expect(response.headers.get("X-Request-ID")).toBeTruthy();
+        expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
     });
 
     it("builds error envelopes with default codes", async () => {

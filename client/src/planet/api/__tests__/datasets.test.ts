@@ -1,5 +1,7 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { datasets, hdas, jobs, settings } from "@/planet/db";
 import type { NewHda } from "@/planet/db/hdas";
@@ -23,6 +25,7 @@ import {
     fetchJson,
     GENOMES,
     keysOf,
+    request,
     resetPlanet,
     send,
     teardownPlanet,
@@ -114,6 +117,89 @@ async function addExtraFiles(datasetId: string, members: Record<string, string |
     bucket.put(extra.key, tar);
     bucket.put(extra.index_key, JSON.stringify({ size: tar.byteLength, entries }));
     await datasets.update(datasetId, { extra_files: extra });
+}
+
+function joinBytes(parts: readonly Uint8Array[]): Uint8Array {
+    const out = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
+    let offset = 0;
+    for (const part of parts) {
+        out.set(part, offset);
+        offset += part.byteLength;
+    }
+    return out;
+}
+
+/** One BGZF block: a gzip member with the "BC" extra subfield holding the block size. */
+function bgzfBlock(piece: Uint8Array): Uint8Array {
+    const deflated = deflateRawSync(piece);
+    const block = new Uint8Array(18 + deflated.byteLength + 8);
+    const view = new DataView(block.buffer);
+    block.set([0x1f, 0x8b, 8, 4, 0, 0, 0, 0, 0, 0xff, 6, 0, 0x42, 0x43, 2, 0]);
+    view.setUint16(16, block.byteLength - 1, true);
+    block.set(deflated, 18);
+    view.setUint32(18 + deflated.byteLength, crc32(piece), true);
+    view.setUint32(22 + deflated.byteLength, piece.byteLength, true);
+    return block;
+}
+
+/** `text` as bgzip writes it: blocks of at most `blockSize` bytes, then the empty end-of-file block. */
+function bgzip(text: string, blockSize = 65280): Uint8Array {
+    const data = encoder.encode(text);
+    const blocks: Uint8Array[] = [];
+    for (let offset = 0; offset < data.byteLength; offset += blockSize) {
+        blocks.push(bgzfBlock(data.subarray(offset, offset + blockSize)));
+    }
+    return joinBytes([...blocks, bgzfBlock(new Uint8Array(0))]);
+}
+
+/** Header length of the gzip member at the start of `data` (RFC 1952). */
+function gzipHeaderLength(data: Uint8Array): number {
+    const flags = data[3]!;
+    let length = 10;
+    if (flags & 4) {
+        length += 2 + (data[10]! | (data[11]! << 8));
+    }
+    for (const flag of [8, 16]) {
+        if (flags & flag) {
+            length = data.indexOf(0, length) + 1;
+        }
+    }
+    return flags & 2 ? length + 2 : length;
+}
+
+/**
+ * DecompressionStream("gzip") as browsers implement it: it decodes one gzip member and fails on data after it.
+ * Node's decodes every member, which would hide code that relies on that.
+ */
+class SingleMemberDecompressionStream extends TransformStream<Uint8Array, Uint8Array> {
+    constructor() {
+        const parts: Uint8Array[] = [];
+        super({
+            transform: (chunk) => {
+                parts.push(chunk);
+            },
+            flush: (controller) => {
+                const input = joinBytes(parts);
+                const header = gzipHeaderLength(input);
+                const result = inflateRawSync(input.subarray(header), { info: true }) as unknown as {
+                    buffer: Uint8Array;
+                    engine: { bytesWritten: number };
+                };
+                if (header + result.engine.bytesWritten + 8 < input.byteLength) {
+                    controller.error(new TypeError("Junk found after end of compressed data."));
+                    return;
+                }
+                controller.enqueue(new Uint8Array(result.buffer));
+            },
+        });
+    }
+}
+
+/** A GET as the worker sees it for a frame or tab that shows `path`. */
+function navigate(router: Router, path: string): Promise<Response> {
+    const navigation = request(path);
+    Object.defineProperty(navigation, "mode", { value: "navigate" });
+    return router.handle(navigation);
 }
 
 /** `count` lines of `width` bytes each, newline included. */
@@ -274,24 +360,99 @@ describe("tabular chunks", () => {
     });
 });
 
-describe("HTML documents", () => {
-    it("serves HTML datasets in a sandbox", async () => {
-        const { hda, dataset } = await addFile("html", "<html><body><script>parent.alert(1)</script></body></html>");
+describe("gzip data of any datatype", () => {
+    beforeEach(() => {
+        vi.stubGlobal("DecompressionStream", SingleMemberDecompressionStream);
+    });
+
+    it("decodes bgzip tabular data block by block, for the first chunk and later ones", async () => {
+        const content = lines(5000, 60);
+        const { hda, dataset } = await addFile("vcf_bgzip", bgzip(content), { metadata: { columns: 1 } });
         const router = makeRouter();
-        const response = await send(router, "GET", `/datasets/${hda.id}/display/?preview=True`);
+        const preview = await send(router, "GET", `/datasets/${hda.id}/display/?preview=True`);
+        expect(preview.headers.get("x-content-chunked")).toBe("true");
+        const first = await preview.json();
+        expect(first.offset).toBe(Math.ceil(CHUNK_SIZE / 60) * 60);
+        expect(first.ck_data).toBe(content.slice(0, first.offset));
+
+        const later = await fetchJson(router, "GET", `/dataset/display?dataset_id=${hda.id}&offset=150000`);
+        expect(later.ck_data).toBe(content.slice(150_000, later.offset));
+        expect(later.offset).toBe(Math.ceil((150_000 + CHUNK_SIZE) / 60) * 60);
+
+        const text = await fetchJson(router, "GET", `/api/datasets/${hda.id}/get_content_as_text`);
+        expect(text.item_data).toBe(content);
+        expect(bucket.requestsFor(dataset.object_key)[0]).toMatchObject({ range: `bytes=0-${CHUNK_SIZE - 1}` });
+    });
+
+    it("gunzips datasets whose datatype does not declare gzip when the data starts with gzip's magic bytes", async () => {
+        const content = lines(400, 40);
+        const { hda } = await addFile("tabular", await gzip(content));
+        const chunk = await fetchJson(makeRouter(), "GET", `/dataset/display?dataset_id=${hda.id}&offset=0`);
+        expect(chunk.ck_data).toBe(content);
+
+        const notes = await addFile("txt", await gzip("compressed notes\n"));
+        const preview = await send(makeRouter(), "GET", `/datasets/${notes.hda.id}/display?preview=True`);
+        expect(await preview.text()).toBe("compressed notes\n");
+    });
+
+    it("shows the complete blocks of bgzip data cut short", async () => {
+        const content = lines(2000, 60);
+        const data = bgzip(content);
+        const firstBlock = 1 + new DataView(data.buffer).getUint16(16, true);
+        const { hda } = await addFile("vcf_bgzip", data.slice(0, firstBlock + 100));
+        const chunk = await fetchJson(
+            makeRouter(),
+            "GET",
+            `/dataset/display?dataset_id=${hda.id}&offset=0&ck_size=200000`,
+        );
+        expect(chunk.ck_data).toBe(content.slice(0, 65280));
+    });
+});
+
+describe("HTML documents", () => {
+    it("serves HTML datasets in a sandbox to frames and tabs, and as text to scripts", async () => {
+        const source = "<html><body><script>parent.alert(1)</script></body></html>";
+        const { hda, dataset } = await addFile("html", source);
+        const router = makeRouter();
+        const response = await navigate(router, `/datasets/${hda.id}/display/?preview=True`);
         expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
         expect(response.headers.get("content-security-policy")).toBe(DATASET_DOCUMENT_CSP);
         expect(DATASET_DOCUMENT_CSP).toBe(
             "sandbox allow-scripts allow-popups allow-forms; default-src 'none'; img-src data: https:; " +
-                "style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; media-src https:; font-src https: data:",
+                "style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; media-src https:; " +
+                "font-src https: data:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
         );
         expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+        expect(response.headers.get("referrer-policy")).toBe("no-referrer");
         expect(await response.text()).toContain("<script>parent.alert(1)</script>");
+
+        // A fetched body could become a blob: document in the app's origin.
+        const fetched = await send(router, "GET", `/datasets/${hda.id}/display/?preview=True`);
+        expect(fetched.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+        expect(fetched.headers.get("content-security-policy")).toBeNull();
+        expect(await fetched.text()).toBe(source);
 
         const head = await send(router, "HEAD", `/datasets/${hda.id}/display/?preview=True`);
         expect(head.status).toBe(200);
-        expect(head.headers.get("content-security-policy")).toBe(DATASET_DOCUMENT_CSP);
-        expect(bucket.requestsFor(dataset.object_key).filter((request) => request.method === "GET")).toHaveLength(1);
+        expect(head.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+        expect(head.headers.get("x-content-truncated")).toBeNull();
+        expect(bucket.requestsFor(dataset.object_key).filter((request) => request.method === "GET")).toHaveLength(2);
+    });
+
+    it("previews datatypes that are HTML only by mimetype as text, however they are requested", async () => {
+        const { hda } = await addFile("obo", "<html><body><script>alert(1)</script></body></html>");
+        const router = makeRouter();
+        const path = `/datasets/${hda.id}/display/?preview=True`;
+        for (const response of [
+            await send(router, "GET", path),
+            await send(router, "HEAD", path),
+            await send(router, "GET", `/api/datasets/${hda.id}/display?preview=true`),
+            await navigate(router, path),
+        ]) {
+            expect(response.status).toBe(200);
+            expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+            expect(response.headers.get("content-security-policy")).toBeNull();
+        }
     });
 
     it("rewrites relative subresources to inlined or presigned content from the extra files", async () => {
@@ -325,7 +486,7 @@ describe("HTML documents", () => {
             },
             ["movie.mp4", "images/big.png"],
         );
-        const body = await (await send(makeRouter(), "GET", `/datasets/${hda.id}/display/?preview=True`)).text();
+        const body = await (await navigate(makeRouter(), `/datasets/${hda.id}/display/?preview=True`)).text();
         const png = "data:image/png;base64,AQID";
         expect(body).toContain(`<img src="${png}" alt="plot">`);
         expect(body).toContain(`<style media="screen">body { background: url("${png}"); } p { color: red; }</style>`);
@@ -350,7 +511,7 @@ describe("HTML documents", () => {
         );
         index.entries[0].key = "state/instance/snapshot";
         bucket.put(`datasets/${dataset.uuid}/extra.json`, JSON.stringify(index));
-        const body = await (await send(makeRouter(), "GET", `/datasets/${hda.id}/display/?preview=True`)).text();
+        const body = await (await navigate(makeRouter(), `/datasets/${hda.id}/display/?preview=True`)).text();
         expect(body).toBe('<img src="data:image/png;base64,AQ==">');
     });
 
@@ -362,9 +523,13 @@ describe("HTML documents", () => {
             "notes.txt": "plain",
         });
         const router = makeRouter();
-        const page = await send(router, "GET", `/datasets/${hda.id}/display/sub/page.html`);
+        const page = await navigate(router, `/datasets/${hda.id}/display/sub/page.html`);
         expect(page.headers.get("content-security-policy")).toBe(DATASET_DOCUMENT_CSP);
         expect(await page.text()).toBe('<img src="data:image/png;base64,CQk=">');
+        const pageSource = await send(router, "GET", `/datasets/${hda.id}/display/sub/page.html`);
+        expect(pageSource.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+        expect(pageSource.headers.get("content-security-policy")).toBeNull();
+        expect(await pageSource.text()).toBe('<img src="pic.png">');
 
         const image = await send(router, "GET", `/api/datasets/${hda.id}/display?filename=sub/pic.png`);
         expect(image.headers.get("content-type")).toBe("image/png");
@@ -374,9 +539,12 @@ describe("HTML documents", () => {
         expect(notes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
         expect(await notes.text()).toBe("plain");
 
-        const listing = await send(router, "GET", `/datasets/${hda.id}/display/sub`);
+        const listing = await navigate(router, `/datasets/${hda.id}/display/sub`);
         expect(listing.headers.get("content-security-policy")).toBe(DATASET_DOCUMENT_CSP);
         expect(await listing.text()).toContain("Directory sub contents: 2 items");
+        const listingSource = await send(router, "GET", `/datasets/${hda.id}/display/sub`);
+        expect(listingSource.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+        expect(await listingSource.text()).toContain("Directory sub contents: 2 items");
 
         expect((await send(router, "GET", `/datasets/${hda.id}/display/nope.txt`)).status).toBe(404);
         expect((await send(router, "GET", `/api/datasets/${hda.id}/display?filename=sub/../../x`)).status).toBe(400);
@@ -397,9 +565,11 @@ describe("HTML documents", () => {
     });
 
     it("allows a plain-http storage endpoint next to https in the document policy", async () => {
-        await configureStorage("http://localhost:3900");
+        const local = "http://localhost:3900";
+        stubNetwork(FILES, bucket, (url, init) => (url.origin === local ? bucket.handle(url, init) : undefined));
+        await configureStorage(local);
         const { hda } = await addFile("html", "<p>local</p>");
-        const response = await send(makeRouter(), "HEAD", `/datasets/${hda.id}/display/?preview=True`);
+        const response = await navigate(makeRouter(), `/datasets/${hda.id}/display/?preview=True`);
         const policy = response.headers.get("content-security-policy")!;
         expect(policy).toContain("img-src data: https: http://localhost:3900");
         expect(policy).toContain("sandbox allow-scripts allow-popups allow-forms");

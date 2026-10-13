@@ -22,10 +22,11 @@ import {
 import {
     type ClusterForm,
     clusterTarget,
+    clusterTokenSource,
     clusterValues,
-    secretSource,
     storageConfig,
     type StorageForm,
+    storageSecretSource,
     storageValues,
 } from "./forms";
 
@@ -63,7 +64,7 @@ async function pageOptions(url: string, deps: ConnectionDeps): Promise<CheckOpti
     return options;
 }
 
-/** Tests the cluster settings in the form, using the saved token when none was typed. */
+/** Tests the cluster settings in the form, using the saved token when none was typed and the gateway is the same. */
 export async function testCluster(
     form: ClusterForm,
     saved: PlanetSettings["cluster"],
@@ -71,7 +72,7 @@ export async function testCluster(
 ): Promise<ClusterReport> {
     const target = clusterTarget(form);
     const options = await pageOptions(target.gatewayUrl, deps);
-    if (secretSource(form.token, form.clear_token, saved.has_token) !== "saved") {
+    if (clusterTokenSource(form, saved) !== "saved") {
         return checkCluster(target, options);
     }
     const anonymous = await checkCluster({ ...target, token: "" }, { ...options, anonymousOnly: true });
@@ -98,7 +99,10 @@ export async function testCluster(
     }
 }
 
-/** Tests the storage settings in the form, using the saved secret access key when none was typed. */
+/**
+ * Tests the storage settings in the form, using the saved secret access key when none was typed and the endpoints,
+ * bucket and access key ID are the same.
+ */
 export async function testStorage(
     form: StorageForm,
     saved: PlanetSettings["storage"],
@@ -106,7 +110,7 @@ export async function testStorage(
 ): Promise<StorageReport> {
     const config = storageConfig(form);
     const options = await pageOptions(config.endpoint, deps);
-    if (secretSource(form.secret_access_key, form.clear_secret, saved.has_secret) !== "saved") {
+    if (storageSecretSource(form, saved) !== "saved") {
         return checkStorage(config, options);
     }
     const anonymous = await checkStorage(config, { ...options, anonymousOnly: true });

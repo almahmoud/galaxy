@@ -3,12 +3,14 @@
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 
 import { SECRETS_KEY, SETTINGS_KEY } from "./schema";
+import { rebindsSecret, rebindsToken } from "./secretBindings";
 import { type ReadTx, useRead, useWrite, type WriteTx } from "./tx";
 import type { PlanetSecrets, PlanetSettings, StoredSettings } from "./types";
 
 /**
  * A settings change. Omitted fields keep their value. `cluster.token` and `storage.secret_access_key`
- * replace the stored secret; an empty string or null clears it. `instance_id` cannot change.
+ * replace the stored secret; an empty string or null clears it. A change to the settings a secret belongs to
+ * (`secretBindings.ts`) clears the secret unless the change supplies one. `instance_id` cannot change.
  */
 export interface SettingsUpdate {
     cluster?: Partial<StoredSettings["cluster"]> & { token?: string | null };
@@ -69,9 +71,13 @@ export function update(change: SettingsUpdate, tx?: WriteTx): Promise<PlanetSett
         };
         if (token !== undefined) {
             secrets.cluster_token = token || null;
+        } else if (rebindsToken(cluster, stored.cluster)) {
+            secrets.cluster_token = null;
         }
         if (secretAccessKey !== undefined) {
             secrets.storage_secret_access_key = secretAccessKey || null;
+        } else if (rebindsSecret(storage, stored.storage)) {
+            secrets.storage_secret_access_key = null;
         }
         await t.store("settings").put(next, SETTINGS_KEY);
         await t.store("secrets").put(secrets, SECRETS_KEY);

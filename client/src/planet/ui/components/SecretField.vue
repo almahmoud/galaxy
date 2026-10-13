@@ -17,6 +17,8 @@ const props = defineProps<{
     placeholder: string;
     /** True when a secret is saved. */
     saved: boolean;
+    /** Why saving removes the saved secret, such as "the gateway URL changed"; empty when it does not. */
+    rebound?: string;
     error?: string;
 }>();
 
@@ -43,7 +45,7 @@ function onInput(event: Event) {
                     class="form-control text-monospace pw-secret__input"
                     :class="{ 'is-invalid': invalid }"
                     :value="value"
-                    :placeholder="saved && !clear ? `Saved ${props.noun}` : placeholder"
+                    :placeholder="saved && !clear && !rebound ? `Saved ${props.noun}` : placeholder"
                     autocomplete="off"
                     autocapitalize="off"
                     spellcheck="false"
@@ -63,7 +65,10 @@ function onInput(event: Event) {
             </div>
         </template>
         <template v-slot:help>
-            <template v-if="saved && clear">
+            <template v-if="saved && rebound && !value">
+                The saved {{ noun }} will be removed when you save, because {{ rebound }}. Enter it again to keep it.
+            </template>
+            <template v-else-if="saved && clear">
                 The saved {{ noun }} will be removed when you save.
                 <button type="button" class="btn btn-link pw-secret__link" @click="clear = false">Keep it</button>
             </template>

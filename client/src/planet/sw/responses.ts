@@ -1,6 +1,7 @@
 /**
- * Response helpers for Service Worker handlers. The router adds `X-Request-ID`, `Cache-Control: no-store`
- * and `X-Content-Type-Options: nosniff` to every response, including ones built here.
+ * Response helpers for Service Worker handlers. The router adds `X-Request-ID`, `Cache-Control: no-store`,
+ * `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every response, including ones built
+ * here.
  */
 
 import { type ApiError, defaultErrorCode, type ErrorEnvelope } from "@/planet/util/errors";
@@ -106,11 +107,13 @@ export function passthrough(response: Response): TypedResponse<never> {
 const STANDARD_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    // As planet/site/_headers sets for static files: documents served here never send Planet's address on.
+    "Referrer-Policy": "no-referrer",
 } as const;
 
 /**
- * Adds a fresh `X-Request-ID`, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Copies the
- * response when its headers are immutable (fetched or `Response.redirect` responses).
+ * Adds a fresh `X-Request-ID` and the {@link STANDARD_HEADERS}. Copies the response when its headers are
+ * immutable (fetched or `Response.redirect` responses).
  */
 export function finalize(response: Response): Response {
     const requestId = newRequestId();

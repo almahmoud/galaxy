@@ -158,6 +158,24 @@ describe("ClusterSetup", () => {
         expect(wrapper.emitted("tested")?.[0]?.[0]).toMatchObject({ state: "error" });
     });
 
+    it("explains that a new gateway URL removes the saved token", async () => {
+        const { wrapper, services } = mountSetup(SAVED);
+        const help = () => wrapper.find("#pw-cluster-token-help").text();
+        expect(help()).toContain("A token is saved");
+        expect(wrapper.find("#pw-cluster-token").attributes("placeholder")).toBe("Saved token");
+        await wrapper.find("#pw-cluster-gateway").setValue("https://gateway.example.org");
+        expect(help()).toContain("The saved token will be removed when you save, because the gateway URL changed.");
+        expect(wrapper.find("#pw-cluster-token").attributes("placeholder")).toBe("Paste the planet-client token");
+        await wrapper
+            .findAll("button")
+            .find((button) => button.text().includes("Test connection"))!
+            .trigger("click");
+        await flushPromises();
+        expect(services.runChecks).not.toHaveBeenCalled();
+        await wrapper.find("#pw-cluster-token").setValue("new-token");
+        expect(help()).toContain("Saving replaces the saved token.");
+    });
+
     it("warns about the local network prompt for a gateway on this computer", async () => {
         const { wrapper } = mountSetup();
         expect(wrapper.find(".pw-note").exists()).toBe(false);

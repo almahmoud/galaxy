@@ -16,7 +16,14 @@ import { PlanetApiError } from "../lib/api";
 import type { ClusterReport } from "../lib/checks";
 import { CLUSTER_GUIDE_URL, clusterCommands, DEFAULT_GATEWAY_URL, localClusterCommands } from "../lib/commands";
 import { testCluster } from "../lib/connection";
-import { clusterChange, clusterDirty, type ClusterForm, clusterForm, validateClusterForm } from "../lib/forms";
+import {
+    clusterChange,
+    clusterDirty,
+    type ClusterForm,
+    clusterForm,
+    clusterTokenRebound,
+    validateClusterForm,
+} from "../lib/forms";
 import { addressSpace } from "../lib/network";
 import { type FieldErrors, MAX_WALLTIME_SECONDS } from "../lib/rules";
 import { useServices } from "../lib/services";
@@ -54,6 +61,7 @@ const root = ref<HTMLElement | null>(null);
 const baseline = shallowRef(props.settings);
 const saved = computed(() => baseline.value.cluster);
 const dirty = computed(() => clusterDirty(form.value, saved.value));
+const tokenRebound = computed(() => clusterTokenRebound(form.value, saved.value));
 const commands = computed(() =>
     guide.value === "kind"
         ? localClusterCommands()
@@ -295,6 +303,7 @@ defineExpose({ test, focus });
                 help="The planet-client token. Planet keeps it in this browser and sends it only to the gateway."
                 placeholder="Paste the planet-client token"
                 :saved="saved.has_token"
+                :rebound="tokenRebound ? 'the gateway URL changed' : ''"
                 :error="errors['cluster.token']" />
 
             <button

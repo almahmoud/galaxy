@@ -1,5 +1,7 @@
 import { AwsV4Signer } from "aws4fetch";
 
+import { sha256Hex } from "@/planet/util/digest";
+
 import { encodeQuery } from "./url";
 
 export const MAX_PRESIGN_EXPIRES_SECONDS = 604800;
@@ -22,21 +24,7 @@ function amzDate(epochMs: number): string {
     return new Date(epochMs).toISOString().replace(/[:-]|\.\d{3}/g, "");
 }
 
-function toHex(buffer: ArrayBuffer): string {
-    return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-export async function sha256Hex(data: string | ArrayBuffer | ArrayBufferView): Promise<string> {
-    let bytes: BufferSource;
-    if (typeof data === "string") {
-        bytes = new TextEncoder().encode(data);
-    } else if (ArrayBuffer.isView(data)) {
-        bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    } else {
-        bytes = data;
-    }
-    return toHex(await crypto.subtle.digest("SHA-256", bytes));
-}
+export { sha256Hex };
 
 /**
  * SigV4 signing with a clock corrected from the server's Date header. The signing key cache is shared

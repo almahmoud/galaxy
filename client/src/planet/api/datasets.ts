@@ -10,10 +10,12 @@
  * Range request, and tabular chunks read 64 KiB extended to the next newline, as Galaxy's `get_chunk` does.
  *
  * Dataset content never becomes active content on the app origin. Previews are `text/plain`, chunk JSON or a
- * redirect to the bucket (raster images). HTML datasets are served as documents with a `sandbox` Content Security
- * Policy and no `allow-same-origin`, so they run in an opaque origin; because a sandboxed document's own requests
- * bypass the worker, their relative subresources are rewritten to presigned URLs (extra files stored as single
- * objects) or inlined from the dataset's extra files archive.
+ * redirect to the bucket (raster images). HTML datasets are served as documents only to navigations (frames, tabs),
+ * with a `sandbox` Content Security Policy and no `allow-same-origin`, so they run in an opaque origin; `fetch` and
+ * `XMLHttpRequest` get their source as text, because a page can turn a fetched body into a `blob:` document, which
+ * runs in the app's origin without the response's policy. A sandboxed document's own requests bypass the worker, so
+ * its relative subresources are rewritten to presigned URLs (extra files stored as single objects) or inlined from
+ * the dataset's extra files archive.
  */
 
 import type { components } from "@/api/schema";
@@ -94,7 +96,10 @@ export const PRESIGN_SECONDS = 900;
 
 /**
  * Policy for dataset documents: scripts may run, but in an opaque origin (no `allow-same-origin`), and nothing but
- * inline content, `data:` images and fonts, and https resources may load.
+ * inline content, `data:` images and fonts, and https resources may load. Forms fire their submit events (reports
+ * such as MultiQC's handle them in script) but cannot submit anywhere, and `<base>` cannot redirect relative links.
+ * `frame-ancestors 'self'` is matched against the origin of the response URL, which is Planet's, not against the
+ * document's opaque sandbox origin, so Planet's own frames may show the document and other sites' frames may not.
  */
 const DATASET_DOCUMENT_DIRECTIVES: CspDirectives = {
     sandbox: ["allow-scripts", "allow-popups", "allow-forms"],
@@ -104,6 +109,9 @@ const DATASET_DOCUMENT_DIRECTIVES: CspDirectives = {
     "script-src": ["'unsafe-inline'", "https:"],
     "media-src": ["https:"],
     "font-src": ["https:", "data:"],
+    "form-action": ["'none'"],
+    "base-uri": ["'none'"],
+    "frame-ancestors": ["'self'"],
 };
 
 export const DATASET_DOCUMENT_CSP = buildCsp(DATASET_DOCUMENT_DIRECTIVES);
@@ -348,22 +356,242 @@ async function readRange(client: S3Client, key: string, start: number, length: n
     }
 }
 
-/** Reads up to `limit` bytes of the object, gunzipped when `gzip` is set; `truncated` when more data follows. */
+/**
+ * How dataset bytes are read for display: as stored, gunzipped, or gunzipped when they start with gzip's magic
+ * bytes. Galaxy reads text through `compression_utils.get_fileobj`, which gunzips gzip data whatever the datatype
+ * says (vcf_bgzip and the *_tabix.gz types are tabular but not compressed archives).
+ */
+export type Compression = "none" | "gzip" | "sniff";
+
+/** Compression of a text datatype: declared gzip, or sniffed from the bytes. */
+function textCompression(info: DatatypeInfo): Compression {
+    const declared =
+        info.isA(DatatypeClass.GZIP) ||
+        (info.details?.compressed === true && info.details.compressed_format === "gzip");
+    return declared ? "gzip" : "sniff";
+}
+
+function hasGzipMagic(bytes: Uint8Array): boolean {
+    return bytes.byteLength >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+}
+
+/** Sniffed objects per storage client (objects do not change once written). */
+const sniffed = new WeakMap<S3Client, Map<string, boolean>>();
+const SNIFF_CACHE = 256;
+
+function knownGzip(client: S3Client, key: string): boolean | undefined {
+    return sniffed.get(client)?.get(key);
+}
+
+function rememberGzip(client: S3Client, key: string, gzip: boolean): boolean {
+    let known = sniffed.get(client);
+    if (!known) {
+        known = new Map();
+        sniffed.set(client, known);
+    }
+    if (known.size >= SNIFF_CACHE) {
+        known.delete(known.keys().next().value!);
+    }
+    known.set(key, gzip);
+    return gzip;
+}
+
+/** Whether to gunzip the object; `head` holds its first bytes when the caller has read them. */
+async function isGzipObject(client: S3Client, key: string, compression: Compression, head?: Uint8Array) {
+    if (compression !== "sniff") {
+        return compression === "gzip";
+    }
+    const known = knownGzip(client, key);
+    if (known !== undefined) {
+        return known;
+    }
+    return rememberGzip(client, key, hasGzipMagic(head ?? (await readRange(client, key, 0, 2))));
+}
+
+/** Reads up to `limit` bytes of the object, decompressed per `compression`; `truncated` when more data follows. */
 async function readPrefix(
     client: S3Client,
     key: string,
     limit: number,
-    gzip: boolean,
+    compression: Compression,
 ): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-    const bytes = gzip ? await gunzipRange(client, key, 0, limit + 1) : await readRange(client, key, 0, limit + 1);
+    let bytes: Uint8Array | undefined;
+    if (compression === "sniff" && knownGzip(client, key) === undefined) {
+        bytes = await readRange(client, key, 0, limit + 1);
+    }
+    if (await isGzipObject(client, key, compression, bytes)) {
+        bytes = await gunzipRange(client, key, 0, limit + 1);
+    } else {
+        bytes ??= await readRange(client, key, 0, limit + 1);
+    }
     return bytes.byteLength > limit
         ? { bytes: bytes.subarray(0, limit), truncated: true }
         : { bytes, truncated: false };
 }
 
+/** Reads a byte stream in pieces of chosen sizes. */
+class ByteReader {
+    private buffered = new Uint8Array(0);
+    private ended = false;
+
+    constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+
+    /** Buffers at least `count` bytes (fewer at the end of the stream) and returns the buffer. */
+    async peek(count: number): Promise<Uint8Array> {
+        const parts = [this.buffered];
+        let length = this.buffered.byteLength;
+        while (length < count && !this.ended) {
+            const { done, value } = await this.reader.read();
+            if (done) {
+                this.ended = true;
+            } else {
+                parts.push(value);
+                length += value.byteLength;
+            }
+        }
+        if (parts.length > 1) {
+            this.buffered = concat(parts);
+        }
+        return this.buffered;
+    }
+
+    skip(count: number): void {
+        this.buffered = this.buffered.subarray(count);
+    }
+
+    /** The buffered bytes, then the rest of the stream. */
+    rest(): ReadableStream<Uint8Array> {
+        let pending: Uint8Array | null = this.buffered.byteLength ? this.buffered : null;
+        this.buffered = new Uint8Array(0);
+        const reader = this.reader;
+        return new ReadableStream<Uint8Array>({
+            async pull(controller) {
+                if (pending) {
+                    controller.enqueue(pending);
+                    pending = null;
+                    return;
+                }
+                const { done, value } = await reader.read();
+                if (done) {
+                    controller.close();
+                } else {
+                    controller.enqueue(value);
+                }
+            },
+            cancel: (reason) => reader.cancel(reason),
+        });
+    }
+
+    cancel(): void {
+        this.reader.cancel().catch(() => undefined);
+    }
+}
+
+/** Collects bytes `[skip, skip + length)` of a decompressed stream read from its start. */
+class RangeCollector {
+    position = 0;
+    private taken = 0;
+    private readonly parts: Uint8Array[] = [];
+
+    constructor(
+        private readonly skip: number,
+        private readonly length: number,
+    ) {}
+
+    get full(): boolean {
+        return this.taken >= this.length;
+    }
+
+    /** Passes `size` bytes that end before the range without decoding them; false when they reach into it. */
+    pass(size: number): boolean {
+        if (this.position + size > this.skip) {
+            return false;
+        }
+        this.position += size;
+        return true;
+    }
+
+    add(chunk: Uint8Array): void {
+        const end = this.position + chunk.byteLength;
+        if (end > this.skip && !this.full) {
+            const from = Math.max(0, this.skip - this.position);
+            const slice = chunk.subarray(from, Math.min(chunk.byteLength, from + (this.length - this.taken)));
+            this.parts.push(slice);
+            this.taken += slice.byteLength;
+        }
+        this.position = end;
+    }
+
+    bytes(): Uint8Array {
+        return concat(this.parts);
+    }
+}
+
+/** Gzip member header up to its extra field length (RFC 1952). */
+const GZIP_HEADER_BYTES = 12;
+const GZIP_FLAG_EXTRA = 4;
+
+/** Bytes of the gzip member header at the start of `bytes` that include its whole extra field. */
+function gzipHeaderLength(bytes: Uint8Array): number {
+    if (bytes.byteLength < GZIP_HEADER_BYTES || !hasGzipMagic(bytes) || !(bytes[3]! & GZIP_FLAG_EXTRA)) {
+        return GZIP_HEADER_BYTES;
+    }
+    return GZIP_HEADER_BYTES + (bytes[10]! | (bytes[11]! << 8));
+}
+
 /**
- * Returns decompressed bytes `[skip, skip + length)` of a gzip object, reading it from the start. A stream that
- * stops early (truncated data, or decoders that stop after the first gzip member) yields what was decoded.
+ * Size of the BGZF block at the start of `bytes` (its "BC" extra subfield's BSIZE + 1), or null when the gzip
+ * member there is not a BGZF block. `bytes` holds the member header through its extra field.
+ */
+export function bgzfBlockSize(bytes: Uint8Array): number | null {
+    if (bytes.byteLength < GZIP_HEADER_BYTES || !hasGzipMagic(bytes) || !(bytes[3]! & GZIP_FLAG_EXTRA)) {
+        return null;
+    }
+    const end = Math.min(gzipHeaderLength(bytes), bytes.byteLength);
+    let field = GZIP_HEADER_BYTES;
+    while (field + 4 <= end) {
+        const size = bytes[field + 2]! | (bytes[field + 3]! << 8);
+        if (bytes[field] === 0x42 && bytes[field + 1] === 0x43 && size === 2 && field + 6 <= end) {
+            return (bytes[field + 4]! | (bytes[field + 5]! << 8)) + 1;
+        }
+        field += 4 + size;
+    }
+    return null;
+}
+
+async function inflate(member: Uint8Array, Decompressor: typeof DecompressionStream): Promise<Uint8Array> {
+    const stream = new Blob([member as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new Decompressor("gzip"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function inflateInto(stream: ReadableStream<Uint8Array>, range: RangeCollector): Promise<void> {
+    const reader = stream.getReader();
+    try {
+        while (!range.full) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            range.add(value);
+        }
+    } finally {
+        reader.cancel().catch(() => undefined);
+    }
+}
+
+function corruptCompressedFile(): ApiError {
+    return new ApiError(
+        500,
+        "Dataset appears to be a truncated or corrupt compressed file, cannot display.",
+        INVALID_FILE_FORMAT,
+    );
+}
+
+/**
+ * Returns decompressed bytes `[skip, skip + length)` of a gzip object, reading it from the start. BGZF data (bgzip:
+ * vcf_bgzip, tabix-indexed types) is a series of gzip members, which browsers' DecompressionStream does not decode
+ * past the first; each block is decoded on its own, and blocks before `skip` are passed by their recorded size. A
+ * stream that stops early (truncated data, or several plain gzip members) yields what was decoded.
  */
 async function gunzipRange(client: S3Client, key: string, skip: number, length: number): Promise<Uint8Array> {
     const Decompressor = (globalThis as { DecompressionStream?: typeof DecompressionStream }).DecompressionStream;
@@ -374,42 +602,37 @@ async function gunzipRange(client: S3Client, key: string, skip: number, length: 
     if (!response.body) {
         return new Uint8Array(0);
     }
-    const reader = response.body.pipeThrough(new Decompressor("gzip")).getReader();
-    const parts: Uint8Array[] = [];
-    let position = 0;
-    let taken = 0;
+    const source = new ByteReader(response.body.getReader());
+    const range = new RangeCollector(skip, length);
     try {
-        while (taken < length) {
-            let chunk: ReadableStreamReadResult<Uint8Array>;
-            try {
-                chunk = await reader.read();
-            } catch {
-                if (position === 0) {
-                    throw new ApiError(
-                        500,
-                        "Dataset appears to be a truncated or corrupt compressed file, cannot display.",
-                        INVALID_FILE_FORMAT,
-                    );
-                }
+        while (!range.full) {
+            const start = await source.peek(GZIP_HEADER_BYTES);
+            if (start.byteLength === 0) {
                 break;
             }
-            if (chunk.done) {
+            const blockSize = bgzfBlockSize(await source.peek(gzipHeaderLength(start)));
+            if (blockSize === null) {
+                await inflateInto(source.rest().pipeThrough(new Decompressor("gzip")), range);
                 break;
             }
-            const value = chunk.value;
-            const end = position + value.byteLength;
-            if (end > skip) {
-                const from = Math.max(0, skip - position);
-                const slice = value.subarray(from, Math.min(value.byteLength, from + (length - taken)));
-                parts.push(slice);
-                taken += slice.byteLength;
+            const block = (await source.peek(blockSize)).subarray(0, blockSize);
+            if (block.byteLength < blockSize) {
+                throw corruptCompressedFile();
             }
-            position = end;
+            source.skip(blockSize);
+            const inflatedSize = new DataView(block.buffer, block.byteOffset + blockSize - 4, 4).getUint32(0, true);
+            if (!range.pass(inflatedSize)) {
+                range.add(await inflate(block, Decompressor));
+            }
+        }
+    } catch {
+        if (range.position === 0) {
+            throw corruptCompressedFile();
         }
     } finally {
-        reader.cancel().catch(() => undefined);
+        source.cancel();
     }
-    return concat(parts);
+    return range.bytes();
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -592,11 +815,17 @@ function safeContentType(info: DatatypeInfo): string {
     return "text/plain; charset=utf-8";
 }
 
+/**
+ * Datatypes Galaxy's client shows by framing the display URL (extension ending in "html", or composite files) and
+ * that are HTML: Html subclasses, *html extensions, and composite datatypes with an HTML primary file. A text/html
+ * mimetype alone (obo, owl, trackhub, ...) does not count: the client fetches those previews.
+ */
 function isHtmlDocument(info: DatatypeInfo): boolean {
+    const composite = Boolean(info.details?.composite_files?.length);
     return (
         info.isA(DatatypeClass.HTML) ||
-        info.details?.mimetype?.toLowerCase() === "text/html" ||
-        info.extension.endsWith("html")
+        info.extension.endsWith("html") ||
+        (composite && info.details?.mimetype?.toLowerCase() === "text/html")
     );
 }
 
@@ -664,16 +893,19 @@ function textPreview(body: Uint8Array, truncatedAt: number | null, row: HdaWithD
     return text(decodeText(body), { headers });
 }
 
-/** A bounded text preview: the first `limit` bytes, with `x-content-truncated` when the dataset is longer. */
+/**
+ * A bounded text preview: the first `limit` bytes, with `x-content-truncated` when the dataset is longer. HEAD
+ * answers from the stored size unless the datatype is gzip.
+ */
 async function boundedPreview(
     request: PlanetRequest,
     row: HdaWithDataset,
     limit: number,
-    gzip: boolean,
+    compression: Compression,
     alwaysMark = false,
 ): Promise<Response> {
     const size = row.dataset.file_size;
-    if (request.method === "HEAD" && size !== null && !gzip) {
+    if (request.method === "HEAD" && size !== null && compression !== "gzip") {
         const truncated = alwaysMark || size > limit;
         const headers: Record<string, string> = { "Content-Type": "text/plain; charset=utf-8" };
         if (truncated) {
@@ -684,7 +916,7 @@ async function boundedPreview(
     const client = await getStorageClient();
     let prefix: { bytes: Uint8Array; truncated: boolean };
     try {
-        prefix = await readPrefix(client, row.dataset.object_key, limit, gzip);
+        prefix = await readPrefix(client, row.dataset.object_key, limit, compression);
     } catch (error) {
         throw storageError(error, `dataset ${row.hda.hid}`);
     }
@@ -701,17 +933,21 @@ function decodeChunk(bytes: Uint8Array): string {
 }
 
 /**
- * Galaxy's `TabularData.get_chunk`: `size` bytes from `offset`, extended to the end of the last line. Returns the
- * chunk and the offset after it.
+ * Galaxy's `TabularData.get_chunk`: `size` bytes from `offset` (of the decompressed data for gzip), extended to the
+ * end of the last line. Returns the chunk and the offset after it.
  */
 export async function readChunk(
     client: S3Client,
     key: string,
     offset: number,
     size: number,
-    gzip: boolean,
+    compression: Compression,
 ): Promise<{ data: string; offset: number }> {
-    if (gzip) {
+    let first: Uint8Array | undefined;
+    if (compression === "sniff" && offset === 0 && knownGzip(client, key) === undefined) {
+        first = await readRange(client, key, 0, size);
+    }
+    if (await isGzipObject(client, key, compression, first)) {
         if (offset + size + LINE_EXTENSION_LIMIT > GZIP_SCAN_LIMIT) {
             throw ApiError.badRequest(
                 "This part of a compressed dataset is too far from its start to be shown; download the dataset instead.",
@@ -725,7 +961,7 @@ export async function readChunk(
         }
         return { data: decodeChunk(bytes.subarray(0, end)), offset: offset + end };
     }
-    const parts = [await readRange(client, key, offset, size)];
+    const parts = [first ?? (await readRange(client, key, offset, size))];
     let total = parts[0]!.byteLength;
     let last = parts[0]!;
     if (total === size) {
@@ -761,7 +997,7 @@ async function chunkResponse(
     const client = await getStorageClient();
     let chunk: { data: string; offset: number };
     try {
-        chunk = await readChunk(client, row.dataset.object_key, offset, size, info.isA(DatatypeClass.GZIP));
+        chunk = await readChunk(client, row.dataset.object_key, offset, size, textCompression(info));
     } catch (error) {
         throw storageError(error, `dataset ${row.hda.hid}`);
     }
@@ -1648,11 +1884,12 @@ async function displayMember(
         throw ApiError.notFound(`Could not find '${filename}' on the extra files path.`);
     }
     if (entry.type === "directory") {
-        const csp = await sandboxPolicy();
-        return html(request.method === "HEAD" ? "" : directoryListing(index, path), { csp });
+        const listing = request.method === "HEAD" ? "" : directoryListing(index, path);
+        return request.isNavigation ? html(listing, { csp: await sandboxPolicy() }) : text(listing);
     }
     const ext = extensionOf(path);
-    if (!raw && (ext === "html" || ext === "htm")) {
+    // Other requests fall through to the member's text/plain type.
+    if (!raw && (ext === "html" || ext === "htm") && request.isNavigation) {
         if ((entry.size ?? 0) > HTML_DOCUMENT_LIMIT) {
             throw ApiError.badRequest(`'${filename}' is too large to display.`);
         }
@@ -1709,7 +1946,7 @@ export async function display(request: PlanetRequest, row: HdaWithDataset, optio
     if (toExt) {
         return download(request, row, toExt);
     }
-    const gzip = info.isA(DatatypeClass.GZIP);
+    const compression = textCompression(info);
 
     if (info.isA(DatatypeClass.TABULAR_DATA)) {
         if (options.offset !== null) {
@@ -1720,7 +1957,7 @@ export async function display(request: PlanetRequest, row: HdaWithDataset, optio
             return redirectToObject(row, "attachment", "application/octet-stream", row.hda.extension);
         }
         if (metadataColumns(row.hda) > 100) {
-            return boundedPreview(request, row, MAX_PEEK_SIZE, gzip);
+            return boundedPreview(request, row, MAX_PEEK_SIZE, compression);
         }
         if (request.method === "HEAD") {
             return new Response(null, { headers: { "Content-Type": "application/json", "x-content-chunked": "true" } });
@@ -1731,11 +1968,19 @@ export async function display(request: PlanetRequest, row: HdaWithDataset, optio
     if (isHtmlDocument(info)) {
         const size = row.dataset.file_size;
         if (size !== null && size > HTML_DOCUMENT_LIMIT) {
-            return boundedPreview(request, row, MAX_PEEK_SIZE, false, true);
+            return boundedPreview(request, row, MAX_PEEK_SIZE, "none", true);
         }
-        return sandboxedDocument(request, row, null, (client) =>
-            readRange(client, row.dataset.object_key, 0, HTML_DOCUMENT_LIMIT),
-        );
+        if (request.isNavigation) {
+            return sandboxedDocument(request, row, null, (client) =>
+                readRange(client, row.dataset.object_key, 0, HTML_DOCUMENT_LIMIT),
+            );
+        }
+        if (request.method === "HEAD") {
+            // The client reads these headers before framing the URL, which then gets the whole document.
+            const headers = { "Content-Disposition": contentDisposition(row.hda, null, "inline") };
+            return text("", { headers });
+        }
+        return boundedPreview(request, row, MAX_PEEK_SIZE, "none");
     }
 
     if (!options.preview) {
@@ -1743,7 +1988,7 @@ export async function display(request: PlanetRequest, row: HdaWithDataset, optio
     }
 
     if (info.isA(DatatypeClass.SEQUENCE)) {
-        return boundedPreview(request, row, BINARY_PEEK_SIZE, gzip);
+        return boundedPreview(request, row, BINARY_PEEK_SIZE, compression);
     }
 
     const mimetype = info.details?.mimetype?.toLowerCase() ?? "";
@@ -1756,9 +2001,9 @@ export async function display(request: PlanetRequest, row: HdaWithDataset, optio
     if (binary) {
         const limit =
             info.isA(DatatypeClass.BINARY) || info.isA(DatatypeClass.IMAGE) ? BINARY_PEEK_SIZE : MAX_PEEK_SIZE;
-        return boundedPreview(request, row, limit, false);
+        return boundedPreview(request, row, limit, "none");
     }
-    return boundedPreview(request, row, MAX_PEEK_SIZE, gzip);
+    return boundedPreview(request, row, MAX_PEEK_SIZE, compression);
 }
 
 function displayOptions(query: URLSearchParams, legacy: boolean, filename: string | null = null): DisplayOptions {
@@ -1819,7 +2064,7 @@ async function contentAsText(row: HdaWithDataset, filename: string | null): Prom
     }
     let prefix: { bytes: Uint8Array; truncated: boolean };
     try {
-        prefix = await readPrefix(client, row.dataset.object_key, MAX_PEEK_SIZE, info.isA(DatatypeClass.GZIP));
+        prefix = await readPrefix(client, row.dataset.object_key, MAX_PEEK_SIZE, textCompression(info));
     } catch (error) {
         throw storageError(error, `dataset ${row.hda.hid}`);
     }

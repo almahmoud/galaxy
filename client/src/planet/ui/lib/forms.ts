@@ -1,5 +1,6 @@
 /** Form models of the setup page and their conversion to settings changes and connection-check targets. */
 
+import { rebindsSecret, rebindsToken } from "@/planet/db/secretBindings";
 import type { SettingsUpdate } from "@/planet/db/settings";
 import type { PlanetSettings } from "@/planet/db/types";
 import type { S3Config } from "@/planet/s3";
@@ -101,6 +102,18 @@ export function clusterChange(form: ClusterForm): ClusterChange {
     return change;
 }
 
+/** True when saving the form removes the saved token: it names another gateway URL (`secretBindings.ts`). */
+export function clusterTokenRebound(form: ClusterForm, saved: ClusterSettings): boolean {
+    return (
+        saved.has_token && rebindsToken(validateSettingsChange({ cluster: clusterValues(form) }).change.cluster, saved)
+    );
+}
+
+/** Where the token for the form comes from; a saved token does not carry over to another gateway URL. */
+export function clusterTokenSource(form: ClusterForm, saved: ClusterSettings): SecretSource {
+    return secretSource(form.token, form.clear_token || clusterTokenRebound(form, saved), saved.has_token);
+}
+
 export function validateClusterForm(form: ClusterForm): FieldErrors {
     return validateSettingsChange({ cluster: clusterChange(form) }).errors;
 }
@@ -110,7 +123,7 @@ function differs(values: Record<string, unknown>, saved: Record<string, unknown>
 }
 
 export function clusterDirty(form: ClusterForm, saved: ClusterSettings): boolean {
-    const source = secretSource(form.token, form.clear_token, saved.has_token);
+    const source = clusterTokenSource(form, saved);
     return (
         source === "typed" ||
         source === "cleared" ||
@@ -230,6 +243,26 @@ export function applyProvider(form: StorageForm, provider: StorageProvider): Sto
     return next;
 }
 
+/**
+ * True when saving the form removes the saved secret access key: it names another endpoint, bucket or access key ID
+ * (`secretBindings.ts`).
+ */
+export function storageSecretRebound(form: StorageForm, saved: StorageSettings): boolean {
+    return (
+        saved.has_secret &&
+        rebindsSecret(validateSettingsChange({ storage: storageValues(form) }).change.storage, saved)
+    );
+}
+
+/** Where the secret access key for the form comes from; a saved one does not carry over to other storage. */
+export function storageSecretSource(form: StorageForm, saved: StorageSettings): SecretSource {
+    return secretSource(
+        form.secret_access_key,
+        form.clear_secret || storageSecretRebound(form, saved),
+        saved.has_secret,
+    );
+}
+
 export function validateStorageForm(form: StorageForm): FieldErrors {
     const errors: FieldErrors = {};
     const started = Boolean(form.bucket.trim() || form.access_key_id.trim() || form.secret_access_key.trim());
@@ -256,7 +289,7 @@ export function validateStorageForm(form: StorageForm): FieldErrors {
 }
 
 export function storageDirty(form: StorageForm, saved: StorageSettings): boolean {
-    const source = secretSource(form.secret_access_key, form.clear_secret, saved.has_secret);
+    const source = storageSecretSource(form, saved);
     return (
         source === "typed" ||
         source === "cleared" ||
