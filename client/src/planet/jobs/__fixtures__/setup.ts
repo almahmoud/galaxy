@@ -27,6 +27,7 @@ import type { NewDataset, NewUpload } from "@/planet/db/records";
 import { sha256Hex } from "@/planet/util/digest";
 
 import type { JobDeps } from "../deps";
+import type { DispatchPlan } from "../manifest";
 import type { ToolBundle } from "../schemas";
 import { FakeS3 } from "./fakeS3";
 import { SchemaValidator } from "./jsonSchema";
@@ -221,4 +222,29 @@ export function addJob(historyId: string, fields: Partial<NewJob> & Pick<NewJob,
 
 export function addUpload(fields: Partial<NewUpload> & Pick<NewUpload, "name" | "size">): Promise<UploadRecord> {
     return uploads.create({ part_size: 8 * 1024 * 1024, state: "uploaded", ...fields });
+}
+
+/** Records a dispatch as the job manager does once the attempt's Kubernetes Job exists; returns the job. */
+export function markDispatched(
+    jobId: string,
+    plan: Pick<DispatchPlan, "kind" | "attempt" | "multipart">,
+    termination: NonNullable<JobRecord["k8s"]>["tool_termination"] = null,
+): Promise<JobRecord> {
+    return jobs.update(jobId, {
+        k8s: {
+            namespace: "planet",
+            name: `planet-a1b2c3d4-${jobId}-a${plan.attempt}`,
+            uid: null,
+            attempt: plan.attempt,
+            spec_hash: null,
+            pod_name: null,
+            node_name: null,
+            image: null,
+            kind: plan.kind,
+            created: null,
+            prepared: false,
+            tool_termination: termination,
+            multipart: plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })),
+        },
+    });
 }

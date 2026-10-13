@@ -116,6 +116,10 @@ function readString(text: string, start: number): { value: string; end: number }
             if (next === undefined || !Object.hasOwn(SIMPLE_ESCAPES, next)) {
                 undecided("unsupported string escape");
             }
+            // Python reads `\0` followed by digits as an octal escape (`'\01'` is chr(1)).
+            if (next === "0" && /[0-9]/.test(text[i + 2] ?? "")) {
+                undecided("octal string escape");
+            }
             value += SIMPLE_ESCAPES[next];
             i += 2;
             continue;

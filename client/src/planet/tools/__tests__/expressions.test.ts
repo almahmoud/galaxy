@@ -183,6 +183,9 @@ describe("safe expression evaluator", () => {
         expect(evaluate("1 == ".repeat(500) + "1", SCOPE)).toEqual({ status: "value", value: true });
         expect(evaluate("a".repeat(20_000), SCOPE).status).toBe("undecided");
         expect(evaluate("'\u0000' == '\\0'", SCOPE)).toEqual({ status: "value", value: true });
+        // Python reads these as octal escapes ('\\01' is chr(1)); deciding them as NUL plus digits would be wrong.
+        expect(evaluate("'\\01' == 'x'", SCOPE).status).toBe("undecided");
+        expect(evaluate("'a\\08'", SCOPE).status).toBe("undecided");
         expect(evaluate("'😀' > 'z'", SCOPE)).toEqual({ status: "value", value: true });
     });
 

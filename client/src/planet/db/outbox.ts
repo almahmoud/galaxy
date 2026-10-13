@@ -67,6 +67,20 @@ export function postpone(id: string, notBefore: string, tx?: WriteTx): Promise<O
     });
 }
 
+/** Replaces the entry's payload (a dispatch moving on to a later attempt). Missing entries are ignored. */
+export function setPayload(id: string, payload: unknown, tx?: WriteTx): Promise<OutboxRecord | undefined> {
+    return useWrite(tx, ["outbox"], async (t) => {
+        const store = t.store("outbox");
+        const entry = await store.get(id);
+        if (!entry) {
+            return undefined;
+        }
+        const next: OutboxRecord = { ...entry, payload };
+        await store.put(next);
+        return next;
+    });
+}
+
 /** Removes every entry of `kind` for a job. */
 export function removeForJob(jobId: string, kind: OutboxKind, tx?: WriteTx): Promise<void> {
     return useWrite(tx, ["outbox"], async (t) => {

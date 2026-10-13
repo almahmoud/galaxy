@@ -18,6 +18,7 @@ import {
     type JobOutputAssociation,
     type JobRecord,
     jobs,
+    LeaderFenceError,
     type MetadataFileRecord,
     type ReadTx,
     readTx,
@@ -28,16 +29,19 @@ import type { NewCollectionTree, NewElement } from "@/planet/db/collections";
 
 import type { JobDeps } from "./deps";
 import { datasetObjectKeys, jobObjectKeys, metadataFileKey } from "./keys";
-import { jobKind } from "./manifest";
+import { jobKind, MAX_METADATA_VALUE_SIZE } from "./manifest";
 import {
     abortMultipartUploads,
+    type AttemptObjects,
     completeMultipartUpload,
     type DispatchRecord,
     METADATA_FILE_POOL,
     type MultipartUpload,
-    readDispatchRecord,
+    objectExists,
+    readAttemptObjects,
     readJson,
 } from "./objects";
+import { redactSignedUrls } from "./redact";
 import {
     type CollectionResult,
     type CollectionResultElement,
@@ -87,6 +91,15 @@ export type PrepareRecord = PrepareDocument;
 /** Galaxy's `DATABASE_MAX_STRING_SIZE`: job streams are shortened to this many characters. */
 export const STREAM_LIMIT = 32768;
 const STREAM_JOIN = "\n..\n";
+/** Galaxy's `TrimmedString(255)` columns: dataset name, info and blurb. */
+export const SHORT_TEXT_LIMIT = 255;
+/** Peeks are a few lines (`get_file_peek`); longer ones are cut. */
+export const PEEK_LIMIT = STREAM_LIMIT;
+/** Evaluated command lines longer than this keep their beginning and end. */
+export const COMMAND_LINE_LIMIT = 256 * 1024;
+/** Job messages kept per job, and characters kept of each of their texts. */
+export const MAX_JOB_MESSAGES = 100;
+export const JOB_MESSAGE_LIMIT = 1024;
 
 /** `StdioErrorLevel.FATAL` and `FATAL_OOM`. */
 const FATAL = 3;
@@ -114,12 +127,18 @@ const SETTLED_STATES: ReadonlySet<string> = new Set(["ok", "error", "deleted", "
 // ---------------------------------------------------------------------------------------------------------
 // prepare.json
 
+/** The objects of the job's current attempt (`job.k8s.attempt`), or null for undispatched jobs or a missing record. */
+async function currentAttempt(job: JobRecord, deps: JobDeps): Promise<AttemptObjects | null> {
+    const attempt = job.k8s?.attempt;
+    return attempt ? readAttemptObjects(deps.s3, job.id, attempt, deps.signal) : null;
+}
+
 async function readCurrentPrepare(
     job: JobRecord,
-    dispatch: DispatchRecord | null,
+    objects: AttemptObjects,
     deps: JobDeps,
 ): Promise<PrepareDocument | null> {
-    const value = await readJson(deps.s3, jobObjectKeys(job.id).prepare, deps.signal);
+    const value = await readJson(deps.s3, objects.keys.prepare, deps.signal);
     if (value === null) {
         return null;
     }
@@ -127,10 +146,17 @@ async function readCurrentPrepare(
     if (prepare.job_id !== undefined && prepare.job_id !== job.id) {
         throw new ProtocolError("prepare.json", "/job_id", `belongs to job ${prepare.job_id}`);
     }
-    if (dispatch && prepare.attempt !== undefined && prepare.attempt !== dispatch.attempt) {
+    if (prepare.attempt !== undefined && prepare.attempt !== objects.dispatch.attempt) {
         return null;
     }
-    return prepare;
+    return {
+        ...prepare,
+        command_line: limitCommandLine(prepare.command_line ?? null),
+        errors: prepare.errors.map((error) => ({
+            phase: error.phase,
+            message: podText(error.message, JOB_MESSAGE_LIMIT),
+        })),
+    };
 }
 
 /**
@@ -143,42 +169,76 @@ async function readCurrentPrepare(
  * @throws ProtocolError when the document does not follow the protocol
  */
 export async function readPrepare(job: JobRecord, deps: JobDeps): Promise<PrepareRecord | null> {
-    const dispatch = await readDispatchRecord(deps.s3, job.id, deps.signal);
-    const prepare = await readCurrentPrepare(job, dispatch, deps);
+    const objects = await currentAttempt(job, deps);
+    const prepare = objects ? await readCurrentPrepare(job, objects, deps) : null;
     if (prepare?.state === "ok" && jobKind(job) === "tool") {
         await writeTx(JOB_STORES, async (tx) => {
             const current = await jobs.get(job.id, tx);
             if (current && current.command_line === null && !SETTLED_STATES.has(current.state)) {
-                const outputs = await applyDecisions(tx, current, prepare);
-                await jobs.update(current.id, { outputs, command_line: prepare.command_line ?? "" }, tx);
+                const kept = await applyDecisions(tx, current, prepare);
+                await jobs.update(current.id, { ...kept, command_line: prepare.command_line ?? "" }, tx);
             }
         });
     }
     return prepare;
 }
 
-/** Applies prepare.json's output decisions; returns the job's outputs without the filtered ones. */
-async function applyDecisions(tx: WriteTx, job: JobRecord, prepare: PrepareDocument): Promise<JobOutputAssociation[]> {
-    const decisions = prepare.outputs ?? {};
-    const kept: JobOutputAssociation[] = [];
+/** The outputs of a job once filtered ones are removed. */
+type KeptOutputs = Pick<JobRecord, "outputs" | "output_collections">;
+
+/** Outputs of the elements of a static output collection (`<collection>|__part__|<identifier>`). */
+function isElementOf(output: JobOutputAssociation, collection: string): boolean {
+    return output.name.startsWith(`${collection}|__part__|`);
+}
+
+/**
+ * Removes filtered outputs: datasets as {@link filterOutput} does, collections by deleting and hiding the HDCA and
+ * filtering the outputs of its elements. Returns what remains.
+ */
+async function removeFiltered(tx: WriteTx, job: KeptOutputs, filtered: ReadonlySet<string>): Promise<KeptOutputs> {
+    const collectionNames = job.output_collections.filter((item) => filtered.has(item.name)).map((item) => item.name);
+    const outputs: JobOutputAssociation[] = [];
     for (const output of job.outputs) {
-        const decision = Object.hasOwn(decisions, output.name) ? decisions[output.name] : undefined;
-        if (decision?.filtered) {
+        if (filtered.has(output.name) || collectionNames.some((name) => isElementOf(output, name))) {
             await filterOutput(tx, output.id);
-            continue;
-        }
-        kept.push(output);
-        if (decision) {
-            const hda = await hdas.get(output.id, tx);
-            if (hda) {
-                await hdas.update(hda.id, { name: decision.label, extension: decision.format ?? hda.extension }, tx);
-            }
+        } else {
+            outputs.push(output);
         }
     }
+    const outputCollections: JobRecord["output_collections"] = [];
     for (const output of job.output_collections) {
-        const decision = Object.hasOwn(decisions, output.name) ? decisions[output.name] : undefined;
-        if (decision && output.src === "hdca" && (await collections.getHdca(output.id, tx))) {
-            await collections.updateHdca(output.id, { name: decision.label }, tx);
+        if (!filtered.has(output.name)) {
+            outputCollections.push(output);
+        } else if (output.src === "hdca" && (await collections.getHdca(output.id, tx))) {
+            await collections.updateHdca(output.id, { deleted: true, visible: false }, tx);
+        }
+    }
+    return { outputs, output_collections: outputCollections };
+}
+
+/** Applies prepare.json's output decisions; returns the job's outputs without the filtered ones. */
+async function applyDecisions(tx: WriteTx, job: JobRecord, prepare: PrepareDocument): Promise<KeptOutputs> {
+    const decisions = prepare.outputs ?? {};
+    const decision = (name: string) => (Object.hasOwn(decisions, name) ? decisions[name] : undefined);
+    const filtered = new Set(
+        [...job.outputs, ...job.output_collections].map((item) => item.name).filter((name) => decision(name)?.filtered),
+    );
+    const kept = await removeFiltered(tx, job, filtered);
+    for (const output of kept.outputs) {
+        const made = decision(output.name);
+        const hda = made ? await hdas.get(output.id, tx) : undefined;
+        if (made && hda) {
+            await hdas.update(
+                hda.id,
+                { name: shortText(made.label) ?? hda.name, extension: made.format ?? hda.extension },
+                tx,
+            );
+        }
+    }
+    for (const output of kept.output_collections) {
+        const made = decision(output.name);
+        if (made && output.src === "hdca" && (await collections.getHdca(output.id, tx))) {
+            await collections.updateHdca(output.id, { name: shortText(made.label) ?? "" }, tx);
         }
     }
     return kept;
@@ -202,12 +262,28 @@ async function filterOutput(tx: WriteTx, hdaId: string): Promise<void> {
  * ETags (and aborts unused ones), updates the output datasets and every history copy, creates history datasets
  * for discovered datasets (hids allocated now, in slot order), populates output collections and stores the job's
  * state, exit code, streams, command line, messages and metrics. A job that is already settled is left unchanged.
+ * The current attempt is `job.k8s.attempt`; its objects are read from the attempt's keys, or from the legacy
+ * `jobs/<job>/` keys for jobs dispatched before attempts had their own.
  *
  * @returns null when the current attempt has written no results yet
- * @throws ProtocolError when results.json does not follow the protocol
+ * @throws ProtocolError when results.json does not follow the protocol, or the attempt has results but no dispatch
+ *   record to check them against
  */
 export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<IngestOutcome | null> {
-    const value = await readJson(deps.s3, jobObjectKeys(job.id).results, deps.signal);
+    const attempt = job.k8s?.attempt;
+    if (!attempt) {
+        return null;
+    }
+    const objects = await readAttemptObjects(deps.s3, job.id, attempt, deps.signal);
+    if (!objects) {
+        // Without the record, the UUIDs the pod reports cannot be checked against what the browser handed out.
+        if (await objectExists(deps.s3, jobObjectKeys(job.id, attempt).results, deps.signal)) {
+            throw new ProtocolError("dispatch.json", "", `the record of attempt ${attempt} is missing`);
+        }
+        return null;
+    }
+    const { dispatch } = objects;
+    const value = await readJson(deps.s3, objects.keys.results, deps.signal);
     if (value === null) {
         return null;
     }
@@ -215,8 +291,7 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
     if (results.job_id !== job.id) {
         throw new ProtocolError("results.json", "/job_id", `belongs to job ${results.job_id}`);
     }
-    const dispatch = await readDispatchRecord(deps.s3, job.id, deps.signal);
-    if (dispatch && results.attempt !== dispatch.attempt) {
+    if (results.attempt !== dispatch.attempt) {
         return null;
     }
     const current = await jobs.get(job.id);
@@ -229,7 +304,7 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
     // Labels and filters come from prepare.json when the leader did not read it while the job ran.
     const prepare =
         jobKind(current) === "tool" && current.command_line === null
-            ? await readCurrentPrepare(current, dispatch, deps).catch((error: unknown) => {
+            ? await readCurrentPrepare(current, objects, deps).catch((error: unknown) => {
                   if (error instanceof ProtocolError) {
                       return null;
                   }
@@ -243,12 +318,12 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
 /** Completes the multipart uploads the pod used and aborts the others; returns errors by output name. */
 async function settleMultipart(
     deps: JobDeps,
-    dispatch: DispatchRecord | null,
+    dispatch: DispatchRecord,
     results: ResultsDocument,
 ): Promise<Map<string, string>> {
     const errors = new Map<string, string>();
     const unused: MultipartUpload[] = [];
-    for (const upload of dispatch?.multipart ?? []) {
+    for (const upload of dispatch.multipart) {
         const record = Object.hasOwn(results.outputs, upload.output) ? results.outputs[upload.output] : undefined;
         const data = record?.data;
         if (record?.uuid !== upload.uuid || data?.mode !== "multipart") {
@@ -258,8 +333,11 @@ async function settleMultipart(
         try {
             await completeMultipartUpload(deps.s3, upload, data.parts ?? [], deps.signal);
         } catch (error) {
+            if (error instanceof LeaderFenceError) {
+                throw error;
+            }
             const reason = error instanceof Error ? error.message : String(error);
-            errors.set(upload.output, `The dataset's data could not be stored: ${reason}`);
+            errors.set(upload.output, `The dataset's data could not be stored: ${redactSignedUrls(reason)}`);
         }
     }
     await abortMultipartUploads(deps.s3, unused, deps.signal);
@@ -268,7 +346,7 @@ async function settleMultipart(
 
 interface ResultsContext {
     prepare: PrepareDocument | null;
-    dispatch: DispatchRecord | null;
+    dispatch: DispatchRecord;
     uploadErrors: Map<string, string>;
 }
 
@@ -299,22 +377,25 @@ async function applyResults(
         return settledOutcome(tx, job);
     }
     const kind = jobKind(job);
-    let outputs = job.outputs;
+    let kept: KeptOutputs = job;
     let commandLine = job.command_line;
     if (context.prepare?.state === "ok" && commandLine === null) {
-        outputs = await applyDecisions(tx, job, context.prepare);
+        kept = await applyDecisions(tx, job, context.prepare);
         commandLine = context.prepare.command_line ?? null;
     }
-    const filtered = new Set(results.filtered_outputs);
-    for (const output of outputs.filter((item) => filtered.has(item.name))) {
-        await filterOutput(tx, output.id);
+    kept = await removeFiltered(tx, kept, new Set(results.filtered_outputs));
+    const outputs = kept.outputs;
+    const jobMessages = limitJobMessages(results.job_messages);
+    // Galaxy's Kubernetes runner fails a job whose tool was killed for its memory limit with its OOM message.
+    const oom = results.termination === "signal" && job.k8s?.tool_termination?.reason === "OOMKilled";
+    if (oom) {
+        return applyOomFailure(tx, job, results, { ...kept, command_line: commandLine }, jobMessages);
     }
-    outputs = outputs.filter((item) => !filtered.has(item.name));
 
     let state = results.state;
     const datasetIds: string[] = [];
     const hdaIds: string[] = [];
-    const finishMessage = results.job_messages.find((message) => message.desc)?.desc ?? results.errors[0];
+    const finishMessage = shortText(jobMessages.find((message) => message.desc)?.desc ?? results.errors[0] ?? null);
     if (kind === "set_metadata") {
         for (const input of job.inputs.filter((item) => item.src === "hda")) {
             const record = Object.hasOwn(results.outputs, input.name) ? results.outputs[input.name]! : null;
@@ -350,7 +431,8 @@ async function applyResults(
     const discovered = await createDiscovered(tx, job, results, context.dispatch);
     datasetIds.push(...discovered.datasetIds);
     hdaIds.push(...discovered.slots.values());
-    await populateCollections(tx, job, kind, results, outputs, discovered.slots);
+    const remaining = { ...job, output_collections: kept.output_collections };
+    await populateCollections(tx, remaining, kind, results, outputs, discovered.slots);
 
     await jobs.update(
         job.id,
@@ -358,18 +440,65 @@ async function applyResults(
             state,
             exit_code: results.exit_code,
             outputs: [...outputs, ...discovered.associations],
-            command_line: results.command_line ?? commandLine,
-            command_version: results.command_version ?? null,
-            tool_stdout: shrinkStream(results.tool_stdout.text),
-            tool_stderr: shrinkStream(results.tool_stderr.text),
-            job_stdout: shrinkStream(results.job_stdout.text),
-            job_stderr: shrinkStream(results.job_stderr.text),
-            job_messages: results.job_messages,
+            output_collections: kept.output_collections,
+            command_line: limitCommandLine(results.command_line ?? null) ?? commandLine,
+            command_version: storedStream(results.command_version ?? null) || null,
+            tool_stdout: storedStream(results.tool_stdout.text),
+            tool_stderr: storedStream(results.tool_stderr.text),
+            job_stdout: storedStream(results.job_stdout.text),
+            job_stderr: storedStream(results.job_stderr.text),
+            job_messages: jobMessages,
             metrics: mergeMetrics(job.metrics, coreMetrics(results, context.dispatch)),
         },
         tx,
     );
     return { state, datasetIds, hdaIds };
+}
+
+/**
+ * Galaxy's `JobWrapper.fail` with the OOM message for a job whose tool container the kernel killed for its memory
+ * limit: outputs in error, no discovered datasets or collection elements, the pod's streams kept.
+ */
+async function applyOomFailure(
+    tx: WriteTx,
+    job: JobRecord,
+    results: ResultsDocument,
+    kept: KeptOutputs & Pick<JobRecord, "command_line">,
+    jobMessages: ResultJobMessage[],
+): Promise<IngestOutcome> {
+    const message = FAILURE_MESSAGES.oom;
+    const datasetIds: string[] = [];
+    const hdaIds: string[] = [];
+    for (const output of kept.outputs) {
+        const hda = await hdas.get(output.id, tx);
+        if (hda) {
+            hdaIds.push(hda.id);
+            datasetIds.push(hda.dataset_id);
+            await failOutput(tx, hda, message);
+        }
+    }
+    await jobs.update(
+        job.id,
+        {
+            state: "error",
+            info: message,
+            exit_code: results.exit_code,
+            outputs: kept.outputs,
+            output_collections: kept.output_collections,
+            command_line: limitCommandLine(results.command_line ?? null) ?? kept.command_line,
+            command_version: storedStream(results.command_version ?? null) || null,
+            tool_stdout: storedStream(results.tool_stdout.text),
+            tool_stderr: storedStream(results.tool_stderr.text),
+            job_stdout: storedStream(results.job_stdout.text),
+            job_stderr: storedStream(results.job_stderr.text),
+            job_messages: [
+                ...jobMessages,
+                { type: "internal", desc: message, code_desc: null, error_level: FATAL_OOM },
+            ].slice(-MAX_JOB_MESSAGES),
+        },
+        tx,
+    );
+    return { state: "error", datasetIds, hdaIds };
 }
 
 /** Dataset fields of a record: sizes, metadata files and extra files at the keys the manifest gave the pod. */
@@ -390,15 +519,30 @@ function datasetFields(
         total_size: record.total_size,
         metadata_files: metadataFiles,
         extra_files: record.extra_files ? { key: keys.extra, index_key: keys.extraIndex } : null,
-        created_from_basename: record.created_from_basename ?? createdFromBasename,
+        created_from_basename: shortText(record.created_from_basename ?? null) ?? createdFromBasename,
     };
 }
 
 function recordInfo(record: DatasetResult): string | null {
     if (record.info) {
-        return record.info;
+        return shortText(record.info);
     }
-    return record.state === "error" && record.errors.length ? record.errors.join("\n") : record.info;
+    return shortText(record.state === "error" && record.errors.length ? record.errors.join("\n") : record.info);
+}
+
+/** Galaxy's `set_meta` drops metadata values larger than `max_metadata_value_size`; so does ingest. */
+function recordMetadata(record: DatasetResult): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(record.metadata)) {
+        if ((JSON.stringify(value) ?? "").length <= MAX_METADATA_VALUE_SIZE) {
+            metadata[name] = value;
+        }
+    }
+    return metadata;
+}
+
+function recordPeek(record: DatasetResult): string | null {
+    return record.peek === null ? null : record.peek.slice(0, PEEK_LIMIT);
 }
 
 /**
@@ -430,9 +574,9 @@ async function applyOutputRecord(tx: WriteTx, hda: HdaRecord, record: DatasetRes
                 extension: failed && record.ext === "auto" ? "data" : record.ext,
                 dbkey: record.dbkey ?? copy.dbkey,
                 info: recordInfo(record),
-                blurb: record.blurb ?? (failed ? "error" : copy.blurb),
-                peek: record.peek,
-                metadata: record.metadata,
+                blurb: shortText(record.blurb) ?? (failed ? "error" : copy.blurb),
+                peek: recordPeek(record),
+                metadata: recordMetadata(record),
                 _state: record.state === "failed_metadata" ? "failed_metadata" : null,
                 ...(failed && copy.id === hda.id ? { visible: true } : {}),
             },
@@ -465,7 +609,13 @@ async function applyMetadataRecord(
     await datasets.update(dataset.id, datasetFields(dataset.uuid, record, dataset.created_from_basename), tx);
     return hdas.update(
         hda.id,
-        { extension: record.ext, metadata: record.metadata, peek: record.peek, blurb: record.blurb, _state: null },
+        {
+            extension: record.ext,
+            metadata: recordMetadata(record),
+            peek: recordPeek(record),
+            blurb: shortText(record.blurb),
+            _state: null,
+        },
         tx,
     );
 }
@@ -509,7 +659,7 @@ async function createDiscovered(
     tx: WriteTx,
     job: JobRecord,
     results: ResultsDocument,
-    dispatch: DispatchRecord | null,
+    dispatch: DispatchRecord,
 ): Promise<Discovered> {
     const discovered: Discovered = { slots: new Map(), datasetIds: [], associations: [] };
     const historyId = job.history_id;
@@ -518,7 +668,8 @@ async function createDiscovered(
     }
     const records = [...results.discovered].sort((a, b) => a.slot - b.slot);
     for (const record of records) {
-        if (dispatch && dispatch.slot_uuids[record.slot] !== record.uuid) {
+        // Only slots the browser handed out: UUIDs the pod chose itself could name another history's dataset.
+        if (dispatch.slot_uuids[record.slot] !== record.uuid) {
             continue;
         }
         let dataset = await datasets.getByUuid(record.uuid, tx);
@@ -530,13 +681,13 @@ async function createDiscovered(
             const created = await hdas.createWithDataset(
                 {
                     history_id: historyId,
-                    name: record.name ?? record.designation ?? "",
+                    name: shortText(record.name ?? record.designation ?? "") ?? "",
                     extension: failed && record.ext === "auto" ? "data" : record.ext,
                     dbkey: record.dbkey ?? "?",
                     info: recordInfo(record),
-                    blurb: record.blurb,
-                    peek: record.peek,
-                    metadata: record.metadata,
+                    blurb: shortText(record.blurb),
+                    peek: recordPeek(record),
+                    metadata: recordMetadata(record),
                     visible: failed ? true : record.visible,
                     _state: record.state === "failed_metadata" ? "failed_metadata" : null,
                     creating_job_id: job.id,
@@ -696,17 +847,21 @@ async function populateCollection(
  * `failed_metadata`. Multipart uploads of the attempt are aborted. Settled and cancelled jobs are left unchanged.
  */
 export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: JobDeps): Promise<void> {
-    const dispatch = await readDispatchRecord(deps.s3, job.id, deps.signal).catch(() => null);
-    if (dispatch?.multipart.length) {
-        await abortMultipartUploads(deps.s3, dispatch.multipart, deps.signal);
+    const objects = await currentAttempt(job, deps).catch((error: unknown) => {
+        if (error instanceof LeaderFenceError) {
+            throw error;
+        }
+        return null;
+    });
+    if (objects?.dispatch.multipart.length) {
+        await abortMultipartUploads(deps.s3, objects.dispatch.multipart, deps.signal);
     }
     const kind = jobKind(job);
-    const prepare =
-        dispatch && kind === "tool" ? await readCurrentPrepare(job, dispatch, deps).catch(() => null) : null;
-    const message = failure.message.trim() || FAILURE_MESSAGES[failure.reason];
+    const prepare = objects && kind === "tool" ? await readCurrentPrepare(job, objects, deps).catch(() => null) : null;
+    const message = redactSignedUrls(failure.message.trim()) || FAILURE_MESSAGES[failure.reason];
     const stderr = [
         message,
-        failure.detail?.trim(),
+        redactSignedUrls(failure.detail?.trim() ?? ""),
         ...(prepare?.errors ?? []).map((error) => `${error.phase}: ${error.message}`),
     ].filter((line): line is string => Boolean(line));
 
@@ -715,12 +870,13 @@ export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: J
         if (!current || SETTLED_STATES.has(current.state)) {
             return;
         }
-        let outputs = current.outputs;
+        let kept: KeptOutputs = current;
         let commandLine = current.command_line;
         if (prepare?.state === "ok" && commandLine === null) {
-            outputs = await applyDecisions(tx, current, prepare);
+            kept = await applyDecisions(tx, current, prepare);
             commandLine = prepare.command_line ?? null;
         }
+        const outputs = kept.outputs;
         if (kind === "set_metadata") {
             for (const input of current.inputs.filter((item) => item.src === "hda")) {
                 if (await hdas.get(input.id, tx)) {
@@ -747,11 +903,12 @@ export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: J
                 state: "error",
                 info: message,
                 outputs,
+                output_collections: kept.output_collections,
                 command_line: commandLine,
-                tool_stdout: shrinkStream(failure.toolStdout ?? current.tool_stdout),
-                tool_stderr: shrinkStream(failure.toolStderr ?? current.tool_stderr),
-                job_stderr: shrinkStream(stderr.join("\n")),
-                job_messages: [...current.job_messages, jobMessage],
+                tool_stdout: storedStream(failure.toolStdout ?? current.tool_stdout),
+                tool_stderr: storedStream(failure.toolStderr ?? current.tool_stderr),
+                job_stderr: storedStream(stderr.join("\n")),
+                job_messages: [...current.job_messages, jobMessage].slice(-MAX_JOB_MESSAGES),
             },
             tx,
         );
@@ -759,7 +916,37 @@ export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: J
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Streams and metrics
+// Streams, texts and metrics
+
+/** Text a pod wrote, without presigned-request credentials and at most `limit` characters long. */
+function podText(text: string, limit: number): string {
+    const clean = redactSignedUrls(text);
+    return clean.length > limit ? clean.slice(0, limit) : clean;
+}
+
+/** Galaxy's `TrimmedString(255)` for names, info and blurbs a pod wrote. */
+function shortText(text: string | null): string | null {
+    return text === null ? null : podText(text, SHORT_TEXT_LIMIT);
+}
+
+/** A stream as stored with the job: credentials removed, then shortened like Galaxy's `set_streams`. */
+export function storedStream(text: string | null | undefined): string {
+    return shrinkStream(text ? redactSignedUrls(text) : text);
+}
+
+function limitCommandLine(text: string | null): string | null {
+    return text === null ? null : shrinkStream(redactSignedUrls(text), COMMAND_LINE_LIMIT);
+}
+
+/** At most {@link MAX_JOB_MESSAGES} messages with texts of at most {@link JOB_MESSAGE_LIMIT} characters. */
+function limitJobMessages(messages: readonly ResultJobMessage[]): ResultJobMessage[] {
+    return messages.slice(0, MAX_JOB_MESSAGES).map((message) => ({
+        ...message,
+        type: podText(message.type, 64),
+        desc: message.desc === null ? null : podText(message.desc, JOB_MESSAGE_LIMIT),
+        ...(typeof message.code_desc === "string" ? { code_desc: podText(message.code_desc, JOB_MESSAGE_LIMIT) } : {}),
+    }));
+}
 
 /**
  * Galaxy's `shrink_string_by_size(value, DATABASE_MAX_STRING_SIZE, join_by="\n..\n", left_larger=True)`: text

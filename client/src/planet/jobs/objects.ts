@@ -3,6 +3,7 @@
  * browser-created multipart uploads and the dispatch record that remembers them between dispatch and ingest.
  */
 
+import { leader } from "@/planet/db";
 import { isNotFound, isS3Error, type S3Client } from "@/planet/s3";
 import { sha256Hex } from "@/planet/util/digest";
 
@@ -10,10 +11,13 @@ import type { JobDeps } from "./deps";
 import {
     datasetObjectKeys,
     extraObjectKey,
+    type JobObjectKeys,
     jobObjectKeys,
+    legacyJobObjectKeys,
     metadataFileKey,
     toolArchiveKey,
     toolArchiveStaticPath,
+    UUID_PATTERN,
 } from "./keys";
 import {
     type DataUploadResult,
@@ -58,30 +62,83 @@ export class DispatchError extends Error {
 // ---------------------------------------------------------------------------------------------------------
 // JSON documents
 
+/** Pod documents (`results.json`, `prepare.json`) and dispatch records larger than this are refused. */
+export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
+
 /**
- * Reads and parses a JSON object of the bucket.
+ * Throws `LeaderFenceError` when this tab no longer leads job processing. Every bucket write of the job protocol
+ * checks it first, so a demoted or frozen leader cannot change what the current leader's pods use.
+ */
+export function assertLeader(): Promise<void> {
+    return leader.assertCurrent();
+}
+
+async function readText(response: Response, limit: number, name: string): Promise<string> {
+    const tooLarge = () => new ProtocolError(name, "", `larger than ${limit} bytes`);
+    const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > limit) {
+        await response.body?.cancel().catch(() => undefined);
+        throw tooLarge();
+    }
+    if (!response.body) {
+        return "";
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+            break;
+        }
+        size += value.byteLength;
+        if (size > limit) {
+            await reader.cancel().catch(() => undefined);
+            throw tooLarge();
+        }
+        chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Reads and parses a JSON object of the bucket of at most {@link MAX_DOCUMENT_BYTES}.
  *
  * @returns null when the object does not exist
- * @throws ProtocolError when it is not JSON
+ * @throws ProtocolError when it is larger or not JSON
  */
-export async function readJson(s3: S3Client, key: string, signal?: AbortSignal): Promise<unknown> {
-    let text: string;
+export async function readJson(
+    s3: S3Client,
+    key: string,
+    signal?: AbortSignal,
+    limit: number = MAX_DOCUMENT_BYTES,
+): Promise<unknown> {
+    const name = key.slice(key.lastIndexOf("/") + 1);
+    let response: Response;
     try {
-        text = await (await s3.getObject(key, { signal })).text();
+        response = await s3.getObject(key, { signal });
     } catch (error) {
         if (isNotFound(error)) {
             return null;
         }
         throw error;
     }
+    const text = await readText(response, limit, name);
     try {
         return JSON.parse(text);
     } catch {
-        throw new ProtocolError(key.slice(key.lastIndexOf("/") + 1), "", "not valid JSON");
+        throw new ProtocolError(name, "", "not valid JSON");
     }
 }
 
 export async function writeJson(s3: S3Client, key: string, value: unknown, signal?: AbortSignal): Promise<void> {
+    await assertLeader();
     await s3.putObject(key, JSON.stringify(value), { contentType: "application/json", signal });
 }
 
@@ -189,6 +246,7 @@ export async function createMultipartUpload(
 ): Promise<MultipartUpload> {
     const key = datasetObjectKeys(uuid).data;
     const { partSize, parts } = multipartLayout(inputBytes);
+    await assertLeader();
     const uploadId = await s3.createMultipartUpload(key, { signal });
     return { output, uuid, key, upload_id: uploadId, part_size: partSize, parts };
 }
@@ -203,6 +261,7 @@ export async function completeMultipartUpload(
     reported: NonNullable<DataUploadResult["parts"]>,
     signal?: AbortSignal,
 ): Promise<void> {
+    await assertLeader();
     let parts = [...reported].sort((a, b) => a.part_number - b.part_number);
     try {
         if (parts.some((part) => !part.etag)) {
@@ -229,18 +288,26 @@ export async function completeMultipartUpload(
     }
 }
 
-/** Aborts uploads, ignoring failures: the bucket's lifecycle rule removes incomplete uploads that remain. */
+/**
+ * Aborts uploads, ignoring failures: the bucket's lifecycle rule removes incomplete uploads that remain. Throws
+ * `LeaderFenceError` without aborting anything when this tab no longer leads.
+ */
 export async function abortMultipartUploads(
     s3: S3Client,
     uploads: readonly Pick<MultipartUpload, "key" | "upload_id">[],
     signal?: AbortSignal,
 ): Promise<void> {
+    if (!uploads.length) {
+        return;
+    }
+    await assertLeader();
     await Promise.allSettled(
         uploads.map((upload) => s3.abortMultipartUpload(upload.key, upload.upload_id, { signal })),
     );
 }
 
-async function objectExists(s3: S3Client, key: string, signal?: AbortSignal): Promise<boolean> {
+/** True when the object exists. */
+export async function objectExists(s3: S3Client, key: string, signal?: AbortSignal): Promise<boolean> {
     try {
         await s3.headObject(key, { signal });
         return true;
@@ -301,6 +368,7 @@ export async function ensureToolArchive(
                 true,
             );
         }
+        await assertLeader();
         await deps.s3.putObject(key, bytes, { contentType: "application/x-tar", signal: deps.signal });
     }
     published.add(`${key}\n${archive.sha256}`);
@@ -311,13 +379,16 @@ export async function ensureToolArchive(
 // Dispatch record
 
 /**
- * What the browser created when it dispatched the current attempt (`jobs/<job>/dispatch.json`): ingest needs the
+ * What the browser created when it dispatched an attempt (`jobs/<job>/a<attempt>/dispatch.json`): ingest needs the
  * attempt, the slot UUIDs, the allocated resources and the multipart uploads it must complete or abort.
+ * `dispatch_id` is also an annotation of the Kubernetes Job created from it, which ties the Job to this record.
+ * Records of the legacy layout (`jobs/<job>/dispatch.json`) have no `dispatch_id`.
  */
 export interface DispatchRecord {
     protocol: typeof PROTOCOL_VERSION;
     job_id: string;
     attempt: number;
+    dispatch_id?: string;
     kind: JobKind;
     create_time: string;
     walltime_seconds: number;
@@ -337,41 +408,79 @@ function isDispatchRecord(value: unknown, jobId: string): value is DispatchRecor
         record.protocol === PROTOCOL_VERSION &&
         record.job_id === jobId &&
         Number.isSafeInteger(record.attempt) &&
+        (record.dispatch_id === undefined || typeof record.dispatch_id === "string") &&
         Array.isArray(record.slot_uuids) &&
-        record.slot_uuids.every((uuid) => typeof uuid === "string") &&
+        record.slot_uuids.every((uuid) => typeof uuid === "string" && UUID_PATTERN.test(uuid)) &&
         Array.isArray(record.multipart) &&
         record.multipart.every(
             (upload) =>
                 typeof upload?.output === "string" &&
                 typeof upload.key === "string" &&
                 typeof upload.upload_id === "string" &&
+                typeof upload.uuid === "string" &&
+                UUID_PATTERN.test(upload.uuid) &&
                 upload.key === datasetObjectKeys(upload.uuid).data,
         )
     );
 }
 
-/** Returns the job's dispatch record, or null when there is none or it is unreadable. */
-export async function readDispatchRecord(
+async function readRecordAt(
     s3: S3Client,
+    key: string,
     jobId: string,
     signal?: AbortSignal,
 ): Promise<DispatchRecord | null> {
     let value: unknown;
     try {
-        value = await readJson(s3, jobObjectKeys(jobId).dispatch, signal);
+        value = await readJson(s3, key, signal);
     } catch (error) {
         if (error instanceof ProtocolError) {
             return null;
         }
         throw error;
     }
-    try {
-        return isDispatchRecord(value, jobId) ? value : null;
-    } catch {
-        return null;
-    }
+    return isDispatchRecord(value, jobId) ? value : null;
+}
+
+/** Returns the dispatch record of an attempt, or null when there is none or it is unreadable or not the attempt's. */
+export async function readDispatchRecord(
+    s3: S3Client,
+    jobId: string,
+    attempt: number,
+    signal?: AbortSignal,
+): Promise<DispatchRecord | null> {
+    const record = await readRecordAt(s3, jobObjectKeys(jobId, attempt).dispatch, jobId, signal);
+    return record?.attempt === attempt ? record : null;
 }
 
 export function writeDispatchRecord(s3: S3Client, record: DispatchRecord, signal?: AbortSignal): Promise<void> {
-    return writeJson(s3, jobObjectKeys(record.job_id).dispatch, record, signal);
+    return writeJson(s3, jobObjectKeys(record.job_id, record.attempt).dispatch, record, signal);
+}
+
+/** The objects and dispatch record of a dispatched attempt. */
+export interface AttemptObjects {
+    keys: JobObjectKeys;
+    dispatch: DispatchRecord;
+}
+
+/**
+ * Finds the objects of an attempt: its own (`jobs/<job>/a<attempt>/`), or for jobs dispatched before attempts had
+ * their own keys, the legacy ones (`jobs/<job>/`) when their record is of this attempt.
+ *
+ * @returns null when no dispatch record of the attempt exists
+ */
+export async function readAttemptObjects(
+    s3: S3Client,
+    jobId: string,
+    attempt: number,
+    signal?: AbortSignal,
+): Promise<AttemptObjects | null> {
+    const keys = jobObjectKeys(jobId, attempt);
+    const dispatch = await readDispatchRecord(s3, jobId, attempt, signal);
+    if (dispatch) {
+        return { keys, dispatch };
+    }
+    const legacy = legacyJobObjectKeys(jobId);
+    const old = await readRecordAt(s3, legacy.dispatch, jobId, signal);
+    return old?.attempt === attempt && old.dispatch_id === undefined ? { keys: legacy, dispatch: old } : null;
 }

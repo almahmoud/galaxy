@@ -9,6 +9,7 @@ import { createS3Client, type S3Client } from "@/planet/s3";
 import { readBundle } from "@/planet/tools/bundle";
 
 import { resolveToolImage } from "./containers";
+import { runtimeImage } from "./k8sJob";
 import type { ToolBundle } from "./schemas";
 
 /**
@@ -40,7 +41,7 @@ export interface JobDeps {
 }
 
 export interface JobDepsOptions {
-    /** Defaults to `resolveToolImage` of `jobs/containers.ts` with the configured runtime image. */
+    /** Defaults to `resolveToolImage` of `jobs/containers.ts` with the runtime image of the settings (`runtimeImage`). */
     resolveContainer?: JobDeps["resolveContainer"];
     signal?: AbortSignal;
 }
@@ -81,7 +82,7 @@ export async function createJobDeps(options: JobDepsOptions = {}): Promise<JobDe
         datatype: getDatatype,
         resolveContainer:
             options.resolveContainer ??
-            ((bundle) => resolveToolImage(bundle, current.cluster.runtime_image, { signal: options.signal })),
+            ((bundle) => resolveToolImage(bundle, runtimeImage(current.cluster), { signal: options.signal })),
         signal: options.signal,
     };
 }

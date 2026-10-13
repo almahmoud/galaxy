@@ -1,10 +1,13 @@
 /**
  * The job manager run by the leader tab. It works through the outbox (dispatch, cancel, cleanup, purge) with
  * backoff, gates jobs on their inputs, creates Kubernetes Jobs, follows them through {@link ClusterMonitor}
- * and hands finished pods to the protocol module (results, prepare decisions, failures). Every Kubernetes write
- * is idempotent: Job names are deterministic and an existing Job is adopted only when its spec hash matches.
+ * and hands finished pods to the protocol module (results, prepare decisions, failures). Dispatch is idempotent:
+ * Job names are deterministic, each attempt has its own bucket objects, and before preparing an attempt the manager
+ * looks its Job up; a Job created from the attempt's dispatch record (its dispatch-id annotation) is adopted without
+ * rewriting or aborting anything, any other one is deleted and the next attempt used.
  *
- * Work on one job is serialized; job writes are fenced to the leader epoch (`db/fence.ts`).
+ * Work on one job is serialized; job writes are fenced to the leader epoch (`db/fence.ts`), and bucket and
+ * Kubernetes writes check it first.
  */
 
 import {
@@ -45,17 +48,32 @@ import {
     mainContainer,
     pendingFailure,
     podFinished,
+    toolStartFailure,
 } from "./failures";
 import { checkInputs, GATING_READ_STORES, pauseDependents, pauseJob } from "./gating";
 import { FAILURE_MESSAGES, type IngestOutcome, type JobFailure } from "./ingest";
-import { buildJobSpec, parseQuantity, SPEC_HASH_ANNOTATION, STAGE_IN_CONTAINER, TOOL_CONTAINER } from "./k8sJob";
-import type { DispatchPlan } from "./manifest";
+import {
+    buildJobSpec,
+    DISPATCH_ID_ANNOTATION,
+    jobName,
+    parseQuantity,
+    SPEC_HASH_ANNOTATION,
+    STAGE_IN_CONTAINER,
+    TOOL_CONTAINER,
+} from "./k8sJob";
+import type { AdoptedDispatch, DispatchPlan } from "./manifest";
 import { ClusterMonitor } from "./monitor";
 import { ProtocolError } from "./schemas";
 
 /** The protocol module's entry points (`jobs/manifest.ts`, `jobs/ingest.ts`). */
 export interface JobProtocol {
     prepareDispatch(job: JobRecord, deps: JobDeps, options: { attempt: number }): Promise<DispatchPlan>;
+    adoptDispatch(
+        job: JobRecord,
+        deps: JobDeps,
+        options: { attempt: number; dispatchId: string | null },
+    ): Promise<AdoptedDispatch | null>;
+    abortDispatch(job: JobRecord, deps: JobDeps, options: { attempt: number }): Promise<void>;
     ingestResults(job: JobRecord, deps: JobDeps): Promise<IngestOutcome | null>;
     readPrepare(job: JobRecord, deps: JobDeps): Promise<unknown>;
     ingestFailure(job: JobRecord, failure: JobFailure, deps: JobDeps): Promise<void>;
@@ -66,12 +84,16 @@ export interface JobManagerOptions {
     deps: JobDeps;
     protocol: JobProtocol;
     settings: StoredSettings;
+    /** This build's runtime image (`runtime.json`), used when the settings name none. */
+    buildRuntimeImage?: string | null;
     /** Milliseconds since the epoch. */
     now?: () => number;
     /** Called when a write found that another tab leads now; the caller stops this manager. */
     onFenced?: () => void;
-    /** Called for errors that are retried later. */
-    onError?: (error: unknown, context: string) => void;
+    /** Called for errors that are retried later, with the job they concern when there is one. */
+    onError?: (error: unknown, context: string, jobId?: string) => void;
+    /** Called after each listing of the cluster: null when it answered, else why it could not be listed. */
+    onClusterStatus?: (problem: string | null) => void;
     /** Replaces the monitor's waits between failed watch streams (tests). */
     sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -112,6 +134,17 @@ export function backoffMs(attempts: number, random: () => number = Math.random):
 
 function galaxyTime(ms: number): string {
     return formatGalaxyTime(ms * 1000);
+}
+
+/** True when the API server answered a create request without creating anything. */
+function refusedCreation(error: unknown): boolean {
+    return isKubeError(error) && [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(error.status);
+}
+
+/** The tool container's image of a Kubernetes Job, or null for single-container jobs. */
+function toolImage(kubeJob: KubeJob): string | null {
+    const containers = kubeJob.spec?.template.spec.containers ?? [];
+    return containers.find((container) => container.name === TOOL_CONTAINER)?.image ?? null;
 }
 
 export class JobManager {
@@ -218,9 +251,13 @@ export class JobManager {
         try {
             await this.monitor.resync(this.controller.signal);
             this.synced = true;
+            this.options.onClusterStatus?.(null);
         } catch (error) {
             this.synced = false;
             this.report(error, "list");
+            if (this.running) {
+                this.options.onClusterStatus?.(`The cluster could not be listed: ${errorMessage(error)}`);
+            }
         }
         try {
             const current = await jobs.listByState(["new", "waiting", "queued", "running", "deleting"]);
@@ -261,7 +298,7 @@ export class JobManager {
                 if (this.running) {
                     await this.evaluate(jobId);
                 }
-            }).catch((error: unknown) => this.handle(error, `job ${jobId}`)),
+            }).catch((error: unknown) => this.handle(error, `job ${jobId}`, jobId)),
         );
     }
 
@@ -362,7 +399,7 @@ export class JobManager {
                 this.handle(error, "outbox");
                 return;
             }
-            this.report(error, `outbox ${entry.kind}`);
+            this.report(error, `outbox ${entry.kind}`, entry.job_id ?? undefined);
             try {
                 await outbox.reschedule(
                     entry.id,
@@ -411,23 +448,62 @@ export class JobManager {
         }
         const first = (entry.payload as DispatchPayload | null)?.attempt ?? 1;
         let plan: DispatchPlan | undefined;
+        // Whether a Kubernetes Job of `plan` may exist although its creation failed (the request's outcome is
+        // unknown): its uploads stay for the next dispatch, which adopts that Job or proves it absent.
+        const creation = { mayExist: false };
         try {
             for (let attempt = first; attempt < first + SPEC_CONFLICT_RETRIES; attempt++) {
+                plan = undefined;
+                creation.mayExist = false;
+                const name = jobName(this.settings.instance_id, job.id, attempt);
+                const existing = await this.findKubeJob(name);
+                if (existing) {
+                    const adopted = existing.metadata.deletionTimestamp
+                        ? null
+                        : await this.protocol.adoptDispatch(job, this.deps, {
+                              attempt,
+                              dispatchId: existing.metadata.annotations?.[DISPATCH_ID_ANNOTATION] ?? null,
+                          });
+                    if (adopted) {
+                        // An earlier dispatch created it but was not recorded: keep its manifest, slots and uploads.
+                        await this.recordDispatch(
+                            job.id,
+                            existing,
+                            { ...adopted, toolImage: toolImage(existing) },
+                            entry.id,
+                        );
+                        return;
+                    }
+                    // Not created from this attempt's record: it must not write this job's outputs.
+                    await this.deleteKubeJob(name);
+                    await this.protocol.abortDispatch(job, this.deps, { attempt });
+                    await outbox.setPayload(entry.id, { attempt: attempt + 1 } satisfies DispatchPayload);
+                    continue;
+                }
                 plan = await this.protocol.prepareDispatch(job, this.deps, { attempt });
-                const kubeJob = await this.createKubeJob(job, plan, attempt);
+                const kubeJob = await this.createKubeJob(job, plan, creation);
                 if (kubeJob) {
-                    await this.recordDispatch(job.id, kubeJob, plan, attempt, entry.id);
+                    await this.recordDispatch(job.id, kubeJob, plan, entry.id);
                     return;
                 }
+                // Another dispatch's Job was in the way and is deleted; this plan's uploads were never handed out.
+                await this.abortUploads(plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })));
+                plan = undefined;
+                await outbox.setPayload(entry.id, { attempt: attempt + 1 } satisfies DispatchPayload);
             }
             throw new Error(`Kubernetes Jobs of earlier dispatches of job ${job.id} are in the way.`);
         } catch (error) {
-            if (plan?.multipart.length) {
-                await this.abortUploads(plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })));
+            if (error instanceof LeaderFenceError) {
+                // The new leader adopts or replaces what this dispatch created.
+                throw error;
             }
             const giveUp =
                 isPermanent(error) || (!isTransient(error) && entry.attempts + 1 >= MAX_UNKNOWN_DISPATCH_FAILURES);
-            if (!giveUp || error instanceof LeaderFenceError) {
+            // A job that fails here is settled and its Kubernetes Jobs are deleted, so nothing needs the uploads.
+            if (plan?.multipart.length && (giveUp || !creation.mayExist)) {
+                await this.abortUploads(plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })));
+            }
+            if (!giveUp) {
                 throw error;
             }
             await this.failUndispatched(job, {
@@ -438,34 +514,54 @@ export class JobManager {
         }
     }
 
+    /** The Kubernetes Job of that name, or null when there is none. */
+    private async findKubeJob(name: string): Promise<KubeJob | null> {
+        try {
+            return await this.kube.getJob(name, { signal: this.controller.signal });
+        } catch (error) {
+            if (isKubeError(error) && error.status === 404) {
+                return null;
+            }
+            throw error;
+        }
+    }
+
     /**
-     * Creates the Kubernetes Job of one attempt. An existing Job of the same name is adopted when its spec hash
-     * matches (an earlier dispatch created it but was not recorded); otherwise it is deleted and null returned, so
-     * the caller moves on to the next attempt.
+     * Creates the Kubernetes Job of a plan. A Job of the same name that appeared since it was looked up is adopted
+     * when its spec hash matches (the same dispatch created it); otherwise it is deleted and null returned, so the
+     * caller moves on to the next attempt.
      */
-    private async createKubeJob(job: JobRecord, plan: DispatchPlan, attempt: number): Promise<KubeJob | null> {
+    private async createKubeJob(
+        job: JobRecord,
+        plan: DispatchPlan,
+        creation: { mayExist: boolean },
+    ): Promise<KubeJob | null> {
         const spec = await buildJobSpec({
             instanceId: this.settings.instance_id,
             jobId: job.id,
-            attempt,
+            attempt: plan.attempt,
             plan,
             cluster: this.settings.cluster,
+            buildRuntimeImage: this.options.buildRuntimeImage,
         });
         const name = spec.metadata.name!;
         await leader.assertCurrent();
         try {
+            creation.mayExist = true;
             return await this.kube.createJob(spec, { signal: this.controller.signal });
         } catch (error) {
+            // A refusal is an answer: the API server created nothing. Network errors and timeouts are not.
+            creation.mayExist = !refusedCreation(error);
             if (!isKubeError(error) || error.status !== 409) {
                 throw error;
             }
         }
+        creation.mayExist = false;
         const existing = await this.kube.getJob(name, { signal: this.controller.signal });
         const hash = spec.metadata.annotations?.[SPEC_HASH_ANNOTATION];
         if (existing.metadata.annotations?.[SPEC_HASH_ANNOTATION] === hash && !existing.metadata.deletionTimestamp) {
             return existing;
         }
-        // Left by an earlier dispatch with other settings: it must not write this job's outputs.
         await this.deleteKubeJob(name);
         return null;
     }
@@ -473,15 +569,14 @@ export class JobManager {
     private async recordDispatch(
         jobId: string,
         kubeJob: KubeJob,
-        plan: DispatchPlan,
-        attempt: number,
+        plan: Pick<DispatchPlan, "kind" | "attempt" | "toolImage" | "multipart">,
         entryId: string,
     ): Promise<void> {
         const k8s: JobKubernetesInfo = {
             namespace: this.kube.namespace,
             name: kubeJob.metadata.name!,
             uid: kubeJob.metadata.uid ?? null,
-            attempt,
+            attempt: plan.attempt,
             spec_hash: kubeJob.metadata.annotations?.[SPEC_HASH_ANNOTATION] ?? null,
             pod_name: null,
             node_name: null,
@@ -596,6 +691,12 @@ export class JobManager {
         }
         if (jobOutcome(kubeJob) || podFinished(kind, pod)) {
             await this.finish(jobId, kubeJob, pod);
+            return;
+        }
+        // Stage-out keeps waiting for a tool container that never started; nothing will change until its timeout.
+        const notStarted = toolStartFailure(kind, pod);
+        if (notStarted) {
+            await this.fail(jobId, kubeJob, pod, notStarted);
             return;
         }
         const pending = pendingFailure(pod, this.now(), (key) => this.firstSeenAt(key));
@@ -713,8 +814,9 @@ export class JobManager {
     /** Starts a new attempt of a job whose stage-in could not read its manifest or inputs. */
     private async retry(job: JobRecord): Promise<void> {
         const k8s = job.k8s!;
-        // The next attempt's dispatch aborts this attempt's multipart uploads.
         await this.deleteKubeJob(k8s.name);
+        // The attempt's pod has finished and its Job is gone: nothing uses its uploads any more.
+        await this.abortUploads(k8s.multipart);
         const payload: DispatchPayload = { attempt: k8s.attempt + 1 };
         await writeTx(JOB_STORES, async (t) => {
             const current = await jobs.get(job.id, t);
@@ -867,6 +969,7 @@ export class JobManager {
             await this.deleteKubeJob(name);
         }
         for (const upload of payload.multipart ?? []) {
+            await leader.assertCurrent();
             await this.deps.s3.abortMultipartUpload(upload.key, upload.upload_id);
         }
     }
@@ -889,6 +992,7 @@ export class JobManager {
             do {
                 const page = await this.deps.s3.listObjects(`datasets/${uuid}/`, { continuationToken: token });
                 for (const object of page.objects) {
+                    await leader.assertCurrent();
                     await this.deps.s3.deleteObject(object.key);
                 }
                 token = page.isTruncated ? (page.nextContinuationToken ?? undefined) : undefined;
@@ -915,6 +1019,10 @@ export class JobManager {
     }
 
     private async abortUploads(uploads: readonly JobMultipartUpload[]): Promise<void> {
+        if (!uploads.length) {
+            return;
+        }
+        await leader.assertCurrent();
         const failed: JobMultipartUpload[] = [];
         for (const upload of uploads) {
             try {
@@ -1031,22 +1139,22 @@ export class JobManager {
         void tracked.finally(() => this.inFlight.delete(tracked));
     }
 
-    private handle(error: unknown, context: string): void {
+    private handle(error: unknown, context: string, jobId?: string): void {
         if (error instanceof LeaderFenceError) {
             if (this.running) {
                 this.options.onFenced?.();
             }
             return;
         }
-        this.report(error, context);
+        this.report(error, context, jobId);
     }
 
-    private report(error: unknown, context: string): void {
+    private report(error: unknown, context: string, jobId?: string): void {
         if (this.controller.signal.aborted && !this.running) {
             return;
         }
         if (this.options.onError) {
-            this.options.onError(error, context);
+            this.options.onError(error, context, jobId);
         } else {
             console.warn(`Planet job manager (${context}): ${errorMessage(error)}`);
         }

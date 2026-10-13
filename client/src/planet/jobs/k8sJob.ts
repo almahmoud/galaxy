@@ -34,6 +34,8 @@ export const LABEL_JOB_ID = "planet.dev/job-id";
 export const LABEL_ATTEMPT = "planet.dev/attempt";
 export const LABEL_KIND = "planet.dev/kind";
 export const SPEC_HASH_ANNOTATION = "planet.dev/spec-sha256";
+/** The `dispatch_id` of the dispatch record the Job was created from. */
+export const DISPATCH_ID_ANNOTATION = "planet.dev/dispatch-id";
 
 export const STAGE_IN_CONTAINER = "stage-in";
 export const TOOL_CONTAINER = "tool";
@@ -87,9 +89,15 @@ export function instanceSelector(instanceId: string): string {
     return `${LABEL_INSTANCE}=${instanceId}`;
 }
 
-/** The planet-runtime image the settings name, or {@link DEFAULT_RUNTIME_IMAGE}. */
-export function runtimeImage(cluster: Pick<ClusterSettings, "runtime_image">): string {
-    return cluster.runtime_image.trim() || DEFAULT_RUNTIME_IMAGE;
+/**
+ * The planet-runtime image of job pods: the one the settings name, else this build's image (`runtime.json`), else
+ * {@link DEFAULT_RUNTIME_IMAGE}.
+ */
+export function runtimeImage(
+    cluster: Pick<ClusterSettings, "runtime_image">,
+    buildImage: string | null = null,
+): string {
+    return cluster.runtime_image.trim() || buildImage || DEFAULT_RUNTIME_IMAGE;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -165,9 +173,18 @@ export interface JobSpecInput {
     attempt: number;
     plan: Pick<
         DispatchPlan,
-        "kind" | "manifestKey" | "manifestUrl" | "deadlineSeconds" | "walltimeSeconds" | "toolImage" | "resources"
+        | "kind"
+        | "dispatchId"
+        | "manifestKey"
+        | "manifestUrl"
+        | "deadlineSeconds"
+        | "walltimeSeconds"
+        | "toolImage"
+        | "resources"
     >;
     cluster: ClusterSettings;
+    /** This build's runtime image, used when the settings name none. */
+    buildRuntimeImage?: string | null;
 }
 
 function env(name: string, value: string | number): EnvVar {
@@ -211,7 +228,13 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
     if (!plan.manifestUrl) {
         throw new JobSpecError("The dispatch plan has no manifest URL.");
     }
-    const runtime = checkImage(runtimeImage(cluster), "runtime image setting");
+    if (!/^[0-9a-f]{16,64}$/.test(plan.dispatchId)) {
+        throw new JobSpecError("The dispatch plan has no valid dispatch id.");
+    }
+    const runtime = checkImage(
+        runtimeImage(cluster, input.buildRuntimeImage),
+        cluster.runtime_image.trim() ? "runtime image setting" : "build's runtime image",
+    );
     const scratch = requireQuantity(plan.resources.scratch, "scratch size");
     const userNamespaces = cluster.user_namespaces;
 
@@ -343,7 +366,7 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
     const job: Job = {
         apiVersion: "batch/v1",
         kind: "Job",
-        metadata: { name, labels, annotations: {} },
+        metadata: { name, labels, annotations: { [DISPATCH_ID_ANNOTATION]: plan.dispatchId } },
         spec: {
             backoffLimit: 0,
             activeDeadlineSeconds: deadlineSeconds,
@@ -378,7 +401,10 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
             },
         },
     };
-    job.metadata.annotations = { [SPEC_HASH_ANNOTATION]: await specHash(job, plan.manifestKey) };
+    job.metadata.annotations = {
+        ...job.metadata.annotations,
+        [SPEC_HASH_ANNOTATION]: await specHash(job, plan.manifestKey),
+    };
     return job;
 }
 
@@ -398,7 +424,8 @@ function canonicalJson(value: unknown): string {
 
 /**
  * SHA-256 of a Job spec without its spec-hash annotation and with the presigned manifest URL replaced by the
- * manifest's key: two dispatches of the same attempt with the same settings hash alike although their URLs differ.
+ * manifest's key, which is the attempt's own (`jobs/<job>/a<attempt>/manifest.json`). The dispatch-id annotation is
+ * part of the hash, so only the dispatch that created a Job hashes like it.
  */
 export async function specHash(job: Job, manifestKey: string): Promise<string> {
     const copy = JSON.parse(JSON.stringify(job)) as Job;

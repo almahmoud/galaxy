@@ -1,10 +1,10 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { leader, leaderFence } from "@/planet/db";
+import { jobs, leader, leaderFence, LeaderFenceError } from "@/planet/db";
 
 import { LeaderElection, STALE_MS } from "../leader";
-import { Bus, FakeLocks, resetDb, waitFor } from "./fakes";
+import { Bus, FakeLocks, resetDb, seedHistory, seedJob, waitFor } from "./fakes";
 
 interface Tab {
     election: LeaderElection;
@@ -152,5 +152,32 @@ describe("leader election", () => {
         expect(a.demoted).toBe(1);
         expect(a.led).toEqual([1, 3]);
         expect(a.election.epoch).toBe(3);
+    });
+
+    it("fences off a demoted tab's job writes until it leads again", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const locks = new FakeLocks();
+        const bus = new Bus();
+        const clock = { now: 1_000 };
+        const a = tab(locks, bus, "a", clock);
+        a.election.start();
+        await vi.waitFor(() => expect(a.led).toEqual([1]), UNTIL);
+        await jobs.update(job.id, { info: "while leading" });
+
+        // Stopping leaves the epoch in place; the fence must still refuse writes of a manager that keeps going.
+        await a.election.stop();
+        expect(a.demoted).toBe(1);
+        expect(await leader.currentEpoch()).toBe(1);
+        expect(leaderFence()).not.toBeNull();
+        await expect(jobs.update(job.id, { info: "after demotion" })).rejects.toBeInstanceOf(LeaderFenceError);
+        await expect(leader.assertCurrent()).rejects.toBeInstanceOf(LeaderFenceError);
+        expect((await jobs.get(job.id))?.info).toBe("while leading");
+
+        a.election.start();
+        await vi.waitFor(() => expect(a.led).toEqual([1, 2]), UNTIL);
+        expect(leaderFence()).toBe(2);
+        await jobs.update(job.id, { info: "leading again" });
+        expect((await jobs.get(job.id))?.info).toBe("leading again");
     });
 });

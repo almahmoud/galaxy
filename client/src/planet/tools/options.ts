@@ -19,6 +19,7 @@ import {
     isDatasetItem,
 } from "./history";
 import { pyStr, stringAsBool } from "./python";
+import { compiledPattern, pythonMatch } from "./regex";
 
 /** Galaxy's `ParameterOption`. */
 export interface ParameterOption {
@@ -138,17 +139,13 @@ function applyFilter(
         }
         case "regexp": {
             const index = column();
-            let pattern: RegExp;
-            try {
-                pattern = new RegExp(attributeString(filter, "value") ?? "", "y");
-            } catch {
-                return rows;
-            }
+            const pattern = compiledPattern(attributeString(filter, "value") ?? "");
+            // Rows the pattern cannot decide are left out: no option the tool may refuse is offered.
             return index === undefined
                 ? rows
                 : rows.filter((row) => {
-                      pattern.lastIndex = 0;
-                      return keep === pattern.test(field(row, index) ?? "");
+                      const matched = pythonMatch(pattern, field(row, index) ?? "");
+                      return matched !== undefined && keep === matched;
                   });
         }
         case "data_meta": {

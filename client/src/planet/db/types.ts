@@ -274,7 +274,11 @@ export interface JobRecord {
     info: string | null;
     create_time: string;
     update_time: string;
-    /** Tool state as submitted (flat keys, Galaxy's `Job.params`). */
+    /**
+     * Tool state in Galaxy's basic form, keyed by top-level input name: conditionals carry `__current_case__`,
+     * repeats `__index__`, data values are `{src, id}` (lists for multiple inputs, null when empty); `dbkey` and
+     * `__input_ext` are included. Upload jobs keep the fetch request in `request` instead.
+     */
     params: Record<string, unknown>;
     /** The original submit payload, kept for rerun. */
     request: unknown;
@@ -393,6 +397,27 @@ export interface LeaderRecord {
     visible: boolean;
 }
 
+/**
+ * What the leading tab reports about job processing (`kv` key `leader_status`), for status pages. Written by the
+ * leader with each heartbeat and when its state or last error changes, and only while its epoch is current.
+ */
+export interface LeaderStatusRecord {
+    epoch: number;
+    /** Random id of the leading tab. */
+    tab_id: string;
+    /** When the leader last wrote this record, in milliseconds since the epoch. */
+    heartbeat: number;
+    /**
+     * `blocked`: jobs cannot be processed (settings incomplete, cluster unreachable), see `blocked_reason`;
+     * `active`: jobs are queued or running or work is pending in the outbox; `idle`: nothing to do.
+     */
+    state: "idle" | "active" | "blocked";
+    blocked_reason: string | null;
+    /** The last error job processing ran into; `time` in milliseconds since the epoch. */
+    last_error: { message: string; job_id: string | null; time: number } | null;
+    counts: { queued: number; running: number };
+}
+
 /** A resolved tool container, cached by its requirements (`kv` keys `container:<requirements>`). */
 export interface ContainerCacheEntry {
     image: string;
@@ -408,6 +433,7 @@ export interface KvValues {
     /** Incremented by each tab that becomes job leader. */
     leader_epoch: number;
     leader: LeaderRecord;
+    leader_status: LeaderStatusRecord;
     /** The user's preferences (Galaxy's `User.preferences`): string values, JSON-encoded where Galaxy encodes them. */
     preferences: Record<string, string>;
     [counter: `counter:${string}`]: number;

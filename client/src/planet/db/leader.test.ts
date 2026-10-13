@@ -10,6 +10,7 @@ import {
     leader,
     LeaderFenceError,
     outbox,
+    revokeLeaderFence,
     setLeaderFence,
     settings,
     withTransaction,
@@ -67,6 +68,48 @@ describe("leader fence", () => {
     });
 });
 
+describe("revoked leader fence", () => {
+    it("refuses every job write until a new epoch is installed", async () => {
+        const job = await jobs.create({ tool_id: "cat1", tool_version: "1" });
+        setLeaderFence(await leader.claimEpoch());
+        revokeLeaderFence();
+        await expect(jobs.update(job.id, { info: "after demotion" })).rejects.toThrow(
+            "This tab no longer leads job processing",
+        );
+        await expect(leader.assertCurrent()).rejects.toBeInstanceOf(LeaderFenceError);
+        setLeaderFence(await leader.claimEpoch());
+        await jobs.update(job.id, { info: "leading again" });
+        expect((await jobs.get(job.id))?.info).toBe("leading again");
+    });
+});
+
+describe("leader status", () => {
+    it("stores the status of the current epoch only", async () => {
+        const epoch = await leader.claimEpoch();
+        const status = {
+            epoch,
+            tab_id: "t1",
+            heartbeat: 5,
+            state: "idle" as const,
+            blocked_reason: null,
+            last_error: null,
+            counts: { queued: 0, running: 0 },
+        };
+        expect(await leader.writeStatus(status)).toBe(true);
+        expect(await leader.readStatus()).toEqual(status);
+        await leader.claimEpoch();
+        expect(await leader.writeStatus({ ...status, heartbeat: 6 })).toBe(false);
+        expect(await leader.readStatus()).toEqual(status);
+    });
+
+    it("counts jobs by state", async () => {
+        const first = await jobs.create({ tool_id: "cat1", tool_version: "1" });
+        await jobs.create({ tool_id: "cat1", tool_version: "1" });
+        await jobs.update(first.id, { state: "running" });
+        expect(await jobs.countByState(["new", "queued", "running"])).toEqual({ new: 1, queued: 0, running: 1 });
+    });
+});
+
 describe("outbox and console helpers", () => {
     it("postpones entries without counting attempts and removes a job's entries by kind", async () => {
         const dispatch = await outbox.enqueue({ kind: "dispatch", job_id: "j1" });
@@ -76,6 +119,13 @@ describe("outbox and console helpers", () => {
         expect(await outbox.postpone("missing", "2999-01-01T00:00:00.000000")).toBeUndefined();
         await outbox.removeForJob("j1", "dispatch");
         expect((await outbox.listForJob("j1")).map((entry) => entry.kind)).toEqual(["cancel"]);
+    });
+
+    it("replaces an entry's payload", async () => {
+        const dispatch = await outbox.enqueue({ kind: "dispatch", job_id: "j1", payload: { attempt: 1 } });
+        expect(await outbox.setPayload(dispatch.id, { attempt: 2 })).toMatchObject({ payload: { attempt: 2 } });
+        expect((await outbox.get(dispatch.id))?.payload).toEqual({ attempt: 2 });
+        expect(await outbox.setPayload("missing", {})).toBeUndefined();
     });
 
     it("records console requests", async () => {

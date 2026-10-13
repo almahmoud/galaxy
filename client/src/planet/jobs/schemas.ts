@@ -333,6 +333,15 @@ const string: Check = (value, path) => {
     }
 };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A dataset UUID as the browser allocates them; keys are built from it. */
+const uuid: Check = (value, path) => {
+    if (typeof value !== "string" || !UUID.test(value)) {
+        fail(path, "expected a dataset UUID");
+    }
+};
+
 const boolean: Check = (value, path) => {
     if (typeof value !== "boolean") {
         fail(path, "expected a boolean");
@@ -423,8 +432,31 @@ function allOf(...checks: Check[]): Check {
     return (value, path) => checks.forEach((check) => check(value, path));
 }
 
+/** Pod documents nest no deeper than this (metadata values included). */
+export const MAX_DOCUMENT_DEPTH = 64;
+
+/** Fails when arrays and objects nest deeper than `limit`; iterative, so deep input cannot exhaust the stack. */
+function checkDepth(value: unknown, limit: number): void {
+    const pending: [unknown, number][] = [[value, 0]];
+    while (pending.length) {
+        const [item, depth] = pending.pop()!;
+        if (typeof item !== "object" || item === null) {
+            continue;
+        }
+        if (depth >= limit) {
+            fail("", `nested deeper than ${limit} levels`);
+        }
+        for (const child of Object.values(item)) {
+            if (typeof child === "object" && child !== null) {
+                pending.push([child, depth + 1]);
+            }
+        }
+    }
+}
+
 function parse<T>(document: string, check: Check, value: unknown): T {
     try {
+        checkDepth(value, MAX_DOCUMENT_DEPTH);
         check(value, "");
     } catch (error) {
         if (error instanceof Mismatch) {
@@ -464,7 +496,7 @@ const extraFileEntry = objectOf(
 
 const datasetRecord = objectOf(
     {
-        uuid: string,
+        uuid,
         state: oneOf("ok", "error", "failed_metadata", "empty"),
         name: nullable(string),
         ext: string,

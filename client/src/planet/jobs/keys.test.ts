@@ -8,6 +8,7 @@ import {
     extraObjectKey,
     jobObjectKeys,
     jobTimeLimits,
+    legacyJobObjectKeys,
     MAX_DEADLINE_SECONDS,
     metadataFileKey,
     toolArchiveKey,
@@ -17,16 +18,22 @@ import {
 const UUID = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
 
 describe("bucket keys", () => {
-    it("lays out a job's objects", () => {
-        expect(jobObjectKeys("f2db41a1fa8ec1d3")).toEqual({
-            manifest: "jobs/f2db41a1fa8ec1d3/manifest.json",
-            prepare: "jobs/f2db41a1fa8ec1d3/prepare.json",
+    it("lays out the objects of each attempt of a job", () => {
+        expect(jobObjectKeys("f2db41a1fa8ec1d3", 2)).toEqual({
+            manifest: "jobs/f2db41a1fa8ec1d3/a2/manifest.json",
+            prepare: "jobs/f2db41a1fa8ec1d3/a2/prepare.json",
+            results: "jobs/f2db41a1fa8ec1d3/a2/results.json",
+            stdout: "jobs/f2db41a1fa8ec1d3/a2/stdout",
+            stderr: "jobs/f2db41a1fa8ec1d3/a2/stderr",
+            dispatch: "jobs/f2db41a1fa8ec1d3/a2/dispatch.json",
+        });
+        expect(legacyJobObjectKeys("f2db41a1fa8ec1d3")).toMatchObject({
             results: "jobs/f2db41a1fa8ec1d3/results.json",
-            stdout: "jobs/f2db41a1fa8ec1d3/stdout",
-            stderr: "jobs/f2db41a1fa8ec1d3/stderr",
             dispatch: "jobs/f2db41a1fa8ec1d3/dispatch.json",
         });
-        expect(() => jobObjectKeys("../other")).toThrow(RangeError);
+        expect(() => jobObjectKeys("../other", 1)).toThrow(RangeError);
+        expect(() => jobObjectKeys("f2db41a1fa8ec1d3", 0)).toThrow(RangeError);
+        expect(() => jobObjectKeys("f2db41a1fa8ec1d3", 1.5)).toThrow(RangeError);
     });
 
     it("lays out a dataset's objects", () => {

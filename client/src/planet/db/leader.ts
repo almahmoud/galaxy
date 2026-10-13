@@ -2,7 +2,7 @@
 
 import { checkLeaderFence, leaderFence } from "./fence";
 import { type ReadTx, useRead, useWrite, type WriteTx } from "./tx";
-import type { LeaderRecord } from "./types";
+import type { LeaderRecord, LeaderStatusRecord } from "./types";
 
 /** Starts a new leader epoch and returns it. Called by a tab that has just become the leader. */
 export function claimEpoch(tx?: WriteTx): Promise<number> {
@@ -61,5 +61,29 @@ export function resign(epoch: number, tx?: WriteTx): Promise<void> {
         if (record?.epoch === epoch) {
             await store.delete("leader");
         }
+    });
+}
+
+/** Returns the leader's last status record, or undefined. */
+export function readStatus(tx?: ReadTx): Promise<LeaderStatusRecord | undefined> {
+    return useRead(
+        tx,
+        ["kv"],
+        async (t) => (await t.store("kv").get("leader_status")) as LeaderStatusRecord | undefined,
+    );
+}
+
+/**
+ * Stores the leader's status if its epoch is still the current one. Returns false, writing nothing, when another
+ * tab has claimed a newer epoch.
+ */
+export function writeStatus(record: LeaderStatusRecord, tx?: WriteTx): Promise<boolean> {
+    return useWrite(tx, ["kv"], async (t) => {
+        const store = t.store("kv");
+        if ((await store.get("leader_epoch")) !== record.epoch) {
+            return false;
+        }
+        await store.put(record, "leader_status");
+        return true;
     });
 }

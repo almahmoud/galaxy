@@ -8,7 +8,7 @@ export * as collections from "./collections";
 export { bootstrap, closeDb, getDb } from "./connection";
 export * as contents from "./contents";
 export * as datasets from "./datasets";
-export { leaderFence, LeaderFenceError, setLeaderFence } from "./fence";
+export { leaderFence, LeaderFenceError, revokeLeaderFence, setLeaderFence } from "./fence";
 export * as hdas from "./hdas";
 export * as histories from "./histories";
 export * as jobs from "./jobs";

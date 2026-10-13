@@ -157,3 +157,26 @@ describe("parseResults", () => {
         );
     });
 });
+
+describe("parseResults limits", () => {
+    it("rejects dataset UUIDs the browser could not have allocated", () => {
+        for (const uuid of ["../../jobs/x", "1B4E28BA-2FA1-41D2-883F-0016D3CCA427", ""]) {
+            const document = resultsDocument(JOB, { outputs: { out_file: datasetResult(uuid) } });
+            expect(() => parseResults(document)).toThrow("results.json is invalid at /outputs/out_file/uuid");
+        }
+        const discovered = resultsDocument(JOB, { discovered: [discoveredResult("slot", 0)] });
+        expect(() => parseResults(discovered)).toThrow("/discovered/0/uuid");
+    });
+
+    it("rejects documents nested deeper than the limit, without exhausting the stack", () => {
+        let deep: unknown = "leaf";
+        for (let level = 0; level < 100_000; level++) {
+            deep = [deep];
+        }
+        const document = resultsDocument(JOB, {
+            outputs: { out_file: datasetResult(UUID, { metadata: { nested: deep } }) },
+        });
+        expect(() => parseResults(document)).toThrow(ProtocolError);
+        expect(() => parsePrepare({ ...prepareDocument(JOB), environment: deep })).toThrow("nested deeper than 64");
+    });
+});

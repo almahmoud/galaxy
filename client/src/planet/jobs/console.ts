@@ -9,6 +9,8 @@
 import { JOB_STORES, jobs, withTransaction } from "@/planet/db";
 import type { KubeClient } from "@/planet/k8s";
 
+import { redactSignedUrls } from "./redact";
+
 export const CONSOLE_POLL_INTERVAL_MS = 5000;
 /** A console request keeps the output current for this long. */
 export const CONSOLE_REQUEST_TTL_MS = 30_000;
@@ -25,6 +27,8 @@ interface Tail {
     pod: string;
     /** Normalized timestamp of the last line read. */
     last: string | null;
+    /** `sinceTime` of the next request (whole seconds); null before the first lines arrived. */
+    since: string | null;
     text: string;
     polled: number;
 }
@@ -45,11 +49,27 @@ export function appendOutput(text: string, addition: string, limit = CONSOLE_MAX
         : text + addition.slice(0, Math.max(0, room)) + CONSOLE_TRUNCATED_NOTE;
 }
 
-/** Splits a `timestamps=true` log into lines after `after` (exclusive) and the newest timestamp. */
-export function newLines(log: string, after: string | null): { lines: string[]; last: string | null } {
+/** The second after the one `stamp` (a normalized timestamp) falls in, as an RFC 3339 `sinceTime`. */
+function nextSecond(stamp: string): string {
+    return `${new Date(Date.parse(`${stamp.slice(0, 19)}Z`) + 1000).toISOString().slice(0, 19)}Z`;
+}
+
+/**
+ * Splits a `timestamps=true` log into lines after `after` (exclusive) and the newest timestamp. With `truncated`
+ * (the response reached `limitBytes`), the last line may be cut short, so it is left for the next request.
+ */
+export function newLines(
+    log: string,
+    after: string | null,
+    truncated = false,
+): { lines: string[]; last: string | null } {
     const lines: string[] = [];
     let last = after;
-    for (const line of log.split("\n")) {
+    const all = log.split("\n");
+    if (truncated) {
+        all.pop();
+    }
+    for (const line of all) {
         const match = TIMESTAMPED_LINE.exec(line);
         if (!match) {
             continue;
@@ -87,7 +107,7 @@ export class ConsoleTails {
     async poll(jobId: string, pod: string, container: string): Promise<void> {
         let tail = this.tails.get(jobId);
         if (!tail || tail.pod !== pod) {
-            tail = { pod, last: null, text: "", polled: 0 };
+            tail = { pod, last: null, since: null, text: "", polled: 0 };
             this.tails.set(jobId, tail);
         }
         if (this.now() - tail.polled < CONSOLE_POLL_INTERVAL_MS || tail.text.endsWith(CONSOLE_TRUNCATED_NOTE)) {
@@ -98,14 +118,22 @@ export class ConsoleTails {
             container,
             timestamps: true,
             limitBytes: CONSOLE_CHUNK_BYTES,
-            ...(tail.last ? { sinceTime: `${tail.last.slice(0, 19)}Z` } : { tailLines: FIRST_TAIL_LINES }),
+            ...(tail.since ? { sinceTime: tail.since } : { tailLines: FIRST_TAIL_LINES }),
         });
-        const { lines, last } = newLines(log, tail.last);
+        const full = new TextEncoder().encode(log).byteLength >= CONSOLE_CHUNK_BYTES;
+        const { lines, last } = newLines(log, tail.last, full);
         if (!lines.length) {
+            if (full && tail.last) {
+                // More than a response of lines share the second `sinceTime` names: skip the rest of that second
+                // rather than read the same lines forever. The final streams have every line.
+                tail.since = nextSecond(tail.last);
+                tail.last = `${tail.last.slice(0, 19)}.999999999Z`;
+            }
             return;
         }
         tail.last = last;
-        tail.text = appendOutput(tail.text, `${lines.join("\n")}\n`);
+        tail.since = last ? `${last.slice(0, 19)}Z` : null;
+        tail.text = appendOutput(tail.text, redactSignedUrls(`${lines.join("\n")}\n`));
         const text = tail.text;
         // The final streams written at ingest must not be replaced by live output.
         await withTransaction(JOB_STORES, "readwrite", async (t) => {

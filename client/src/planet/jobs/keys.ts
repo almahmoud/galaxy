@@ -10,12 +10,13 @@ import { MAX_PRESIGN_EXPIRES_SECONDS } from "@/planet/s3";
 const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /** Characters of tool ids and versions (planet/docs/tool-bundle.md), `/` separating segments. */
 const TOOL_SEGMENT_PATTERN = /^[A-Za-z0-9._+@~-]+$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Dataset UUIDs as the browser writes them (lowercase, hyphenated). */
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Site directory the build publishes tool archives under (`source.repo_tar.path` is relative to it). */
 export const TOOL_REPOS_ROOT = "/static/planet/toolrepos/";
 
-/** Objects of one job. `dispatch` is the browser's own record of what it created for the current attempt. */
+/** Objects of one attempt of a job. `dispatch` is the browser's own record of what it created for the attempt. */
 export interface JobObjectKeys {
     manifest: string;
     prepare: string;
@@ -25,11 +26,27 @@ export interface JobObjectKeys {
     dispatch: string;
 }
 
-export function jobObjectKeys(jobId: string): JobObjectKeys {
+/**
+ * Objects of one attempt of a job, under `jobs/<job>/a<attempt>/`. Each attempt has its own objects, so a later
+ * dispatch never rewrites what the pod of an earlier attempt reads or writes.
+ */
+export function jobObjectKeys(jobId: string, attempt: number): JobObjectKeys {
+    if (!Number.isSafeInteger(attempt) || attempt < 1) {
+        throw new RangeError(`Invalid attempt ${JSON.stringify(attempt)}`);
+    }
+    return keysUnder(jobId, `a${attempt}/`);
+}
+
+/** Objects of jobs dispatched before attempts had their own keys (`jobs/<job>/`); read at ingest only. */
+export function legacyJobObjectKeys(jobId: string): JobObjectKeys {
+    return keysUnder(jobId, "");
+}
+
+function keysUnder(jobId: string, attemptDirectory: string): JobObjectKeys {
     if (!JOB_ID_PATTERN.test(jobId)) {
         throw new RangeError(`Invalid job id ${JSON.stringify(jobId)}`);
     }
-    const base = `jobs/${jobId}/`;
+    const base = `jobs/${jobId}/${attemptDirectory}`;
     return {
         manifest: `${base}manifest.json`,
         prepare: `${base}prepare.json`,

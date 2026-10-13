@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { collections, datasets, hdas, histories, jobs } from "@/planet/db";
+import { collections, datasets, hdas, histories, type JobRecord, jobs } from "@/planet/db";
 
 import { datasetResult, discoveredResult, prepareDocument, resultsDocument } from "./__fixtures__/results";
 import {
@@ -10,6 +10,7 @@ import {
     addOutput,
     addPendingCollection,
     datamashBundle,
+    markDispatched,
     newHistory,
     resetDb,
     schemaErrors,
@@ -18,16 +19,21 @@ import {
     withArchive,
 } from "./__fixtures__/setup";
 import {
+    COMMAND_LINE_LIMIT,
     coreMetrics,
     FAILURE_MESSAGES,
     ingestFailure,
     ingestResults,
+    JOB_MESSAGE_LIMIT,
+    MAX_JOB_MESSAGES,
+    PEEK_LIMIT,
     readPrepare,
+    SHORT_TEXT_LIMIT,
     shrinkStream,
     STREAM_LIMIT,
 } from "./ingest";
 import { toolArchiveStaticPath } from "./keys";
-import { DATA_FETCH_TOOL_ID, prepareDispatch, SET_METADATA_TOOL_ID } from "./manifest";
+import { DATA_FETCH_TOOL_ID, MAX_METADATA_VALUE_SIZE, prepareDispatch, SET_METADATA_TOOL_ID } from "./manifest";
 import type { Manifest, ResultsDocument } from "./schemas";
 import { ProtocolError } from "./schemas";
 
@@ -62,13 +68,19 @@ async function dispatchedJob(options: { inputSize?: number; outputs?: string[]; 
     const deps = testDeps([archived], {}, { [toolArchiveStaticPath(archived.source!.repo_tar!.path)]: tar });
     const plan = await prepareDispatch(await jobs.getOrThrow(job.id), deps);
     const manifest = deps.s3.json<Manifest>(plan.manifestKey);
-    return { historyId, input, outputs, split, job: await jobs.getOrThrow(job.id), deps, plan, manifest };
+    return { historyId, input, outputs, split, job: await markDispatched(job.id, plan), deps, plan, manifest };
+}
+
+/** Dispatches a job through `prepareDispatch` and records the dispatch; returns the job. */
+async function dispatch(job: JobRecord, deps: ReturnType<typeof testDeps>) {
+    const plan = await prepareDispatch(job, deps);
+    return { plan, job: await markDispatched(job.id, plan) };
 }
 
 function writeResults(deps: ReturnType<typeof testDeps>, results: ResultsDocument): void {
     const document = JSON.parse(JSON.stringify(results));
     expect(schemaErrors(document, "results")).toEqual([]);
-    deps.s3.put(`jobs/${results.job_id}/results.json`, document);
+    deps.s3.put(`jobs/${results.job_id}/a${results.attempt}/results.json`, document);
 }
 
 describe("readPrepare", () => {
@@ -81,7 +93,7 @@ describe("readPrepare", () => {
         const { job, deps, outputs } = await dispatchedJob();
         const prepare = prepareDocument(job.id);
         expect(schemaErrors(prepare, "prepare")).toEqual([]);
-        deps.s3.put(`jobs/${job.id}/prepare.json`, prepare);
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, prepare);
 
         expect(await readPrepare(job, deps)).toEqual(prepare);
         const hda = await hdas.getOrThrow(outputs[0]!.hda.id);
@@ -96,7 +108,7 @@ describe("readPrepare", () => {
     it("removes filtered outputs as Galaxy never creates them", async () => {
         const { job, deps, outputs } = await dispatchedJob({ outputs: ["out_file", "log"] });
         deps.s3.put(
-            `jobs/${job.id}/prepare.json`,
+            `jobs/${job.id}/a1/prepare.json`,
             prepareDocument(job.id, {
                 outputs: {
                     out_file: { filtered: false, format: "tabular", label: "Datamash on data 1" },
@@ -114,7 +126,7 @@ describe("readPrepare", () => {
     it("returns a failed stage-in's document without applying it", async () => {
         const { job, deps } = await dispatchedJob();
         deps.s3.put(
-            `jobs/${job.id}/prepare.json`,
+            `jobs/${job.id}/a1/prepare.json`,
             prepareDocument(job.id, {
                 state: "error",
                 command_line: undefined,
@@ -128,11 +140,11 @@ describe("readPrepare", () => {
 
     it("ignores documents of other attempts and rejects malformed ones", async () => {
         const { job, deps } = await dispatchedJob();
-        deps.s3.put(`jobs/${job.id}/prepare.json`, prepareDocument(job.id, { attempt: 7 }));
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, prepareDocument(job.id, { attempt: 7 }));
         expect(await readPrepare(job, deps)).toBeNull();
-        deps.s3.put(`jobs/${job.id}/prepare.json`, { ...prepareDocument(job.id), errors: "none" });
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, { ...prepareDocument(job.id), errors: "none" });
         await expect(readPrepare(job, deps)).rejects.toThrow(ProtocolError);
-        deps.s3.put(`jobs/${job.id}/prepare.json`, "{not json");
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, "{not json");
         await expect(readPrepare(job, deps)).rejects.toThrow(ProtocolError);
     });
 });
@@ -150,7 +162,7 @@ describe("ingestResults", () => {
         const copy = await hdas.copy(output.hda.id, copyHistory);
         const [slot0, slot1, slot2] = manifest.slots!.map((slot) => slot.uuid);
         const counterBefore = (await histories.getOrThrow(historyId)).hid_counter;
-        deps.s3.put(`jobs/${job.id}/prepare.json`, prepareDocument(job.id));
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, prepareDocument(job.id));
         writeResults(
             deps,
             resultsDocument(job.id, {
@@ -464,9 +476,9 @@ describe("ingestResults", () => {
             resultsDocument(job.id, { attempt: 3, outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) } }),
         );
         expect(await ingestResults(job, deps)).toBeNull();
-        deps.s3.put(`jobs/${job.id}/results.json`, resultsDocument("0123456789abcdef"));
+        deps.s3.put(`jobs/${job.id}/a1/results.json`, resultsDocument("0123456789abcdef"));
         await expect(ingestResults(job, deps)).rejects.toThrow(/belongs to job/);
-        deps.s3.put(`jobs/${job.id}/results.json`, { ...resultsDocument(job.id), state: "finished" });
+        deps.s3.put(`jobs/${job.id}/a1/results.json`, { ...resultsDocument(job.id), state: "finished" });
         await expect(ingestResults(job, deps)).rejects.toThrow(ProtocolError);
     });
 
@@ -491,7 +503,7 @@ describe("ingestResults", () => {
             inputs: [{ name: "input1", src: "hda", id: target.hda.id }],
         });
         const deps = testDeps();
-        await prepareDispatch(job, deps);
+        const { job: dispatched } = await dispatch(job, deps);
         writeResults(
             deps,
             resultsDocument(job.id, {
@@ -509,7 +521,7 @@ describe("ingestResults", () => {
                 },
             }),
         );
-        expect(await ingestResults(job, deps)).toEqual({
+        expect(await ingestResults(dispatched, deps)).toEqual({
             state: "ok",
             datasetIds: [target.dataset.id],
             hdaIds: [target.hda.id],
@@ -535,7 +547,7 @@ describe("ingestResults", () => {
             inputs: [{ name: "input1", src: "hda", id: target.hda.id }],
         });
         const deps = testDeps();
-        await prepareDispatch(job, deps);
+        const { job: dispatched } = await dispatch(job, deps);
         writeResults(
             deps,
             resultsDocument(job.id, {
@@ -543,7 +555,7 @@ describe("ingestResults", () => {
                 outputs: { input1: datasetResult(target.dataset.uuid, { state: "failed_metadata" }) },
             }),
         );
-        await ingestResults(job, deps);
+        await ingestResults(dispatched, deps);
         expect((await hdas.getWithDatasetOrThrow(target.hda.id)).state).toBe("failed_metadata");
     });
 
@@ -571,7 +583,8 @@ describe("ingestResults", () => {
             output_collections: [{ name: "output1", src: "hdca", id: pair.id }],
         });
         const deps = testDeps();
-        const manifest = deps.s3.json<Manifest>((await prepareDispatch(job, deps)).manifestKey);
+        const { plan, job: dispatched } = await dispatch(job, deps);
+        const manifest = deps.s3.json<Manifest>(plan.manifestKey);
         const [first, second] = manifest.slots!.map((slot) => slot.uuid);
         writeResults(
             deps,
@@ -604,7 +617,7 @@ describe("ingestResults", () => {
                 },
             }),
         );
-        await ingestResults(job, deps);
+        await ingestResults(dispatched, deps);
         const bed = await hdas.getWithDatasetOrThrow(upload.hda.id);
         expect(bed.hda).toMatchObject({ name: "a.bed", extension: "bed", info: "uploaded bed file" });
         expect(bed.dataset.state).toBe("ok");
@@ -612,6 +625,217 @@ describe("ingestResults", () => {
         const elements = await collections.elements(collection!.collection.id);
         expect(elements.map((element) => element.element_identifier)).toEqual(["first", "second"]);
         expect(collection!.collection.populated_state).toBe("ok");
+    });
+});
+
+describe("ingestResults across attempts and layouts", () => {
+    it("refuses results of an attempt whose dispatch record is missing", async () => {
+        const { job, deps, outputs } = await dispatchedJob();
+        deps.s3.objects.delete(`jobs/${job.id}/a1/dispatch.json`);
+        expect(await ingestResults(job, deps)).toBeNull();
+        writeResults(deps, resultsDocument(job.id, { outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) } }));
+        await expect(ingestResults(job, deps)).rejects.toThrow("dispatch.json is invalid");
+        expect((await jobs.getOrThrow(job.id)).state).toBe("queued");
+    });
+
+    it("ignores jobs that were never dispatched", async () => {
+        const { job, deps, outputs } = await dispatchedJob();
+        writeResults(deps, resultsDocument(job.id, { outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) } }));
+        expect(await ingestResults({ ...job, k8s: null }, deps)).toBeNull();
+    });
+
+    it("reads the objects of jobs dispatched before attempts had their own keys", async () => {
+        const { job, deps, outputs } = await dispatchedJob();
+        const record = deps.s3.json<Record<string, unknown>>(`jobs/${job.id}/a1/dispatch.json`);
+        delete record.dispatch_id;
+        deps.s3.objects.delete(`jobs/${job.id}/a1/dispatch.json`);
+        deps.s3.put(`jobs/${job.id}/dispatch.json`, record);
+        deps.s3.put(`jobs/${job.id}/prepare.json`, prepareDocument(job.id));
+        deps.s3.put(
+            `jobs/${job.id}/results.json`,
+            resultsDocument(job.id, { outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) } }),
+        );
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        expect(await hdas.getOrThrow(outputs[0]!.hda.id)).toMatchObject({
+            name: "Datamash on data 1",
+            extension: "tabular",
+        });
+    });
+
+    it("rejects dataset UUIDs that are not UUIDs before building keys from them", async () => {
+        const { job, deps } = await dispatchedJob();
+        deps.s3.put(
+            `jobs/${job.id}/a1/results.json`,
+            resultsDocument(job.id, { outputs: { out_file: datasetResult("../../tools/x") } }),
+        );
+        await expect(ingestResults(job, deps)).rejects.toThrow("results.json is invalid at /outputs/out_file/uuid");
+    });
+});
+
+describe("ingestResults of OOM-killed tools", () => {
+    it("fails the job with Galaxy's memory message when the tool container was OOM-killed", async () => {
+        const { job, deps, outputs, plan, manifest } = await dispatchedJob();
+        const killed = await markDispatched(job.id, plan, { reason: "OOMKilled", exit_code: 137, message: null });
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                state: "error",
+                exit_code: null,
+                termination: "signal",
+                tool_stderr: { text: "Killed\n", size: 7 },
+                job_messages: [{ type: "internal", desc: "The tool was killed.", code_desc: null, error_level: 3 }],
+                outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) },
+                discovered: [discoveredResult(manifest.slots![0]!.uuid, 0, { output: "out_file", designation: "x" })],
+            }),
+        );
+        expect(await ingestResults(killed, deps)).toEqual({
+            state: "error",
+            datasetIds: [outputs[0]!.dataset.id],
+            hdaIds: [outputs[0]!.hda.id],
+        });
+        const stored = await jobs.getOrThrow(job.id);
+        expect(stored).toMatchObject({ state: "error", info: FAILURE_MESSAGES.oom, tool_stderr: "Killed\n" });
+        expect(stored.outputs).toHaveLength(1);
+        expect(stored.job_messages.at(-1)).toEqual({
+            type: "internal",
+            desc: FAILURE_MESSAGES.oom,
+            code_desc: null,
+            error_level: 4,
+        });
+        const output = await hdas.getWithDatasetOrThrow(outputs[0]!.hda.id);
+        expect(output.dataset.state).toBe("error");
+        expect(output.hda).toMatchObject({ blurb: "tool error", info: FAILURE_MESSAGES.oom, extension: "data" });
+    });
+
+    it("keeps a signal without an OOM kill as the pod reported it", async () => {
+        const { job, deps, outputs, plan } = await dispatchedJob();
+        const killed = await markDispatched(job.id, plan, { reason: "Error", exit_code: 137, message: null });
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                state: "error",
+                termination: "signal",
+                job_messages: [{ type: "internal", desc: "The tool was killed.", code_desc: null, error_level: 3 }],
+            }),
+        );
+        await ingestResults(killed, deps);
+        expect((await hdas.getOrThrow(outputs[0]!.hda.id)).info).toBe("The tool was killed.");
+    });
+});
+
+describe("filtered output collections", () => {
+    it("deletes and hides a collection prepare.json filtered, with the outputs of its elements", async () => {
+        const { job, deps, outputs, split } = await dispatchedJob({
+            outputs: ["out_file", "parts|__part__|a"],
+            collection: true,
+        });
+        deps.s3.put(
+            `jobs/${job.id}/a1/prepare.json`,
+            prepareDocument(job.id, {
+                outputs: {
+                    out_file: { filtered: false, format: "tabular", label: "Datamash on data 1" },
+                    parts: { filtered: true, format: null, label: "parts" },
+                },
+            }),
+        );
+        await readPrepare(job, deps);
+        expect(await collections.getHdca(split!.id)).toMatchObject({ deleted: true, visible: false });
+        expect(await hdas.getOrThrow(outputs[1]!.hda.id)).toMatchObject({
+            deleted: true,
+            purged: true,
+            visible: false,
+        });
+        const prepared = await jobs.getOrThrow(job.id);
+        expect(prepared.outputs.map((output) => output.name)).toEqual(["out_file"]);
+        expect(prepared.output_collections).toEqual([]);
+
+        writeResults(deps, resultsDocument(job.id, { outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) } }));
+        expect((await ingestResults(prepared, deps))!.state).toBe("ok");
+    });
+
+    it("applies collections the pod filtered after the tool ran", async () => {
+        const { job, deps, outputs, split } = await dispatchedJob({
+            outputs: ["out_file", "parts|__part__|a"],
+            collection: true,
+        });
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, prepareDocument(job.id));
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                filtered_outputs: ["parts"],
+                outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid) },
+            }),
+        );
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        expect(await collections.getHdca(split!.id)).toMatchObject({ deleted: true, visible: false });
+        expect((await hdas.getWithDatasetOrThrow(outputs[1]!.hda.id)).dataset.state).toBe("discarded");
+        expect((await jobs.getOrThrow(job.id)).output_collections).toEqual([]);
+    });
+});
+
+describe("limits on what pods write", () => {
+    const SIGNED =
+        "https://acct.r2.cloudflarestorage.com/bucket/planet/datasets/x/data?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+        "&X-Amz-Credential=AKIAEXAMPLE%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Signature=" +
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    it("caps peeks, metadata values, names, messages and command lines and removes signed URLs", async () => {
+        const { job, deps, outputs } = await dispatchedJob();
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                command_line: `curl '${SIGNED}' ${"x".repeat(COMMAND_LINE_LIMIT)}`,
+                tool_stdout: { text: `downloading ${SIGNED}\n`, size: 300 },
+                job_messages: Array.from({ length: MAX_JOB_MESSAGES + 20 }, () => ({
+                    type: "regex",
+                    desc: "d".repeat(JOB_MESSAGE_LIMIT * 2),
+                    code_desc: null,
+                    error_level: 2,
+                })),
+                outputs: {
+                    out_file: datasetResult(outputs[0]!.dataset.uuid, {
+                        peek: "p".repeat(PEEK_LIMIT + 10),
+                        info: `fetched ${SIGNED} ${"i".repeat(400)}`,
+                        blurb: "b".repeat(400),
+                        metadata: { columns: 2, huge: "m".repeat(MAX_METADATA_VALUE_SIZE + 1) },
+                    }),
+                },
+            }),
+        );
+        await ingestResults(job, deps);
+        const stored = await jobs.getOrThrow(job.id);
+        expect(stored.command_line!.length).toBeLessThanOrEqual(COMMAND_LINE_LIMIT);
+        expect(stored.command_line).toContain("datasets/x/data?[redacted]'");
+        expect(stored.command_line).not.toContain("AKIAEXAMPLE");
+        expect(stored.tool_stdout).toBe(
+            "downloading https://acct.r2.cloudflarestorage.com/bucket/planet/datasets/x/data?[redacted]\n",
+        );
+        expect(stored.job_messages).toHaveLength(MAX_JOB_MESSAGES);
+        expect((stored.job_messages[0] as { desc: string }).desc).toHaveLength(JOB_MESSAGE_LIMIT);
+        const hda = await hdas.getOrThrow(outputs[0]!.hda.id);
+        expect(hda.peek).toHaveLength(PEEK_LIMIT);
+        expect(hda.info).toHaveLength(SHORT_TEXT_LIMIT);
+        expect(hda.info).not.toContain("0123456789abcdef");
+        expect(hda.blurb).toHaveLength(SHORT_TEXT_LIMIT);
+        expect(hda.metadata).toEqual({ columns: 2 });
+    });
+
+    it("removes signed URLs from the logs and messages of failed pods", async () => {
+        const { job, deps } = await dispatchedJob();
+        await ingestFailure(
+            job,
+            {
+                reason: "stage_in",
+                message: `Preparing the job failed: GET ${SIGNED} returned 403`,
+                toolStdout: `fetching ${SIGNED}\n`,
+                detail: `stage-in: Error: ${SIGNED}`,
+            },
+            deps,
+        );
+        const stored = await jobs.getOrThrow(job.id);
+        expect(JSON.stringify(stored)).not.toContain("0123456789abcdef0123456789abcdef");
+        expect(stored.info).toContain("[redacted]");
+        expect(stored.tool_stdout).toContain("[redacted]");
     });
 });
 
@@ -661,7 +885,7 @@ describe("ingestFailure", () => {
     it("uses the reason's message when none is given and keeps stage-in errors", async () => {
         const { job, deps, outputs } = await dispatchedJob();
         deps.s3.put(
-            `jobs/${job.id}/prepare.json`,
+            `jobs/${job.id}/a1/prepare.json`,
             prepareDocument(job.id, {
                 state: "error",
                 command_line: undefined,
@@ -680,7 +904,7 @@ describe("ingestFailure", () => {
 
     it("applies the decisions of prepare.json before failing the outputs", async () => {
         const { job, deps, outputs } = await dispatchedJob();
-        deps.s3.put(`jobs/${job.id}/prepare.json`, prepareDocument(job.id));
+        deps.s3.put(`jobs/${job.id}/a1/prepare.json`, prepareDocument(job.id));
         await ingestFailure(job, { reason: "walltime", message: FAILURE_MESSAGES.walltime }, deps);
         expect(await hdas.getOrThrow(outputs[0]!.hda.id)).toMatchObject({
             name: "Datamash on data 1",

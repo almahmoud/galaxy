@@ -1,14 +1,31 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { purgeHda } from "@/planet/api/contents";
 import { resumePausedJobs } from "@/planet/api/legacyHistory";
-import { datasets, hdas, jobs, kv, leader, outbox, setLeaderFence, settings, type StoredSettings } from "@/planet/db";
+import {
+    datasets,
+    hdas,
+    histories,
+    JOB_STORES,
+    jobs,
+    kv,
+    leader,
+    outbox,
+    setLeaderFence,
+    settings,
+    type StoredSettings,
+    withTransaction,
+} from "@/planet/db";
 import { KubeError } from "@/planet/k8s";
 
+import { addOutput, addUpload, type FakeS3, testDeps } from "../__fixtures__/setup";
+import type { JobDeps } from "../deps";
 import { DEPENDENT_PAUSE_MESSAGE } from "../gating";
-import { FAILURE_MESSAGES } from "../ingest";
-import { buildJobSpec, SPEC_HASH_ANNOTATION } from "../k8sJob";
-import { JobManager, MISSING_JOB_GRACE_MS, NO_POD_GRACE_MS } from "../manager";
+import { FAILURE_MESSAGES, ingestFailure, ingestResults, readPrepare } from "../ingest";
+import { buildJobSpec, DISPATCH_ID_ANNOTATION, jobName, SPEC_HASH_ANNOTATION } from "../k8sJob";
+import { JobManager, type JobProtocol, MISSING_JOB_GRACE_MS, NO_POD_GRACE_MS } from "../manager";
+import { abortDispatch, adoptDispatch, DATA_FETCH_TOOL_ID, prepareDispatch } from "../manifest";
 import { ProtocolError } from "../schemas";
 import {
     container,
@@ -38,17 +55,21 @@ interface Harness {
     kube: FakeKube;
     protocol: FakeProtocol;
     s3: ReturnType<typeof fakeDeps>["s3"];
-    stored: StoredSettings;
     errors: unknown[];
+    stored: StoredSettings;
     fenced: number[];
     clock: { now: number };
     settle(): Promise<void>;
 }
 
-async function start(setup: { kube?: FakeKube; protocol?: FakeProtocol } = {}): Promise<Harness> {
+async function start(
+    setup: { kube?: FakeKube; protocol?: FakeProtocol | JobProtocol; deps?: JobDeps } = {},
+): Promise<Harness> {
     const kube = setup.kube ?? new FakeKube();
     const protocol = setup.protocol ?? new FakeProtocol();
-    const { deps, s3 } = fakeDeps();
+    const fake = fakeDeps();
+    const deps = setup.deps ?? fake.deps;
+    const s3 = fake.s3;
     const stored = await settings.getStored();
     const errors: unknown[] = [];
     const fenced: number[] = [];
@@ -71,7 +92,7 @@ async function start(setup: { kube?: FakeKube; protocol?: FakeProtocol } = {}): 
     };
     created.start();
     await settle();
-    return { manager: created, kube, protocol, s3, stored, errors, fenced, clock, settle };
+    return { manager: created, kube, protocol: protocol as FakeProtocol, s3, stored, errors, fenced, clock, settle };
 }
 
 async function jobState(id: string) {
@@ -185,7 +206,7 @@ describe("dispatch and gating", () => {
         expect(await outbox.list()).toEqual([]);
     });
 
-    it("adopts an existing Job with the same spec and replaces one with another spec", async () => {
+    it("adopts the Job of an unrecorded dispatch without preparing again and replaces a Job of another dispatch", async () => {
         const { history, input } = await seedHistory();
         const first = await seedJob(history.id, [input.id]);
         const second = await seedJob(history.id, [input.id]);
@@ -194,6 +215,7 @@ describe("dispatch and gating", () => {
         const protocol = new FakeProtocol();
         const plan = await protocol.prepareDispatch(first.job, fakeDeps().deps, { attempt: 1 });
         protocol.dispatched.length = 0;
+        protocol.prepareDispatch.mockClear();
         const same = await buildJobSpec({
             instanceId: stored.instance_id,
             jobId: first.job.id,
@@ -206,20 +228,170 @@ describe("dispatch and gating", () => {
             instanceId: stored.instance_id,
             jobId: second.job.id,
             attempt: 1,
-            plan: { ...plan, resources: { ...plan.resources, cpu: "2" } },
+            plan: { ...plan, dispatchId: "f".repeat(16) },
             cluster: stored.cluster,
         });
         await kube.createJob(other);
         kube.created.length = 0;
 
         await start({ kube, protocol });
-        expect((await jobs.get(first.job.id))?.k8s?.name).toBe(same.metadata.name);
+        expect((await jobs.get(first.job.id))?.k8s).toMatchObject({ name: same.metadata.name, attempt: 1 });
+        expect(protocol.prepareDispatch).not.toHaveBeenCalledWith(
+            expect.objectContaining({ id: first.job.id }),
+            expect.anything(),
+            expect.anything(),
+        );
         expect(kube.deleted).toEqual([other.metadata.name]);
+        expect(protocol.abortDispatch).toHaveBeenCalledWith(
+            expect.objectContaining({ id: second.job.id }),
+            expect.anything(),
+            {
+                attempt: 1,
+            },
+        );
         expect(kube.created.map((job) => job.metadata.name)).toEqual([
             `planet-${stored.instance_id}-${second.job.id}-a2`,
         ]);
         expect((await jobs.get(second.job.id))?.k8s?.attempt).toBe(2);
-        expect(protocol.dispatched).toContainEqual({ jobId: second.job.id, attempt: 2 });
+        expect(protocol.dispatched).toEqual([{ jobId: second.job.id, attempt: 2 }]);
+    });
+
+    it("keeps the attempt it moved on to when the dispatch is retried", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const stored = await settings.getStored();
+        const kube = new FakeKube();
+        const protocol = new FakeProtocol();
+        const plan = await protocol.prepareDispatch(job, fakeDeps().deps, { attempt: 1 });
+        protocol.dispatched.length = 0;
+        await kube.createJob(
+            await buildJobSpec({
+                instanceId: stored.instance_id,
+                jobId: job.id,
+                attempt: 1,
+                plan: { ...plan, dispatchId: "e".repeat(16) },
+                cluster: stored.cluster,
+            }),
+        );
+        protocol.prepareError = new KubeError(503, "ServiceUnavailable", "The gateway is unavailable");
+
+        const { manager: running, clock } = await start({ kube, protocol });
+        const [entry] = await outbox.list();
+        expect(entry?.payload).toEqual({ attempt: 2 });
+        protocol.prepareError = null;
+        clock.now = Date.now() + 60_000;
+        await running.drainOutbox();
+        expect(protocol.dispatched).toEqual([{ jobId: job.id, attempt: 2 }]);
+        expect((await jobs.get(job.id))?.k8s?.attempt).toBe(2);
+    });
+});
+
+describe("dispatch through the protocol module", () => {
+    /** An upload job of one 5 GiB file, whose output gets a browser-created multipart upload. */
+    async function largeUpload() {
+        const history = await histories.create({ name: "uploads" });
+        const upload = await addUpload({ name: "reads.fastq", size: 5 * 1024 ** 3, key: "uploads/u1" });
+        const output = await addOutput(history.id, { name: "reads.fastq", extension: "auto" }, { state: "queued" });
+        const job = await withTransaction(JOB_STORES, "readwrite", async (t) => {
+            const created = await jobs.create(
+                {
+                    tool_id: DATA_FETCH_TOOL_ID,
+                    tool_version: "1.0.0",
+                    history_id: history.id,
+                    request: {
+                        targets: [{ destination: { type: "hdas" }, elements: [{ src: "planet", file: upload.id }] }],
+                    },
+                    outputs: [{ name: "output0", src: "hda", id: output.hda.id }],
+                },
+                t,
+            );
+            await outbox.enqueue({ kind: "dispatch", job_id: created.id }, t);
+            return created;
+        });
+        const deps = testDeps();
+        const protocol: JobProtocol = {
+            prepareDispatch,
+            adoptDispatch,
+            abortDispatch,
+            ingestResults,
+            readPrepare,
+            ingestFailure,
+        };
+        return { job, deps, protocol, s3: deps.s3 as FakeS3 };
+    }
+
+    it("adopts a Job created before the leader recorded it, rewriting and aborting nothing", async () => {
+        const { job, deps, protocol, s3 } = await largeUpload();
+        const stored = await settings.getStored();
+        const kube = new FakeKube();
+        // A leader prepared attempt 1 and created its Job, then went away before recording the dispatch.
+        const plan = await prepareDispatch(job, deps, { attempt: 1 });
+        expect(plan.multipart).toHaveLength(1);
+        await kube.createJob(
+            await buildJobSpec({
+                instanceId: stored.instance_id,
+                jobId: job.id,
+                attempt: 1,
+                plan,
+                cluster: stored.cluster,
+            }),
+        );
+        const objects = new Map([...s3.objects].map(([key, bytes]) => [key, bytes.slice()]));
+        const operations = s3.log.length;
+
+        await start({ kube, protocol, deps });
+        const record = await jobs.get(job.id);
+        expect(record?.state).toBe("queued");
+        expect(record?.k8s).toMatchObject({
+            name: jobName(stored.instance_id, job.id, 1),
+            attempt: 1,
+            kind: "upload",
+            multipart: [{ key: plan.multipart[0]!.key, upload_id: plan.multipart[0]!.uploadId }],
+        });
+        expect(kube.created).toHaveLength(1);
+        expect(s3.aborted).toEqual([]);
+        expect(
+            s3.log.slice(operations).filter((entry) => !entry.startsWith("GET ") && !entry.startsWith("HEAD ")),
+        ).toEqual([]);
+        expect(s3.objects).toEqual(objects);
+    });
+
+    it("keeps the uploads of a create request whose outcome is unknown, and aborts them once the Job proves absent", async () => {
+        const { job, deps, protocol, s3 } = await largeUpload();
+        const kube = new FakeKube();
+        kube.createError = new TypeError("Failed to fetch");
+
+        const { manager: running, clock } = await start({ kube, protocol, deps });
+        expect(await jobState(job.id)).toBe("new");
+        expect(s3.aborted).toEqual([]);
+
+        clock.now = Date.now() + 60_000;
+        await running.drainOutbox();
+        expect(s3.aborted).toEqual(["upload-1"]);
+        expect((await jobs.get(job.id))?.k8s?.multipart).toEqual([
+            { key: expect.stringMatching(/^datasets\/.+\/data$/), upload_id: "upload-2" },
+        ]);
+    });
+
+    it("aborts the uploads of a dispatch the cluster refused", async () => {
+        const { job, deps, protocol, s3 } = await largeUpload();
+        const kube = new FakeKube();
+        kube.createError = new KubeError(422, "Invalid", "spec.template is invalid");
+
+        await start({ kube, protocol, deps });
+        expect(await jobState(job.id)).toBe("error");
+        expect(s3.aborted).toEqual(["upload-1"]);
+    });
+
+    it("writes nothing to the bucket once another tab leads", async () => {
+        const { job, deps, protocol, s3 } = await largeUpload();
+        setLeaderFence(await leader.claimEpoch());
+        await leader.claimEpoch();
+
+        const { fenced } = await start({ protocol, deps });
+        expect(fenced.length).toBeGreaterThan(0);
+        expect(s3.log.filter((entry) => !entry.startsWith("GET ") && !entry.startsWith("HEAD "))).toEqual([]);
+        expect(await jobState(job.id)).toBe("new");
     });
 });
 
@@ -336,20 +508,59 @@ describe("monitoring", () => {
         expect(protocol.failures[0]?.failure.reason).toBe("image_pull");
     });
 
-    it("fails a job whose architecture does not match the node", async () => {
-        const { kube, protocol, name, settle } = await dispatched();
+    it("fails a job whose image is for another architecture while stage-out still waits for the tool", async () => {
+        const { kube, protocol, name, job, settle } = await dispatched();
         kube.setPod(name, {
             ...podStatus.running(),
-            phase: "Failed",
             containerStatuses: [
                 container("tool", {
-                    terminated: { exitCode: 128, reason: "StartError", message: "exec format error" },
+                    terminated: {
+                        exitCode: 128,
+                        reason: "StartError",
+                        message: "failed to create containerd task: exec /bin/sh: exec format error",
+                    },
                 }),
-                container("stage-out", { terminated: { exitCode: 1, reason: "Error" } }),
+                container("stage-out", { running: {} }),
             ],
         });
         await settle();
         expect(protocol.failures[0]?.failure.reason).toBe("wrong_architecture");
+        expect(protocol.failures[0]?.failure.message).toContain("amd64-only");
+        expect(kube.deleted).toContain(name);
+        expect(kube.logRequests).toEqual([]);
+        expect(await jobState(job.id)).toBe("error");
+    });
+
+    it("fails fast when the runtime cannot start the tool container", async () => {
+        const { kube, protocol, name, job, settle } = await dispatched();
+        kube.setPod(name, {
+            ...podStatus.running(),
+            containerStatuses: [
+                container("tool", {
+                    terminated: {
+                        exitCode: 128,
+                        reason: "StartError",
+                        message: 'exec: "/bin/sh": stat /bin/sh: no such file or directory',
+                    },
+                }),
+                container("stage-out", { running: {} }),
+            ],
+        });
+        await settle();
+        expect(protocol.failures[0]?.failure).toMatchObject({
+            reason: "unknown",
+            message: 'The tool container could not start: exec: "/bin/sh": stat /bin/sh: no such file or directory',
+        });
+        expect(kube.deleted).toContain(name);
+        expect(await jobState(job.id)).toBe("error");
+    });
+
+    it("keeps waiting while the tool container runs and stage-out waits", async () => {
+        const { kube, protocol, name, job, settle } = await dispatched();
+        kube.setPod(name, podStatus.running());
+        await settle();
+        expect(protocol.failures).toEqual([]);
+        expect(await jobState(job.id)).toBe("running");
     });
 
     it("reads events of a Job without pods and fails it when pod creation is refused", async () => {
@@ -602,6 +813,37 @@ describe("outbox maintenance", () => {
         expect(harness.s3.listObjects).toHaveBeenCalledTimes(1);
         expect(harness.s3.abortMultipartUpload).toHaveBeenCalledWith("datasets/u/data", "up1");
         expect(harness.kube.deleted).toEqual([ours]);
+        expect(await outbox.list()).toEqual([]);
+    });
+});
+
+describe("purging datasets", () => {
+    it("deletes the bucket objects of a dataset purged through the API once its last copy is purged", async () => {
+        const { history } = await seedHistory();
+        const { hda, dataset } = await hdas.createWithDataset(
+            { history_id: history.id, name: "gone" },
+            { state: "ok" },
+        );
+        const copy = await hdas.copy(hda.id, history.id);
+        await withTransaction(JOB_STORES, "readwrite", (t) => purgeHda(hda.id, t));
+        expect(await outbox.list()).toEqual([]);
+        await withTransaction(JOB_STORES, "readwrite", (t) => purgeHda(copy.id, t));
+        expect((await outbox.list()).map((entry) => [entry.kind, entry.payload])).toEqual([
+            ["purge", { dataset_ids: [dataset.id] }],
+        ]);
+
+        const kube = new FakeKube();
+        const { deps, s3 } = fakeDeps();
+        const keys = [`datasets/${dataset.uuid}/data`, `datasets/${dataset.uuid}/meta.json`];
+        s3.listObjects.mockResolvedValueOnce({
+            objects: keys.map((key) => ({ key })),
+            commonPrefixes: [],
+            isTruncated: false,
+            nextContinuationToken: null,
+        } as never);
+        await start({ kube, deps });
+        expect(s3.listObjects).toHaveBeenCalledWith(`datasets/${dataset.uuid}/`, { continuationToken: undefined });
+        expect(s3.deleteObject.mock.calls.map(([key]) => key)).toEqual(keys);
         expect(await outbox.list()).toEqual([]);
     });
 });

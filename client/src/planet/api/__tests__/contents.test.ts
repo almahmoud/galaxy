@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { components } from "@/api/schema";
-import { collections, datasets, hdas, histories, jobs } from "@/planet/db";
+import { collections, datasets, hdas, histories, jobs, outbox } from "@/planet/db";
 
 import {
     DatatypeInfo,
@@ -593,10 +593,19 @@ describe("DELETE /api/histories/{history_id}/contents/{type}s/{id}", () => {
         ).toBe(204);
         expect(await hdas.getOrThrow(hda.id)).toMatchObject({ deleted: true, purged: true });
         expect((await datasets.getOrThrow(dataset.id)).purged).toBe(false);
+        expect(await outbox.list()).toEqual([]);
         expect(
             (await send(router, "DELETE", `/api/histories/${historyId}/contents/${copy.id}?purge=true`)).status,
         ).toBe(204);
         expect(await datasets.getOrThrow(dataset.id)).toMatchObject({ deleted: true, purged: true });
+        // The leader deletes the dataset's bucket objects for this entry.
+        expect((await outbox.list()).map((entry) => [entry.kind, entry.payload])).toEqual([
+            ["purge", { dataset_ids: [dataset.id] }],
+        ]);
+        expect(
+            (await send(router, "DELETE", `/api/histories/${historyId}/contents/${copy.id}?purge=true`)).status,
+        ).toBe(204);
+        expect(await outbox.list()).toHaveLength(1);
         const shown = await fetchJson(router, "GET", `/api/histories/${historyId}/contents/datasets/${copy.id}`);
         expect(shown).toMatchObject({ deleted: true, purged: true });
     });
@@ -617,6 +626,7 @@ describe("DELETE /api/histories/{history_id}/contents/{type}s/{id}", () => {
         ).toBe(204);
         expect((await collections.getHdcaOrThrow(list.id)).deleted).toBe(true);
         expect(await hdas.getOrThrow(hda.id)).toMatchObject({ deleted: true, purged: true });
+        expect((await outbox.list()).filter((entry) => entry.kind === "purge")).toHaveLength(1);
         const uploading = await addDataset(historyId, {}, { state: "upload" });
         expect(
             (await send(router, "DELETE", `/api/histories/${historyId}/contents/datasets/${uploading.hda.id}`)).status,

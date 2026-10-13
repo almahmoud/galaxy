@@ -36,7 +36,7 @@ import type { JobDeps } from "../deps";
 import type { IngestOutcome, JobFailure } from "../ingest";
 import type { ChannelLike, LockManagerLike } from "../leader";
 import type { JobProtocol } from "../manager";
-import type { DispatchPlan } from "../manifest";
+import type { AdoptedDispatch, DispatchPlan } from "../manifest";
 
 export const INSTANCE = "a1b2c3d4";
 
@@ -339,8 +339,11 @@ export class FakeProtocol implements JobProtocol {
     readonly prepared = new Set<string>();
     readonly failures: { jobId: string; failure: JobFailure; state: string }[] = [];
     readonly dispatched: { jobId: string; attempt: number }[] = [];
+    /** Dispatch ids of the dispatch records written, by `<job>/a<attempt>`. */
+    readonly records = new Map<string, string>();
     planOverrides: Partial<DispatchPlan> = {};
     prepareError: Error | null = null;
+    private dispatches = 0;
 
     prepareDispatch = vi.fn(
         async (job: JobRecord, _deps: JobDeps, options: { attempt: number }): Promise<DispatchPlan> => {
@@ -348,11 +351,15 @@ export class FakeProtocol implements JobProtocol {
                 throw this.prepareError;
             }
             this.dispatched.push({ jobId: job.id, attempt: options.attempt });
+            const dispatchId = (++this.dispatches).toString(16).padStart(16, "0");
+            this.records.set(`${job.id}/a${options.attempt}`, dispatchId);
+            const manifestKey = `jobs/${job.id}/a${options.attempt}/manifest.json`;
             return {
                 kind: job.tool_id === "__DATA_FETCH__" ? "upload" : "tool",
                 attempt: options.attempt,
-                manifestKey: `jobs/${job.id}/manifest.json`,
-                manifestUrl: `https://bucket.example.org/planet/jobs/${job.id}/manifest.json?X-Amz-Signature=${options.attempt}${Math.random()}`,
+                dispatchId,
+                manifestKey,
+                manifestUrl: `https://bucket.example.org/planet/${manifestKey}?X-Amz-Signature=${options.attempt}${Math.random()}`,
                 deadlineSeconds: 10800,
                 walltimeSeconds: 3600,
                 toolImage: job.tool_id === "__DATA_FETCH__" ? null : "quay.io/biocontainers/samtools:1.21--h50ea8bc_0",
@@ -362,6 +369,23 @@ export class FakeProtocol implements JobProtocol {
             } as DispatchPlan;
         },
     );
+
+    adoptDispatch = vi.fn(
+        async (
+            job: JobRecord,
+            _deps: JobDeps,
+            options: { attempt: number; dispatchId: string | null },
+        ): Promise<AdoptedDispatch | null> => {
+            const recorded = this.records.get(`${job.id}/a${options.attempt}`);
+            if (!recorded || recorded !== options.dispatchId) {
+                return null;
+            }
+            const kind = job.tool_id === "__DATA_FETCH__" ? "upload" : "tool";
+            return { kind, attempt: options.attempt, dispatchId: recorded, multipart: [] };
+        },
+    );
+
+    abortDispatch = vi.fn(async (): Promise<void> => undefined);
 
     ingestResults = vi.fn(async (job: JobRecord): Promise<IngestOutcome | null> => {
         const state = this.results.get(job.id);
@@ -410,7 +434,7 @@ export function fakeDeps() {
             isTruncated: false,
             nextContinuationToken: null,
         })),
-        deleteObject: vi.fn(async () => undefined),
+        deleteObject: vi.fn(async (_key: string) => undefined),
     };
     return { deps: { s3, now: () => Date.now() } as unknown as JobDeps, s3 };
 }

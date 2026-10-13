@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { settings } from "@/planet/db";
 
-import { resetDb, teardownDb } from "./__fixtures__/setup";
+import { datamashBundle, resetDb, teardownDb } from "./__fixtures__/setup";
 import { createJobDeps } from "./deps";
+import { DEFAULT_RUNTIME_IMAGE } from "./k8sJob";
 
 beforeEach(resetDb);
 afterEach(teardownDb);
@@ -50,5 +51,15 @@ describe("createJobDeps", () => {
         expect(url.pathname).toBe("/planet-data/planet/jobs/a/manifest.json");
         expect(url.searchParams.get("X-Amz-Expires")).toBe("3600");
         expect(url.href).not.toContain("secret");
+    });
+
+    it("runs tools without requirements in the default runtime image when none is configured", async () => {
+        await settings.update({ storage: { ...STORAGE, secret_access_key: "secret" }, cluster: { runtime_image: "" } });
+        const deps = await createJobDeps();
+        const bundle = { ...datamashBundle(), requirements: [], containers: [] };
+        expect(await deps!.resolveContainer!(bundle)).toBe(DEFAULT_RUNTIME_IMAGE);
+        await settings.update({ cluster: { runtime_image: "  registry.example.org/planet-runtime@sha256:abc  " } });
+        const configured = await createJobDeps();
+        expect(await configured!.resolveContainer!(bundle)).toBe("registry.example.org/planet-runtime@sha256:abc");
     });
 });

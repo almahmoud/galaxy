@@ -7,6 +7,7 @@ import type { Container, Job, PodSpec } from "@/planet/k8s";
 import {
     buildJobSpec,
     DEFAULT_RUNTIME_IMAGE,
+    DISPATCH_ID_ANNOTATION,
     jobName,
     JobSpecError,
     type JobSpecInput,
@@ -17,8 +18,9 @@ import {
 
 const JOB_ID = "0123456789abcdef";
 const INSTANCE = "a1b2c3d4";
-const MANIFEST_URL =
-    "https://acct.r2.cloudflarestorage.com/bucket/planet/jobs/0123456789abcdef/manifest.json?X-Amz-Signature=deadbeef";
+const MANIFEST_KEY = `jobs/${JOB_ID}/a1/manifest.json`;
+const MANIFEST_URL = `https://acct.r2.cloudflarestorage.com/bucket/planet/${MANIFEST_KEY}?X-Amz-Signature=deadbeef`;
+const DISPATCH_ID = "5f0c2a9e7b1d3c4e";
 
 type Overrides = Omit<Partial<JobSpecInput>, "plan" | "cluster"> & {
     plan?: Partial<JobSpecInput["plan"]>;
@@ -34,7 +36,8 @@ function input(overrides: Overrides = {}): JobSpecInput {
         cluster: { ...defaultSettings(INSTANCE).cluster, ...cluster },
         plan: {
             kind: "tool",
-            manifestKey: `jobs/${JOB_ID}/manifest.json`,
+            dispatchId: DISPATCH_ID,
+            manifestKey: MANIFEST_KEY,
             manifestUrl: MANIFEST_URL,
             deadlineSeconds: 10800,
             walltimeSeconds: 3600,
@@ -277,6 +280,15 @@ describe("tool job specs", () => {
         const containers = [...spec.spec!.template.spec.initContainers!, ...spec.spec!.template.spec.containers];
         expect(containers.every((c) => c.imagePullPolicy === "IfNotPresent")).toBe(true);
         expect(byName(await buildJobSpec(input()), "stage-out").image).toBe(DEFAULT_RUNTIME_IMAGE);
+        const build = "ghcr.io/example/planet-runtime@sha256:" + "c".repeat(64);
+        expect(byName(await buildJobSpec(input({ buildRuntimeImage: build })), "stage-in").image).toBe(build);
+        expect(
+            byName(
+                await buildJobSpec(input({ buildRuntimeImage: build, cluster: { runtime_image: "other:1" } })),
+                "stage-out",
+            ).image,
+        ).toBe("other:1");
+        await expect(buildJobSpec(input({ buildRuntimeImage: "bad image" }))).rejects.toThrow("build's runtime image");
     });
 
     it("refuse plans the cluster would reject", async () => {
@@ -318,6 +330,17 @@ describe("spec hashes", () => {
         expect(hash).toMatch(/^[0-9a-f]{64}$/);
         expect(again.metadata.annotations?.[SPEC_HASH_ANNOTATION]).toBe(hash);
         expect(bigger.metadata.annotations?.[SPEC_HASH_ANNOTATION]).not.toBe(hash);
-        expect(await specHash(first, `jobs/${JOB_ID}/manifest.json`)).toBe(hash);
+        expect(await specHash(first, MANIFEST_KEY)).toBe(hash);
+    });
+
+    it("cover the attempt's manifest key and the dispatch the Job was created from", async () => {
+        const first = await buildJobSpec(input());
+        const hash = first.metadata.annotations?.[SPEC_HASH_ANNOTATION];
+        expect(first.metadata.annotations?.[DISPATCH_ID_ANNOTATION]).toBe(DISPATCH_ID);
+        const otherAttemptKey = await buildJobSpec(input({ plan: { manifestKey: `jobs/${JOB_ID}/a2/manifest.json` } }));
+        const otherDispatch = await buildJobSpec(input({ plan: { dispatchId: "6f0c2a9e7b1d3c4e" } }));
+        expect(otherAttemptKey.metadata.annotations?.[SPEC_HASH_ANNOTATION]).not.toBe(hash);
+        expect(otherDispatch.metadata.annotations?.[SPEC_HASH_ANNOTATION]).not.toBe(hash);
+        await expect(buildJobSpec(input({ plan: { dispatchId: "../x" } }))).rejects.toThrow(JobSpecError);
     });
 });

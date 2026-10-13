@@ -6,7 +6,8 @@ exports[`tool job specs > matches the recommended spec 1`] = `
   "kind": "Job",
   "metadata": {
     "annotations": {
-      "planet.dev/spec-sha256": "0cf37a17961a03798d2d6f2f7c79ad9170a46fd07380dfddf2f5fddb18e8d581",
+      "planet.dev/dispatch-id": "5f0c2a9e7b1d3c4e",
+      "planet.dev/spec-sha256": "03636015fcc36ea601ce1b1b61a3535f9750e2fabc5a1f45ff2bc740e3885fce",
     },
     "labels": {
       "app.kubernetes.io/managed-by": "planet",
@@ -195,7 +196,7 @@ exports[`tool job specs > matches the recommended spec 1`] = `
             "env": [
               {
                 "name": "PLANET_MANIFEST_URL",
-                "value": "https://acct.r2.cloudflarestorage.com/bucket/planet/jobs/0123456789abcdef/manifest.json?X-Amz-Signature=deadbeef",
+                "value": "https://acct.r2.cloudflarestorage.com/bucket/planet/jobs/0123456789abcdef/a1/manifest.json?X-Amz-Signature=deadbeef",
               },
               {
                 "name": "HOME",

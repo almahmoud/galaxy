@@ -5,7 +5,7 @@
 
 import { ingestFailure, ingestResults, readPrepare } from "@/planet/jobs/ingest";
 import { CHANNEL_NAME } from "@/planet/jobs/leader";
-import { prepareDispatch } from "@/planet/jobs/manifest";
+import { abortDispatch, adoptDispatch, prepareDispatch } from "@/planet/jobs/manifest";
 
 import { LeaderHost } from "./host";
 
@@ -20,7 +20,7 @@ function start(): void {
         window,
         locks,
         channel: new BroadcastChannel(CHANNEL_NAME),
-        protocol: { prepareDispatch, ingestResults, readPrepare, ingestFailure },
+        protocol: { prepareDispatch, adoptDispatch, abortDispatch, ingestResults, readPrepare, ingestFailure },
     });
     host.start();
 }

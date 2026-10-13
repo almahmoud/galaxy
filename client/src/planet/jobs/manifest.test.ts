@@ -21,10 +21,14 @@ import {
     testDeps,
     withArchive,
 } from "./__fixtures__/setup";
+import { slotsAndMemory } from "./k8sJob";
 import { DEADLINE_MARGIN_SECONDS, toolArchiveKey, toolArchiveStaticPath } from "./keys";
 import {
+    abortDispatch,
+    adoptDispatch,
     DATA_FETCH_TOOL_ID,
     DEFAULT_SLOT_COUNT,
+    DEFAULT_START_TIMEOUT_SECONDS,
     DispatchError,
     expandFlatState,
     jobKind,
@@ -134,7 +138,7 @@ describe("prepareDispatch for a tool job", () => {
         const { deps, bundle } = await toolDeps();
 
         const plan = await prepareDispatch(job, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         dump("tool", manifest);
 
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
@@ -211,31 +215,33 @@ describe("prepareDispatch for a tool job", () => {
         manifest.slots!.forEach((slot) => expectTargets(slot, slot.uuid));
         expect(manifest.output_collections).toEqual({});
         expect(manifest.job_files).toEqual({
-            prepare: put(`jobs/${job.id}/prepare.json`),
-            results: put(`jobs/${job.id}/results.json`),
-            stdout: put(`jobs/${job.id}/stdout`),
-            stderr: put(`jobs/${job.id}/stderr`),
+            prepare: put(`jobs/${job.id}/a1/prepare.json`),
+            results: put(`jobs/${job.id}/a1/results.json`),
+            stdout: put(`jobs/${job.id}/a1/stdout`),
+            stderr: put(`jobs/${job.id}/a1/stderr`),
         });
         expect(manifest.limits).toEqual({
             max_discovered_files: DEFAULT_SLOT_COUNT,
             max_metadata_value_size: 5 * 1024 * 1024,
-            start_timeout_seconds: null,
+            start_timeout_seconds: DEFAULT_START_TIMEOUT_SECONDS,
         });
 
         expect(plan).toEqual({
             kind: "tool",
             attempt: 1,
-            manifestKey: `jobs/${job.id}/manifest.json`,
-            manifestUrl: get(`jobs/${job.id}/manifest.json`, 86400),
+            dispatchId: expect.stringMatching(/^[0-9a-f]{16}$/),
+            manifestKey: `jobs/${job.id}/a1/manifest.json`,
+            manifestUrl: get(`jobs/${job.id}/a1/manifest.json`, 86400),
             deadlineSeconds: 86400 + DEADLINE_MARGIN_SECONDS,
             walltimeSeconds: 86400,
             toolImage: DATAMASH_IMAGE,
             resources: { cpu: "1", memory: "4Gi", scratch: "20Gi" },
             multipart: [],
         });
-        expect(await readDispatchRecord(deps.s3, job.id)).toMatchObject({
+        expect(await readDispatchRecord(deps.s3, job.id, 1)).toMatchObject({
             job_id: job.id,
             attempt: 1,
+            dispatch_id: plan.dispatchId,
             kind: "tool",
             walltime_seconds: 86400,
             deadline_seconds: 86400 + DEADLINE_MARGIN_SECONDS,
@@ -262,7 +268,7 @@ describe("prepareDispatch for a tool job", () => {
         });
         const { deps } = await toolDeps();
         await prepareDispatch(flat, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         expect(manifest.params).toEqual({
             in_file: { src: "hda", key: input.hda.id },
             grouping: "1",
@@ -313,23 +319,23 @@ describe("prepareDispatch for a tool job", () => {
         const error = await prepareDispatch(job, deps).catch((e: unknown) => e);
         expect(error).toBeInstanceOf(DispatchError);
         expect((error as DispatchError).permanent).toBe(true);
-        expect(deps.s3.objects.has(`jobs/${job.id}/manifest.json`)).toBe(false);
+        expect(deps.s3.objects.has(`jobs/${job.id}/a1/manifest.json`)).toBe(false);
     });
 
     it("gives HTML outputs a pool of extra objects", async () => {
         const { output, job } = await datamashJob({ outputExtension: "html" });
         const { deps } = await toolDeps();
         await prepareDispatch(job, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         expectTargets(manifest.outputs[0]!, output.dataset.uuid, EXTRA_OBJECT_POOL);
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
     });
 
-    it("creates multipart uploads for the outputs of jobs with large inputs and aborts them on the next dispatch", async () => {
+    it("creates multipart uploads for the outputs of jobs with large inputs; a new dispatch of the attempt aborts them", async () => {
         const { output, job } = await datamashJob({ inputSize: 5 * GIB });
         const { deps } = await toolDeps();
         const plan = await prepareDispatch(job, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         const key = `datasets/${output.dataset.uuid}/data`;
         const layout = multipartLayout(5 * GIB);
         const multipart = manifest.outputs[0]!.data!.multipart!;
@@ -343,9 +349,39 @@ describe("prepareDispatch for a tool job", () => {
 
         const again = await prepareDispatch(job, deps);
         expect(deps.s3.aborted).toEqual(["upload-1"]);
-        expect(again.attempt).toBe(2);
+        expect(again.attempt).toBe(1);
+        expect(again.dispatchId).not.toBe(plan.dispatchId);
         expect(again.multipart).toEqual([{ key, uploadId: "upload-2" }]);
-        expect(deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`).job.attempt).toBe(2);
+
+        const next = await prepareDispatch(job, deps, { attempt: 2 });
+        expect(deps.s3.aborted).toEqual(["upload-1"]);
+        expect(next.manifestKey).toBe(`jobs/${job.id}/a2/manifest.json`);
+        expect(deps.s3.json<Manifest>(next.manifestKey).job.attempt).toBe(2);
+        expect(deps.s3.json<Manifest>(next.manifestKey).job_files.results).toBe(put(`jobs/${job.id}/a2/results.json`));
+        expect(deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`).job.attempt).toBe(1);
+    });
+
+    it("adopts an attempt only for the Job of its own dispatch record, and aborts an attempt's uploads", async () => {
+        const { job } = await datamashJob({ inputSize: 5 * GIB });
+        const { deps } = await toolDeps();
+        const plan = await prepareDispatch(job, deps, { attempt: 3 });
+        const before = deps.s3.log.length;
+
+        expect(await adoptDispatch(job, deps, { attempt: 3, dispatchId: plan.dispatchId })).toEqual({
+            kind: "tool",
+            attempt: 3,
+            dispatchId: plan.dispatchId,
+            multipart: plan.multipart,
+        });
+        expect(await adoptDispatch(job, deps, { attempt: 3, dispatchId: "f".repeat(16) })).toBeNull();
+        expect(await adoptDispatch(job, deps, { attempt: 3, dispatchId: null })).toBeNull();
+        expect(await adoptDispatch(job, deps, { attempt: 2, dispatchId: plan.dispatchId })).toBeNull();
+        expect(deps.s3.log.slice(before).every((entry) => entry.startsWith("GET "))).toBe(true);
+
+        await abortDispatch(job, deps, { attempt: 2 });
+        expect(deps.s3.aborted).toEqual([]);
+        await abortDispatch(job, deps, { attempt: 3 });
+        expect(deps.s3.aborted).toEqual([plan.multipart[0]!.uploadId]);
     });
 
     it("aborts the uploads it created when the dispatch fails", async () => {
@@ -380,7 +416,7 @@ describe("prepareDispatch for a tool job", () => {
         });
         const { deps } = await toolDeps();
         await prepareDispatch(job, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
         expect(manifest.params).toEqual({
             in_file: { src: "hda", key: second.hda.id },
@@ -451,7 +487,7 @@ describe("prepareDispatch for a tool job", () => {
             ],
         });
         await prepareDispatch(job, deps);
-        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/manifest.json`);
+        const manifest = deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`);
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
         expect(manifest.output_collections).toEqual({
             pair: {
@@ -544,6 +580,27 @@ describe("jobResources", () => {
 
     it("rejects settings that are not Kubernetes quantities", () => {
         expect(() => jobResources({ ...cluster, default_memory: "lots" }, null)).toThrow(DispatchError);
+    });
+
+    it("gives the manifest the slots and memory the Job spec sets", () => {
+        for (const [defaults, requirements] of [
+            [{ default_cpu: "1500m", default_memory: "4G" }, []],
+            [
+                { default_cpu: "250m", default_memory: "1Gi" },
+                [{ resource_type: "cores_min", value_or_expression: 2.5 }],
+            ],
+            [
+                { default_cpu: "3", default_memory: "1500Mi" },
+                [{ resource_type: "ram_min", value_or_expression: 2049.5 }],
+            ],
+        ] as const) {
+            const resources = jobResources(
+                { ...cluster, ...defaults },
+                { ...datamashBundle(), resource_requirements: [...requirements] },
+            );
+            const spec = slotsAndMemory(resources);
+            expect({ slots: resources.slots, memoryMb: resources.memoryMb }).toEqual(spec);
+        }
     });
 });
 
@@ -687,7 +744,7 @@ describe("prepareDispatch for an upload job", () => {
         ]);
         expectTargets(manifest.outputs[0]!, outputs[0]!.dataset.uuid);
         expect(manifest.slots).toEqual([]);
-        expect(manifest.job_files).toEqual({ results: put(`jobs/${job.id}/results.json`) });
+        expect(manifest.job_files).toEqual({ results: put(`jobs/${job.id}/a1/results.json`) });
         expect(manifest.job).toMatchObject({ id: job.id, attempt: 1, walltime_seconds: 86400 });
     });
 
@@ -739,6 +796,35 @@ describe("prepareDispatch for an upload job", () => {
         expect(targets[1]!.destination).toEqual({ type: "hdca" });
         expect(manifest.slots).toHaveLength(2 + DEFAULT_SLOT_COUNT);
         expect(manifest.limits?.max_discovered_files).toBe(2 + DEFAULT_SLOT_COUNT);
+    });
+
+    it("decides on a multipart upload for each output from its own upload's size", async () => {
+        const large = await addUpload({ name: "reads.bam", size: 5 * GIB });
+        const small = await addUpload({ name: "notes.txt", size: 64 });
+        const { job, outputs } = await uploadJob(
+            [
+                {
+                    destination: { type: "hdas" },
+                    elements: [
+                        { src: "planet", file: large.id },
+                        { src: "planet", file: small.id },
+                        { src: "url", url: "https://example.org/a.bed" },
+                    ],
+                },
+            ],
+            {},
+            3,
+        );
+        const deps = testDeps();
+        const plan = await prepareDispatch(job, deps);
+        const manifest = deps.s3.json<Manifest>(plan.manifestKey);
+        expect(plan.multipart).toEqual([{ key: `datasets/${outputs[0]!.dataset.uuid}/data`, uploadId: "upload-1" }]);
+        expect(manifest.outputs.map((output) => output.data?.multipart?.parts.length ?? 0)).toEqual([
+            multipartLayout(5 * GIB).parts,
+            0,
+            0,
+        ]);
+        expect(manifest.limits?.start_timeout_seconds).toBeNull();
     });
 
     it("accepts requests the upload API already pointed at upload sessions", async () => {
@@ -821,7 +907,7 @@ describe("prepareDispatch for a set-metadata job", () => {
             datasets: [{ input: target.hda.id, output: "input1", ext: null, detect: true, overwrite: false }],
         });
         expect(manifest.slots).toBeUndefined();
-        expect(manifest.job_files).toEqual({ results: put(`jobs/${job.id}/results.json`) });
+        expect(manifest.job_files).toEqual({ results: put(`jobs/${job.id}/a1/results.json`) });
     });
 
     it("rewrites the extra files of composite datasets", async () => {

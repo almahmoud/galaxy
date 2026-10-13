@@ -9,7 +9,7 @@
  *   `planet:leader` BroadcastChannel and the leader names it, after which it steals the lock.
  */
 
-import { leader as leaderStore, setLeaderFence } from "@/planet/db";
+import { leader as leaderStore, revokeLeaderFence, setLeaderFence } from "@/planet/db";
 import { randomHex } from "@/planet/util/ids";
 
 export const LOCK_NAME = "planet:leader";
@@ -44,6 +44,8 @@ export interface LeaderElectionOptions {
     onLead: (epoch: number) => void | Promise<void>;
     /** Called when this tab stops leading; its job writes are already fenced off. Not awaited. */
     onDemote: () => void | Promise<void>;
+    /** Called after each heartbeat this tab wrote as the leader, with its epoch. Not awaited. */
+    onHeartbeat?: (epoch: number) => void | Promise<void>;
     /** Milliseconds since the epoch. */
     now?: () => number;
     tabId?: string;
@@ -257,6 +259,9 @@ export class LeaderElection {
             });
             if (!current && this.currentEpoch === epoch) {
                 await this.lost();
+            } else if (current && this.options.onHeartbeat) {
+                const onHeartbeat = this.options.onHeartbeat;
+                this.notify(() => onHeartbeat(epoch));
             }
         } catch (error) {
             this.report(error);
@@ -283,7 +288,8 @@ export class LeaderElection {
                 return;
             }
             this.currentEpoch = null;
-            setLeaderFence(null);
+            // A demoted tab's job manager may still be finishing work: none of its job writes may commit now.
+            revokeLeaderFence();
             this.notify(() => this.options.onDemote());
             this.release?.();
             this.release = null;

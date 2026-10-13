@@ -49,6 +49,7 @@ import {
     stringAsBool,
     stringAsBoolOrNone,
 } from "./python";
+import { compiledPattern, pythonMatch } from "./regex";
 
 const SELECT_TYPES = new Set(["select", "genomebuild", "group_tag", "data_column"]);
 const DATA_TYPES = new Set(["data", "data_collection"]);
@@ -288,19 +289,24 @@ function rangeCheck(validator: BundleValidator, value: unknown, shown: unknown):
     fail(validator, aboveMin && belowMax, shown);
 }
 
-/** Runs one validator on a single value; validators Planet cannot evaluate pass. */
+/**
+ * Runs one validator on a single value. Expression and metadata validators Planet does not evaluate pass (the
+ * pod's own checks apply); a regex Planet cannot decide fails, so no value passes unchecked.
+ */
 function runValidator(validator: BundleValidator, value: unknown): void {
     switch (validator.type) {
         case "regex": {
-            let pattern: RegExp;
-            try {
-                pattern = new RegExp(validator.expression ?? "", "y");
-            } catch {
-                return;
-            }
+            const pattern = compiledPattern(validator.expression ?? "");
             for (const item of Array.isArray(value) ? value : [value]) {
-                pattern.lastIndex = 0;
-                fail(validator, pattern.test(item === null || item === undefined ? "" : pyStr(item)), item);
+                const matched = pythonMatch(pattern, item === null || item === undefined ? "" : pyStr(item));
+                if (matched === undefined) {
+                    throw new InputError(
+                        pattern
+                            ? `Planet checks this value against the tool's pattern only up to ${pattern.inputLimit} characters.`
+                            : "Planet cannot check values against this tool's pattern, which uses syntax it does not support.",
+                    );
+                }
+                fail(validator, matched, item);
             }
             return;
         }

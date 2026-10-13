@@ -2,23 +2,30 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closeDb, settings } from "@/planet/db";
+import { closeDb, type JobRecord, leader, settings } from "@/planet/db";
+import { writeTx } from "@/planet/db/tx";
+import { DEFAULT_RUNTIME_IMAGE } from "@/planet/jobs/k8sJob";
+import { STALE_MS } from "@/planet/jobs/leader";
 import { KubeError } from "@/planet/k8s";
 import { S3Error } from "@/planet/s3";
 import { Router } from "@/planet/sw/router";
 import { fakeKube, fakeS3, review, setupCheck, setupReport } from "@/planet/ui/__tests__/fakes";
+import type { PlanetStatus } from "@/planet/ui/lib/api";
 import type { CheckReport } from "@/planet/ui/lib/checks";
 import * as events from "@/planet/util/events";
 
-import { register } from "../planet";
+import { leaderStatus, register } from "../planet";
 
 const ORIGIN = "https://planet.test";
+const NOW = Date.UTC(2026, 9, 13, 12, 0, 0);
+const PINNED = `ghcr.io/almahmoud/planet-runtime@sha256:${"0123456789abcdef".repeat(4)}`;
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.secret-token";
 const SECRET = "garage-secret-access-key-0123456789";
 
 let kube: ReturnType<typeof fakeKube>;
 let s3: ReturnType<typeof fakeS3>;
 let router: Router;
+let buildRuntimeImage: () => Promise<string | null>;
 
 function call(method: string, path: string, body?: unknown): Promise<Response> {
     const init: RequestInit = { method };
@@ -60,7 +67,13 @@ beforeEach(async () => {
     kube = fakeKube();
     s3 = fakeS3();
     router = new Router();
-    register(router, { kubeClient: kube.factory, s3Client: s3.factory });
+    buildRuntimeImage = vi.fn(async () => PINNED);
+    register(router, {
+        kubeClient: kube.factory,
+        s3Client: s3.factory,
+        buildRuntimeImage: () => buildRuntimeImage(),
+        now: () => NOW,
+    });
 });
 
 afterEach(async () => {
@@ -216,11 +229,7 @@ describe("GET and PUT /api/planet/settings", () => {
 describe("GET /api/planet/status", () => {
     it("reports which components are configured", async () => {
         const before = await (await call("GET", "/api/planet/status")).json();
-        expect(before).toMatchObject({
-            configured: { cluster: false, storage: false },
-            build_id: "dev",
-            leader: false,
-        });
+        expect(before).toMatchObject({ configured: { cluster: false, storage: false }, build_id: "dev" });
         await put(CONFIGURED);
         const after = await (await call("GET", "/api/planet/status")).json();
         expect(after.configured).toEqual({ cluster: true, storage: true });
@@ -231,6 +240,177 @@ describe("GET /api/planet/status", () => {
         await put({ ...CONFIGURED, storage: { ...CONFIGURED.storage, secret_access_key: null } });
         const status = await (await call("GET", "/api/planet/status")).json();
         expect(status.configured).toEqual({ cluster: true, storage: false });
+    });
+});
+
+async function getStatus(): Promise<PlanetStatus> {
+    const response = await call("GET", "/api/planet/status");
+    expect(response.status).toBe(200);
+    return response.json();
+}
+
+async function putJob(id: string, state: string): Promise<void> {
+    await writeTx(["jobs"], async (tx) => {
+        const job = { id, state, history_id: "h1", tool_id: "cat1", update_time: "2026-10-13T12:00:00" };
+        await tx.store("jobs").put(job as unknown as JobRecord);
+    });
+}
+
+describe("GET /api/planet/status: job runner", () => {
+    it("reports no job runner before any tab led", async () => {
+        const status = await getStatus();
+        expect(status.leader).toEqual({
+            active: false,
+            epoch: null,
+            heartbeat_age_seconds: null,
+            state: null,
+            blocked_reason: null,
+            last_error: null,
+        });
+        expect(status.jobs).toEqual({ queued: 0, running: 0 });
+    });
+
+    it("reports the leader's heartbeat, state and last error", async () => {
+        const epoch = await leader.claimEpoch();
+        await leader.heartbeat({ epoch, tab_id: "tab1", heartbeat: NOW - 12_400, visible: true });
+        await leader.writeStatus({
+            epoch,
+            tab_id: "tab1",
+            heartbeat: NOW - 12_400,
+            state: "blocked",
+            blocked_reason: "The cluster could not be listed: 401 Unauthorized",
+            last_error: {
+                message: "Could not create the Kubernetes Job.",
+                job_id: "0123456789abcdef",
+                time: NOW - 60_000,
+            },
+            counts: { queued: 9, running: 9 },
+        });
+        const status = await getStatus();
+        expect(status.leader).toEqual({
+            active: true,
+            epoch,
+            heartbeat_age_seconds: 12,
+            state: "blocked",
+            blocked_reason: "The cluster could not be listed: 401 Unauthorized",
+            last_error: {
+                message: "Could not create the Kubernetes Job.",
+                job_id: "0123456789abcdef",
+                time: "2026-10-13T11:59:00.000Z",
+            },
+        });
+    });
+
+    it("keeps only the last error once the leader stopped or another tab leads", async () => {
+        const epoch = await leader.claimEpoch();
+        const report = {
+            epoch,
+            tab_id: "tab1",
+            heartbeat: NOW - STALE_MS,
+            state: "active" as const,
+            blocked_reason: null,
+            last_error: { message: "Lost the watch.", job_id: null, time: NOW - STALE_MS },
+            counts: { queued: 0, running: 1 },
+        };
+        await leader.writeStatus(report);
+        await leader.heartbeat({ epoch, tab_id: "tab1", heartbeat: NOW - STALE_MS, visible: false });
+        let status = await getStatus();
+        expect(status.leader).toMatchObject({ active: false, epoch, heartbeat_age_seconds: 90, state: null });
+        expect(status.leader.last_error?.message).toBe("Lost the watch.");
+
+        await leader.resign(epoch);
+        status = await getStatus();
+        expect(status.leader).toMatchObject({ active: false, epoch, heartbeat_age_seconds: null, state: null });
+        expect(status.leader.last_error?.message).toBe("Lost the watch.");
+
+        const next = await leader.claimEpoch();
+        await leader.heartbeat({ epoch: next, tab_id: "tab2", heartbeat: NOW, visible: true });
+        status = await getStatus();
+        expect(status.leader).toMatchObject({ active: true, epoch: next, state: null, blocked_reason: null });
+    });
+
+    it("treats malformed record fields as absent", () => {
+        const beat = { epoch: 7, heartbeat: NOW + 5000 };
+        const report = {
+            epoch: 7,
+            state: 42,
+            blocked_reason: "   ",
+            last_error: { message: "x".repeat(5000), job_id: "../../admin", time: "yesterday" },
+        };
+        const status = leaderStatus(beat, report, 7, NOW);
+        expect(status).toMatchObject({
+            active: true,
+            epoch: 7,
+            heartbeat_age_seconds: 0,
+            state: null,
+            blocked_reason: null,
+        });
+        expect(status.last_error?.job_id).toBeNull();
+        expect(status.last_error?.time).toBeNull();
+        expect(status.last_error?.message).toHaveLength(2000);
+        expect(leaderStatus(beat, { last_error: { job_id: "0123456789abcdef" } }, 7, NOW).last_error).toBeNull();
+        expect(leaderStatus(beat, { epoch: "7", state: "active" }, 7, NOW).state).toBeNull();
+        expect(leaderStatus("not a record", null, 0, NOW).active).toBe(false);
+        expect(leaderStatus({ epoch: 3, heartbeat: Number.NaN }, null, 3, NOW)).toMatchObject({
+            active: false,
+            epoch: 3,
+        });
+    });
+
+    it("counts unfinished jobs from the jobs store", async () => {
+        const states = [
+            "new",
+            "upload",
+            "waiting",
+            "queued",
+            "running",
+            "finishing",
+            "ok",
+            "error",
+            "paused",
+            "deleting",
+        ];
+        for (const [index, state] of states.entries()) {
+            await putJob(index.toString(16).padStart(16, "0"), state);
+        }
+        expect((await getStatus()).jobs).toEqual({ queued: 4, running: 2 });
+    });
+});
+
+describe("GET /api/planet/status: runtime image", () => {
+    it("uses the build's image while the setting is empty", async () => {
+        expect((await getStatus()).runtime).toEqual({
+            image: PINNED,
+            source: "build",
+            default_image: PINNED,
+            build_image: PINNED,
+            pinned: true,
+        });
+    });
+
+    it("reports a tag set in the settings as not pinned", async () => {
+        await put({ cluster: { runtime_image: "ghcr.io/example/planet-runtime:main" } });
+        expect((await getStatus()).runtime).toEqual({
+            image: "ghcr.io/example/planet-runtime:main",
+            source: "settings",
+            default_image: PINNED,
+            build_image: PINNED,
+            pinned: false,
+        });
+    });
+
+    it("falls back to Planet's default tag when the build names no image or cannot be read", async () => {
+        buildRuntimeImage = vi.fn(async () => null);
+        expect((await getStatus()).runtime).toMatchObject({
+            image: DEFAULT_RUNTIME_IMAGE,
+            source: "fallback",
+            build_image: null,
+            pinned: false,
+        });
+        buildRuntimeImage = vi.fn(async () => Promise.reject(new Error("another build")));
+        const response = await call("GET", "/api/planet/status");
+        expect(response.status).toBe(200);
+        expect((await response.json()).runtime.source).toBe("fallback");
     });
 });
 

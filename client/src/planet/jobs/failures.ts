@@ -8,6 +8,7 @@ import { isS3Error } from "@/planet/s3";
 
 import { FAILURE_MESSAGES, type JobFailure } from "./ingest";
 import { type DispatchKind, STAGE_IN_CONTAINER, STAGE_OUT_CONTAINER, STAGER_CONTAINER, TOOL_CONTAINER } from "./k8sJob";
+import { redactSignedUrls } from "./redact";
 
 /** Transient image pull errors are retried by the kubelet for this long before the job fails. */
 export const IMAGE_PULL_GRACE_MS = 5 * 60 * 1000;
@@ -18,6 +19,8 @@ const MAX_DETAIL = 4096;
 const IMAGE_NOT_FOUND =
     /not found|manifest unknown|name unknown|repository does not exist|does not exist or may require|404 Not Found/i;
 const EXEC_FORMAT = /exec format error/i;
+/** Termination reasons of a container whose process never started (the runtime could not create or exec it). */
+const NEVER_STARTED = new Set(["StartError", "ContainerCannotRun"]);
 
 /** The main container of a job's pod, whose start marks the job running. */
 export function mainContainer(kind: DispatchKind): string {
@@ -97,7 +100,7 @@ export function parseTerminationMessage(text: string | undefined): Record<string
 
 /** Removes URLs (presigned requests carry signatures in their query) and shortens `text` to `length`. */
 function truncate(text: string, length = MAX_DETAIL): string {
-    const clean = text.replace(/https?:\/\/\S+/g, "<url>");
+    const clean = redactSignedUrls(text).replace(/https?:\/\/\S+/g, "<url>");
     return clean.length > length ? `${clean.slice(0, length - 1)}…` : clean;
 }
 
@@ -154,22 +157,9 @@ export function classifyFailure(kind: DispatchKind, job: KubeJob | undefined, po
     if (toolEnd?.reason === "OOMKilled") {
         return { reason: "oom", message: FAILURE_MESSAGES.oom, detail };
     }
-    if (toolEnd?.reason === "StartError" || toolEnd?.reason === "ContainerCannotRun") {
-        if (EXEC_FORMAT.test(toolEnd.message ?? "")) {
-            return {
-                reason: "wrong_architecture",
-                message:
-                    `The tool's container image (${containerStatus(pod, main)?.image ?? "unknown"}) is not built for ` +
-                    "the CPU architecture of the node it was scheduled on. Set the architecture policy to amd64-only " +
-                    "in Planet's settings, or add amd64 nodes to the cluster.",
-                detail,
-            };
-        }
-        return {
-            reason: "unknown",
-            message: `The tool container could not start: ${toolEnd.message ?? ""}`.trim(),
-            detail,
-        };
+    const startFailure = notStarted(pod, main, detail);
+    if (startFailure) {
+        return startFailure;
     }
     if (pod?.status?.reason === "Evicted") {
         return {
@@ -216,6 +206,44 @@ export function classifyFailure(kind: DispatchKind, job: KubeJob | undefined, po
         return { reason: "unknown", message: `${FAILURE_MESSAGES.unknown} (${outcome.message})`, detail };
     }
     return { reason: "unknown", message: FAILURE_MESSAGES.unknown, detail };
+}
+
+function notStarted(pod: Pod | undefined, container: string, detail: string | undefined): JobFailure | null {
+    const end = containerTerminated(pod, container);
+    if (!end) {
+        return null;
+    }
+    const message = end.message ?? "";
+    if (EXEC_FORMAT.test(message) && (NEVER_STARTED.has(end.reason ?? "") || end.exitCode !== 0)) {
+        return {
+            reason: "wrong_architecture",
+            message:
+                `The tool's container image (${containerStatus(pod, container)?.image ?? "unknown"}) is not built for ` +
+                "the CPU architecture of the node it was scheduled on. Set the architecture policy to amd64-only " +
+                "in Planet's settings, or add amd64 nodes to the cluster.",
+            detail,
+        };
+    }
+    if (NEVER_STARTED.has(end.reason ?? "")) {
+        return {
+            reason: "unknown",
+            message: `The tool container could not start: ${truncate(message, 1000)}`.trim(),
+            detail,
+        };
+    }
+    return null;
+}
+
+/**
+ * A tool container that ended without ever running (`StartError`, `ContainerCannotRun`, or an image for another
+ * CPU architecture) while stage-out still waits for it. Stage-out only gives up after the manifest's start timeout,
+ * so the job fails now instead.
+ */
+export function toolStartFailure(kind: DispatchKind, pod: Pod | undefined): JobFailure | null {
+    if (kind !== "tool" || !pod || isDisrupted(pod)) {
+        return null;
+    }
+    return notStarted(pod, TOOL_CONTAINER, describePod(pod) || undefined);
 }
 
 /** Where a waiting container stands: fail now, keep waiting, or nothing to report. */

@@ -25,6 +25,8 @@ import {
     JOB_STORES,
     type JobRecord,
     jobs,
+    outbox,
+    type PurgePayload,
     type ReadTx,
     readTx,
     withTransaction,
@@ -1618,7 +1620,8 @@ export async function undeleteHda(id: string, tx: WriteTx): Promise<HdaRecord> {
 
 /**
  * Purges an HDA (`HDAManager.purge`): marks it deleted and purged, stops its creating job and, when no other copy
- * remains unpurged, marks the dataset purged so the leader removes its objects from the bucket.
+ * remains unpurged, marks the dataset purged and queues a `purge` entry so the leader removes its objects from the
+ * bucket. `tx` must cover {@link JOB_STORES}.
  */
 export async function purgeHda(id: string, tx: WriteTx): Promise<HdaRecord> {
     const hda = await hdaOrThrow(id, tx);
@@ -1631,6 +1634,7 @@ export async function purgeHda(id: string, tx: WriteTx): Promise<HdaRecord> {
     const dataset = await tx.store("datasets").get(hda.dataset_id);
     if (dataset && !dataset.purged && copies.every((copy) => copy.purged)) {
         await datasets.update(dataset.id, { deleted: true, purged: true }, tx);
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: [dataset.id] } satisfies PurgePayload }, tx);
     }
     return updated;
 }

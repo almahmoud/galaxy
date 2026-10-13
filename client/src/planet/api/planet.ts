@@ -1,19 +1,35 @@
-import { settings } from "@/planet/db";
+import { jobs, leader, settings } from "@/planet/db";
 import { rebindsSecret, rebindsToken } from "@/planet/db/secretBindings";
 import type { SettingsUpdate } from "@/planet/db/settings";
+import { readTx } from "@/planet/db/tx";
+import { DEFAULT_RUNTIME_IMAGE } from "@/planet/jobs/k8sJob";
+import { STALE_MS } from "@/planet/jobs/leader";
 import type { KubeClient, KubeClientConfig } from "@/planet/k8s";
 import type { S3Client, S3Config } from "@/planet/s3";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
-import type { CheckTarget, PlanetStatus } from "@/planet/ui/lib/api";
+import type { CheckTarget, LeaderError, LeaderStatus, PlanetStatus } from "@/planet/ui/lib/api";
 import { checkCluster, type CheckMode, type CheckReport, checkStorage } from "@/planet/ui/lib/checks";
 import { validateSettingsChange } from "@/planet/ui/lib/rules";
+import { effectiveRuntimeImage, isPinnedImage, loadBuildRuntimeImage } from "@/planet/ui/lib/runtime";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
+import { isId } from "@/planet/util/ids";
+import type { JobState } from "@/planet/util/states";
 
-/** Clients used by the connection check; tests replace them. */
+/** Clients and data sources the endpoints use; tests replace them. */
 export interface PlanetClients {
     kubeClient?: (config: KubeClientConfig) => KubeClient;
     s3Client?: (config: S3Config) => S3Client;
+    /** This build's runtime image (`loadBuildRuntimeImage`). */
+    buildRuntimeImage?: () => Promise<string | null>;
+    /** Milliseconds since the epoch. */
+    now?: () => number;
 }
+
+/** Job states counted as waiting for the job runner, and as running. */
+const QUEUED_STATES: readonly JobState[] = ["new", "resubmitted", "upload", "waiting", "queued"];
+const RUNNING_STATES: readonly JobState[] = ["running", "finishing"];
+const MAX_STATE_LENGTH = 64;
+const MAX_MESSAGE_LENGTH = 2000;
 
 const CHECK_TARGETS: readonly CheckTarget[] = ["cluster", "storage"];
 const CHECK_MODES: readonly CheckMode[] = ["quick", "full"];
@@ -136,9 +152,106 @@ async function runChecks(request: ParsedCheckRequest, clients: PlanetClients): P
     return report;
 }
 
-async function status(): Promise<PlanetStatus> {
-    const current = await settings.get();
+function text(value: unknown, limit: number): string | null {
+    if (typeof value !== "string" || !value.trim()) {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > limit ? `${trimmed.slice(0, limit - 1)}…` : trimmed;
+}
+
+/** An ISO 8601 UTC time from milliseconds since the epoch or a date string, or null. */
+function isoTime(value: unknown): string | null {
+    if (typeof value !== "number" && typeof value !== "string") {
+        return null;
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function leaderError(value: unknown): LeaderError | null {
+    if (typeof value !== "object" || value === null) {
+        return null;
+    }
+    const error = value as { message?: unknown; job_id?: unknown; time?: unknown };
+    const message = text(error.message, MAX_MESSAGE_LENGTH);
+    if (!message) {
+        return null;
+    }
+    return { message, job_id: isId(error.job_id) ? error.job_id : null, time: isoTime(error.time) };
+}
+
+function fieldsOf(value: unknown): Record<string, unknown> {
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function integer(value: unknown): number | null {
+    return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The job runner's status from two `kv` records of `db/leader.ts`, both read as untrusted data (fields of the wrong
+ * type count as absent):
+ *
+ * - `leader`, the election heartbeat, which the leading tab removes when it stops: whether a tab leads now.
+ * - `leader_status`, the leader's report: its state and blocked reason, taken only from the current leader's
+ *   report, and its last error, kept after the leader stopped.
+ */
+export function leaderStatus(
+    heartbeatRecord: unknown,
+    statusRecord: unknown,
+    epoch: number,
+    now: number,
+): LeaderStatus {
+    const beat = fieldsOf(heartbeatRecord);
+    const report = fieldsOf(statusRecord);
+    const heartbeat = typeof beat.heartbeat === "number" && Number.isFinite(beat.heartbeat) ? beat.heartbeat : null;
+    const age = heartbeat === null ? null : Math.max(0, now - heartbeat);
+    const active = age !== null && age < STALE_MS;
+    const leaderEpoch = heartbeat === null ? null : integer(beat.epoch);
+    const current = active && leaderEpoch !== null && integer(report.epoch) === leaderEpoch;
+    return {
+        active,
+        epoch: leaderEpoch ?? (epoch > 0 ? epoch : null),
+        heartbeat_age_seconds: age === null ? null : Math.round(age / 1000),
+        state: current ? text(report.state, MAX_STATE_LENGTH) : null,
+        blocked_reason: current ? text(report.blocked_reason, MAX_MESSAGE_LENGTH) : null,
+        last_error: leaderError(report.last_error),
+    };
+}
+
+async function buildImage(clients: PlanetClients): Promise<string | null> {
+    try {
+        return await (clients.buildRuntimeImage ?? loadBuildRuntimeImage)();
+    } catch {
+        // A site of another build is deployed; the page offers a reload elsewhere.
+        return null;
+    }
+}
+
+async function status(clients: PlanetClients): Promise<PlanetStatus> {
+    const [current, build, runner] = await Promise.all([
+        settings.get(),
+        buildImage(clients),
+        readTx(["jobs", "kv"], async (tx) => {
+            const [heartbeat, report, epoch, counts] = await Promise.all([
+                leader.read(tx),
+                leader.readStatus(tx),
+                leader.currentEpoch(tx),
+                jobs.countByState([...QUEUED_STATES, ...RUNNING_STATES], tx),
+            ]);
+            const total = (states: readonly JobState[]) => states.reduce((sum, state) => sum + counts[state], 0);
+            return {
+                heartbeat: heartbeat as unknown,
+                report: report as unknown,
+                epoch,
+                queued: total(QUEUED_STATES),
+                running: total(RUNNING_STATES),
+            };
+        }),
+    ]);
     const { cluster, storage } = current;
+    const runtime = effectiveRuntimeImage(cluster.runtime_image, build, DEFAULT_RUNTIME_IMAGE);
     return {
         configured: {
             cluster: Boolean(cluster.gateway_url && cluster.namespace && cluster.has_token),
@@ -146,7 +259,9 @@ async function status(): Promise<PlanetStatus> {
         },
         build_id: buildId(),
         instance_id: current.instance_id,
-        leader: false,
+        leader: leaderStatus(runner.heartbeat, runner.report, runner.epoch, (clients.now ?? Date.now)()),
+        jobs: { queued: runner.queued, running: runner.running },
+        runtime: { ...runtime, build_image: build, pinned: isPinnedImage(runtime.image) },
     };
 }
 
@@ -160,7 +275,8 @@ async function status(): Promise<PlanetStatus> {
  *   access key) that does not supply a new one.
  * - `POST /api/planet/settings/check`: connection checks with the stored secrets. The body is a `CheckRequest`
  *   (`@/planet/ui/lib/api`); its `settings` replace stored values for this check only.
- * - `GET /api/planet/status`: which components are configured.
+ * - `GET /api/planet/status`: which components are configured, the job runner (leader tab) from its heartbeat and
+ *   report, the number of unfinished jobs, and the runtime image jobs use (`PlanetStatus` in `@/planet/ui/lib/api`).
  */
 export function register(router: Router, clients: PlanetClients = {}): void {
     router.untyped("/api/planet/build", "get", () => ({ build_id: buildId() }));
@@ -175,5 +291,5 @@ export function register(router: Router, clients: PlanetClients = {}): void {
         runChecks(parseCheckRequest(await pageJson(request)), clients),
     );
 
-    router.untyped("/api/planet/status", "get", status);
+    router.untyped("/api/planet/status", "get", () => status(clients));
 }

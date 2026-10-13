@@ -1,9 +1,21 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { settings } from "@/planet/db";
-import { Bus, fakeDeps, FakeKube, FakeLocks, FakeProtocol, resetDb, waitFor } from "@/planet/jobs/__tests__/fakes";
+import { leader, outbox, settings } from "@/planet/db";
+import {
+    Bus,
+    fakeDeps,
+    FakeKube,
+    FakeLocks,
+    FakeProtocol,
+    resetDb,
+    seedHistory,
+    seedJob,
+    waitFor,
+} from "@/planet/jobs/__tests__/fakes";
+import type { JobDepsOptions } from "@/planet/jobs/deps";
 import type { KubeClientConfig } from "@/planet/k8s";
+import { KubeError } from "@/planet/k8s";
 
 import { type HostWindow, LeaderHost } from "./host";
 
@@ -13,12 +25,12 @@ class FakeWindow extends EventTarget {
 
 const hosts: LeaderHost[] = [];
 
-function host() {
+function host(options: { buildImage?: string | null } = {}) {
     const window = new FakeWindow();
     const kube = new FakeKube();
     const kubeConfigs: KubeClientConfig[] = [];
     const { deps } = fakeDeps();
-    const createDeps = vi.fn(async () => deps);
+    const createDeps = vi.fn(async (_options: JobDepsOptions) => deps);
     const created = new LeaderHost({
         window: window as unknown as HostWindow,
         locks: new FakeLocks(),
@@ -29,6 +41,8 @@ function host() {
             return kube;
         },
         createDeps,
+        loadBuildImage: async () => options.buildImage ?? null,
+        manager: { onError: () => undefined },
     });
     hosts.push(created);
     return { host: created, window, kube, kubeConfigs, createDeps };
@@ -104,5 +118,95 @@ describe("leader host", () => {
         window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
         await settle(running);
         expect(running.election.isLeader).toBe(true);
+    });
+
+    it("runs job pods with the build's runtime image unless the settings name one", async () => {
+        const buildImage = `registry.example.org/planet-runtime@sha256:${"a".repeat(64)}`;
+        const settingImage = `registry.example.org/custom-runtime@sha256:${"b".repeat(64)}`;
+        const { host: running, kube, createDeps } = host({ buildImage });
+        await configure();
+        running.start();
+        await settle(running);
+        const { history, input } = await seedHistory();
+        await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(kube.created).toHaveLength(1);
+        const pod = kube.created[0]!.spec!.template.spec;
+        expect(pod.initContainers!.map((container) => container.image)).toEqual([buildImage]);
+        expect(pod.containers.find((container) => container.name === "stage-out")?.image).toBe(buildImage);
+        // Tools without requirements run in the runtime image too.
+        const resolve = createDeps.mock.lastCall![0].resolveContainer!;
+        expect(await resolve({ requirements: [], containers: [] } as never)).toBe(buildImage);
+
+        await settings.update({ cluster: { runtime_image: settingImage } });
+        await settle(running);
+        await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(kube.created).toHaveLength(2);
+        expect(kube.created[1]!.spec!.template.spec.initContainers![0]!.image).toBe(settingImage);
+        const resolveAfter = createDeps.mock.lastCall![0].resolveContainer!;
+        expect(await resolveAfter({ requirements: [], containers: [] } as never)).toBe(settingImage);
+    });
+
+    it("does not run jobs when the build's runtime image cannot be read", async () => {
+        const failing = new LeaderHost({
+            window: new FakeWindow() as unknown as HostWindow,
+            locks: new FakeLocks(),
+            channel: new Bus().channel(),
+            protocol: new FakeProtocol(),
+            createKube: () => new FakeKube(),
+            createDeps: async () => fakeDeps().deps,
+            loadBuildImage: async () => {
+                throw new Error("This page belongs to another Planet build.");
+            },
+            manager: { onError: () => undefined },
+        });
+        hosts.push(failing);
+        await configure();
+        failing.start();
+        await settle(failing);
+        expect(failing.election.isLeader).toBe(true);
+        expect(failing.manager).toBeNull();
+        expect(await leader.readStatus()).toMatchObject({
+            state: "blocked",
+            blocked_reason:
+                "This tab cannot read its build's runtime image: This page belongs to another Planet build.",
+        });
+    });
+
+    it("keeps the leader status record current for status pages", async () => {
+        const { host: running, kube } = host();
+        running.start();
+        await settle(running);
+        expect(await leader.readStatus()).toMatchObject({
+            epoch: running.election.epoch,
+            tab_id: running.election.tabId,
+            state: "blocked",
+            blocked_reason: "The cluster settings are incomplete.",
+        });
+
+        await configure();
+        await settle(running);
+        expect(await leader.readStatus()).toMatchObject({ state: "idle", blocked_reason: null, last_error: null });
+
+        const { history, input } = await seedHistory();
+        kube.createError = new KubeError(503, "ServiceUnavailable", "The gateway is unavailable");
+        const { job } = await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(await outbox.list()).toHaveLength(1);
+        expect(await leader.readStatus()).toMatchObject({
+            state: "active",
+            last_error: { message: "The gateway is unavailable", job_id: job.id },
+        });
+
+        kube.listJobs = async () => {
+            throw new TypeError("Failed to fetch");
+        };
+        await running.manager!.reconcile();
+        await settle(running);
+        expect(await leader.readStatus()).toMatchObject({
+            state: "blocked",
+            blocked_reason: "The cluster could not be listed: Failed to fetch",
+        });
     });
 });

@@ -53,6 +53,15 @@ export function listByState(states: readonly JobState[], tx?: ReadTx): Promise<J
     });
 }
 
+/** Counts the jobs in each of `states`. */
+export function countByState<S extends JobState>(states: readonly S[], tx?: ReadTx): Promise<Record<S, number>> {
+    return useRead(tx, ["jobs"], async (t) => {
+        const index = t.store("jobs").index("state");
+        const counts = await Promise.all(states.map((state) => index.count(state)));
+        return Object.fromEntries(states.map((state, i) => [state, counts[i]!])) as Record<S, number>;
+    });
+}
+
 /**
  * Applies `patch` and bumps `update_time`. A state change is appended to `state_history`, bumps the HDCAs
  * whose job source is this job (their job state summary changed) and announces `job-changed`.

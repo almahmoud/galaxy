@@ -26,10 +26,11 @@ import {
     readTx,
     type UploadRecord,
 } from "@/planet/db";
-import { newUuid } from "@/planet/util/ids";
+import { newUuid, randomHex } from "@/planet/util/ids";
 import { galaxyNow } from "@/planet/util/time";
 
 import type { JobDeps } from "./deps";
+import { slotsAndMemory } from "./k8sJob";
 import { jobObjectKeys, jobTimeLimits } from "./keys";
 import {
     abortMultipartUploads,
@@ -69,10 +70,17 @@ export const SET_METADATA_TOOL_ID = "__SET_METADATA__";
 export const DEFAULT_SLOT_COUNT = 32;
 /** Galaxy's default `max_metadata_value_size`. */
 export const MAX_METADATA_VALUE_SIZE = 5 * 1024 * 1024;
+/**
+ * How long stage-out waits for the tool container to start before it writes `not_started` results. It covers
+ * pulls of large images, which the kubelet does before it starts the tool container.
+ */
+export const DEFAULT_START_TIMEOUT_SECONDS = 900;
 
 export interface DispatchPlan {
     kind: JobKind;
     attempt: number;
+    /** Random id of this dispatch, in its dispatch record and as an annotation of the Kubernetes Job. */
+    dispatchId: string;
     manifestKey: string;
     /** Presigned GET of the manifest for `PLANET_MANIFEST_URL`; expires after `manifestExpirySeconds`. */
     manifestUrl: string;
@@ -87,8 +95,8 @@ export interface DispatchPlan {
 
 export interface DispatchOptions {
     /**
-     * The manifest's `job.attempt`, which results must repeat to be ingested. Defaults to one more than the attempt of
-     * the previous dispatch record, so results of an earlier dispatch are never taken for this one's.
+     * The manifest's `job.attempt`, which results must repeat to be ingested and which names the attempt's objects
+     * (`jobs/<job>/a<attempt>/`). Defaults to 1.
      */
     attempt?: number;
 }
@@ -106,8 +114,9 @@ export function jobKind(job: Pick<JobRecord, "tool_id">): JobKind {
 
 /**
  * Prepares an attempt of a job: copies the tool archive into the bucket on first use, creates multipart uploads
- * for large outputs, presigns every request the pod needs, writes the manifest and the dispatch record. Call it
- * once per attempt, before creating the Kubernetes Job; uploads left by an earlier attempt are aborted.
+ * for large outputs, presigns every request the pod needs, writes the attempt's manifest and dispatch record. Call
+ * it before creating the attempt's Kubernetes Job, and only when no Job of the attempt exists: the attempt's objects
+ * are rewritten and the uploads of the record they replace are aborted.
  *
  * @throws DispatchError when the job cannot run (`permanent`) or not yet (inputs or uploads not ready)
  */
@@ -117,14 +126,15 @@ export async function prepareDispatch(
     options: DispatchOptions = {},
 ): Promise<DispatchPlan> {
     const kind = jobKind(job);
-    const keys = jobObjectKeys(job.id);
+    const attempt = options.attempt ?? 1;
+    const keys = jobObjectKeys(job.id, attempt);
     const cluster = deps.settings.cluster;
     // The first request also teaches the client the bucket's clock, which every presigned request below relies on.
-    const previous = await readDispatchRecord(deps.s3, job.id, deps.signal);
-    const attempt = options.attempt ?? (previous ? previous.attempt + 1 : 1);
+    const previous = await readDispatchRecord(deps.s3, job.id, attempt, deps.signal);
     if (previous?.multipart.length) {
         await abortMultipartUploads(deps.s3, previous.multipart, deps.signal);
     }
+    const dispatchId = randomHex(8);
 
     const bundle = kind === "tool" ? await loadBundle(job, deps) : null;
     const image = bundle ? await resolveImage(bundle, deps) : { image: null };
@@ -149,6 +159,7 @@ export async function prepareDispatch(
             protocol: PROTOCOL_VERSION,
             job_id: job.id,
             attempt,
+            dispatch_id: dispatchId,
             kind,
             create_time: galaxyNow(),
             walltime_seconds: limits.walltimeSeconds,
@@ -166,6 +177,7 @@ export async function prepareDispatch(
         return {
             kind,
             attempt,
+            dispatchId,
             manifestKey: keys.manifest,
             manifestUrl,
             deadlineSeconds: limits.deadlineSeconds,
@@ -177,6 +189,44 @@ export async function prepareDispatch(
     } catch (error) {
         await abortMultipartUploads(deps.s3, context.created);
         throw error;
+    }
+}
+
+/** What the job manager records when it adopts the Kubernetes Job of an earlier, unrecorded dispatch. */
+export type AdoptedDispatch = Pick<DispatchPlan, "kind" | "attempt" | "dispatchId" | "multipart">;
+
+/**
+ * Returns the attempt's dispatch record as an adopted dispatch when the existing Kubernetes Job of the attempt was
+ * created from it (`dispatchId` is the Job's dispatch-id annotation). Nothing is written or aborted: the Job's pod
+ * may already use the manifest, slots and uploads of that record.
+ *
+ * @returns null when the attempt has no record or the Job belongs to another dispatch
+ */
+export async function adoptDispatch(
+    job: JobRecord,
+    deps: JobDeps,
+    options: { attempt: number; dispatchId: string | null },
+): Promise<AdoptedDispatch | null> {
+    if (!options.dispatchId) {
+        return null;
+    }
+    const record = await readDispatchRecord(deps.s3, job.id, options.attempt, deps.signal);
+    if (!record?.dispatch_id || record.dispatch_id !== options.dispatchId || record.kind !== jobKind(job)) {
+        return null;
+    }
+    return {
+        kind: record.kind,
+        attempt: record.attempt,
+        dispatchId: record.dispatch_id,
+        multipart: record.multipart.map((upload) => ({ key: upload.key, uploadId: upload.upload_id })),
+    };
+}
+
+/** Aborts the multipart uploads of an attempt's dispatch record. Call it once no Kubernetes Job of the attempt exists. */
+export async function abortDispatch(job: JobRecord, deps: JobDeps, options: { attempt: number }): Promise<void> {
+    const record = await readDispatchRecord(deps.s3, job.id, options.attempt, deps.signal);
+    if (record?.multipart.length) {
+        await abortMultipartUploads(deps.s3, record.multipart, deps.signal);
     }
 }
 
@@ -215,7 +265,7 @@ function baseManifest(kind: JobKind, context: BuildContext): Manifest {
 }
 
 async function jobFiles(context: BuildContext, kind: JobKind): Promise<Manifest["job_files"]> {
-    const keys = jobObjectKeys(context.job.id);
+    const keys = jobObjectKeys(context.job.id, context.manifestJob.attempt);
     const results = await context.sign.put(keys.results);
     if (kind !== "tool") {
         return { results };
@@ -234,11 +284,11 @@ async function slotTargets(context: BuildContext, count: number): Promise<NonNul
     );
 }
 
-function limitsFor(slots: number): NonNullable<Manifest["limits"]> {
+function limitsFor(slots: number, kind: JobKind): NonNullable<Manifest["limits"]> {
     return {
         max_discovered_files: slots,
         max_metadata_value_size: MAX_METADATA_VALUE_SIZE,
-        start_timeout_seconds: null,
+        start_timeout_seconds: kind === "tool" ? DEFAULT_START_TIMEOUT_SECONDS : null,
     };
 }
 
@@ -266,7 +316,7 @@ export interface JobResources {
     cpu: string;
     memory: string;
     scratch: string;
-    /** `GALAXY_SLOTS`: the CPU request rounded up, as Galaxy's Kubernetes runner does. */
+    /** `GALAXY_SLOTS` as the Job spec sets it ({@link slotsAndMemory}): the CPU request rounded up. */
     slots: number;
     /** `GALAXY_MEMORY_MB`. */
     memoryMb: number | null;
@@ -320,17 +370,15 @@ function requirement(bundle: ToolBundle | null, type: string): number | null {
  */
 export function jobResources(cluster: JobDeps["settings"]["cluster"], bundle: ToolBundle | null): JobResources {
     let cpu = cluster.default_cpu;
-    let cores = parseQuantity(cluster.default_cpu, "default CPU");
+    const cores = parseQuantity(cluster.default_cpu, "default CPU");
     const coresMin = requirement(bundle, "cores_min");
     if (coresMin !== null && coresMin > cores) {
-        cores = coresMin;
         cpu = Number.isInteger(coresMin) ? String(coresMin) : `${Math.ceil(coresMin * 1000)}m`;
     }
     let memory = cluster.default_memory;
-    let memoryBytes = parseQuantity(cluster.default_memory, "default memory");
+    const memoryBytes = parseQuantity(cluster.default_memory, "default memory");
     const ramMin = requirement(bundle, "ram_min");
     if (ramMin !== null && ramMin * 2 ** 20 > memoryBytes) {
-        memoryBytes = Math.ceil(ramMin) * 2 ** 20;
         memory = `${Math.ceil(ramMin)}Mi`;
     }
     let scratch = cluster.scratch_default;
@@ -338,8 +386,9 @@ export function jobResources(cluster: JobDeps["settings"]["cluster"], bundle: To
     if (tmpdirMin !== null && tmpdirMin * 2 ** 20 > parseQuantity(cluster.scratch_default, "scratch")) {
         scratch = `${Math.ceil(tmpdirMin)}Mi`;
     }
-    const memoryMb = Math.floor(memoryBytes / 2 ** 20);
-    return { cpu, memory, scratch, slots: Math.max(1, Math.ceil(cores)), memoryMb: memoryMb >= 1 ? memoryMb : null };
+    // The manifest's slots and memory are what the Job spec gives the tool container (GALAXY_SLOTS, GALAXY_MEMORY_MB).
+    const { slots, memoryMb } = slotsAndMemory({ cpu, memory });
+    return { cpu, memory, scratch, slots, memoryMb: memoryMb >= 1 ? memoryMb : null };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -923,7 +972,7 @@ async function buildToolManifest(context: BuildContext, bundle: ToolBundle): Pro
         output_collections: outputCollections(context, bundle),
         slots,
         job_files: files,
-        limits: limitsFor(slots.length),
+        limits: limitsFor(slots.length, "tool"),
     };
 }
 
@@ -967,7 +1016,7 @@ async function buildSetMetadataManifest(context: BuildContext): Promise<Manifest
         outputs,
         job_files: await jobFiles(context, "set_metadata"),
         set_metadata: { datasets },
-        limits: limitsFor(0),
+        limits: limitsFor(0, "set_metadata"),
     };
 }
 
@@ -1054,6 +1103,20 @@ interface RewrittenUpload {
     request: Record<string, unknown>;
     /** Upload sessions the request refers to. */
     uploads: UploadRecord[];
+    /** Bytes uploaded for each `hdas` element, by the id of its dataset (URLs and pasted text count as 0). */
+    outputBytes: Map<string, number>;
+}
+
+/** Size of the uploaded files an element refers to, its composite parts included. */
+function uploadedBytes(value: unknown, used: ReadonlyMap<string, UploadRecord>): number {
+    if (Array.isArray(value)) {
+        return value.reduce((sum: number, item) => sum + uploadedBytes(item, used), 0);
+    }
+    if (!isRecord(value)) {
+        return 0;
+    }
+    const own = value.src === "planet" ? (used.get(String(value.file))?.size ?? 0) : 0;
+    return Object.values(value).reduce((sum: number, item) => sum + uploadedBytes(item, used), own);
 }
 
 /**
@@ -1148,6 +1211,7 @@ function rewriteFetchRequest(context: BuildContext, outputIds: string[]): Rewrit
     visit(targets);
 
     // Datasets precreated for `hdas` targets, matched to elements as `_precreate_fetched_hdas` does.
+    const outputBytes = new Map<string, number>();
     let nextOutput = 0;
     for (const target of targets) {
         if (!isRecord(target) || !isRecord(target.destination)) {
@@ -1174,6 +1238,8 @@ function rewriteFetchRequest(context: BuildContext, outputIds: string[]): Rewrit
                     }
                     element.object_id = id;
                 }
+                const objectId = String(element.object_id);
+                outputBytes.set(objectId, (outputBytes.get(objectId) ?? 0) + uploadedBytes(element, used));
                 nextOutput++;
             }
         } else if (target.destination.type !== "hdas") {
@@ -1181,7 +1247,7 @@ function rewriteFetchRequest(context: BuildContext, outputIds: string[]): Rewrit
         }
     }
 
-    return { request, uploads: [...used.values()] };
+    return { request, uploads: [...used.values()], outputBytes };
 }
 
 /** Datasets an upload discovers: collection elements and expanded archives or directories. */
@@ -1218,12 +1284,12 @@ async function buildUploadManifest(context: BuildContext): Promise<Manifest> {
     const { job, sign } = context;
     const outputIds = job.outputs.map((output) => output.id);
     const rewritten = rewriteFetchRequest(context, outputIds);
-    const inputBytes = rewritten.uploads.reduce((sum, upload) => sum + upload.size, 0);
     const outputs: ManifestOutput[] = [];
     for (const association of job.outputs) {
         outputs.push(
             await outputRecord(context, association.name, association.id, {
-                inputBytes,
+                // Each output holds one upload: its own size decides whether it needs a multipart upload.
+                inputBytes: rewritten.outputBytes.get(association.id) ?? 0,
                 data: true,
                 objectId: association.id,
             }),
@@ -1240,6 +1306,6 @@ async function buildUploadManifest(context: BuildContext): Promise<Manifest> {
         outputs,
         slots,
         job_files: await jobFiles(context, "upload"),
-        limits: limitsFor(slots.length),
+        limits: limitsFor(slots.length, "upload"),
     };
 }
