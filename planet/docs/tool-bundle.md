@@ -125,6 +125,14 @@ does. `help.rendered` is false when docutils was unavailable.
 As in Galaxy, a conditional's test parameter is never optional and always refreshes the
 form, and every selectable test value without a `<when>` gets a case with no inputs.
 
+A conditional with `value_from` (`<object>:<attribute path>`, a Python callable Galaxy
+calls when it loads the tool) has `test_param` null; its test parameter is the preceding
+input named by `value_ref`. The generator computes the cases of
+`self:app.datatypes_registry.*` references, such as the upload tool's
+`files_metadata` (one case per datatype, with a text parameter for each metadata element
+set on upload), with the datatype registry of the image, in Galaxy's order. Other
+references need a running Galaxy application, so their `cases` are empty.
+
 Every parameter has `model_class`, `type`, `name`, `argument`, `label`, `help`,
 `help_format`, `hidden`, `refresh_on_change`, `optional`, `is_dynamic`, `sanitizer`,
 `validators` and `attributes` (the XML attributes, verbatim). Type-specific fields:

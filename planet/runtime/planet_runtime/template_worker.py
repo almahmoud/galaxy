@@ -4,6 +4,9 @@ It receives the manifest without presigned requests on stdin and an
 environment without ``PLANET_MANIFEST_URL``, and the stager is not dumpable,
 so tool code cannot reach the job's upload URLs (see ``isolation``). It prints
 one JSON document as its last line of output.
+
+Stage-in starts it before downloading the inputs: it imports Galaxy and loads
+the datatypes registry while the downloads run, then waits for the manifest.
 """
 
 import json
@@ -28,6 +31,7 @@ def evaluate(manifest: Mapping[str, Any], layout: Layout) -> dict[str, Any]:
 
     galaxy_env.registry().to_xml_file(str(layout.registry_xml))
     evaluator = JobEvaluator(manifest, layout)
+    evaluator.validate()
     plans = evaluator.plan_outputs()
     for record in manifest.get("outputs") or []:
         plan = plans.get(record["name"])
@@ -51,7 +55,23 @@ def evaluate(manifest: Mapping[str, Any], layout: Layout) -> dict[str, Any]:
     }
 
 
+def preload() -> None:
+    """Import what evaluation needs; a failure is reported by ``evaluate`` once the manifest arrived."""
+    from planet_runtime.cli import gc_paused
+
+    try:
+        with gc_paused():
+            import planet_runtime.evaluation  # noqa: F401
+            from planet_runtime import galaxy_env
+
+            galaxy_env.registry()
+            galaxy_env.validation()
+    except Exception:
+        pass
+
+
 def main() -> int:
+    preload()
     manifest = json.load(sys.stdin)
     layout = Layout.from_env()
     try:
@@ -68,4 +88,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from planet_runtime.cli import exit_now
+
+    # Stage-in waits for this process to end; skip the interpreter's teardown.
+    exit_now(main())

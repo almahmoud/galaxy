@@ -42,6 +42,7 @@ RUN set -eu; cd /galaxy; \
         lib/galaxy/tools/data_fetch.py \
         lib/galaxy/tools/parameters/wrapped_json.py \
         lib/galaxy/tools/parameters/sanitize.py \
+        lib/galaxy/tools/parameters/validation.py \
         lib/galaxy/jobs/runners/util/job_script/DEFAULT_JOB_FILE_TEMPLATE.sh \
         lib/galaxy/jobs/runners/util/job_script/CLUSTER_SLOTS_STATEMENT.sh \
         lib/galaxy/jobs/runners/util/job_script/MEMORY_STATEMENT_TEMPLATE.sh \
@@ -58,6 +59,10 @@ COPY planet/runtime/planet_runtime /src/planet-runtime/planet_runtime
 RUN /venv/bin/pip install --no-deps --no-build-isolation /src/planet-runtime \
     && /venv/bin/pip check \
     && /venv/bin/pip uninstall -y pip wheel setuptools-scm vcs-versioning
+# Bytecode that is used without checking the source: the image is immutable, its root filesystem may be
+# read-only and uid 10001 cannot write __pycache__, so stale or missing bytecode would be compiled on every start.
+RUN /venv/bin/python -W ignore -m compileall -q -f -j 0 --invalidation-mode unchecked-hash \
+        -x '/fissix/tests/data/' /venv /opt/planet/galaxy/lib
 
 FROM build-base AS test-deps
 RUN /venv/bin/pip install --require-hashes --no-deps --target /opt/planet-test -r /tmp/requirements/test.txt
@@ -76,14 +81,18 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1 \
+    PYDANTIC_DISABLE_PLUGINS=__all__ \
     PLANET_GALAXY_LIB=/opt/planet/galaxy/lib \
     GALAXY_INCLUDES_ROOT=/opt/planet/galaxy \
     HOME=/planet-stager/home \
     TMPDIR=/planet/tmp \
     XDG_CACHE_HOME=/planet-stager/cache
+# The Python image ships the standard library without bytecode.
 RUN apt-get update && apt-get install -y --no-install-recommends libmagic1t64 libgomp1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/python3.*/site-packages/pip /usr/local/lib/python3.*/site-packages/pip-* /usr/local/bin/pip* \
+    && python -W ignore -m compileall -q -f -j 0 --invalidation-mode unchecked-hash \
+        "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" \
     && groupadd --gid 10001 planet \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /planet-stager/home --shell /usr/sbin/nologin planet
 COPY --from=build /venv /venv

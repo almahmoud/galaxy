@@ -9,6 +9,8 @@ from datetime import (
 )
 from typing import Any
 
+from planet_runtime.redact import redact_value
+
 log = logging.getLogger(__name__)
 
 TERMINATION_LOG_ENV = "PLANET_TERMINATION_LOG"
@@ -22,7 +24,8 @@ def utcnow() -> str:
 
 
 def encode(summary: dict[str, Any]) -> bytes:
-    summary = dict(summary)
+    """The summary as JSON of at most ``MAX_BYTES``, without presigned-request credentials."""
+    summary = redact_value(json.loads(json.dumps(summary, default=str)))
     data = json.dumps(summary, separators=(",", ":"), default=str).encode()
     while len(data) > MAX_BYTES:
         longest = max(

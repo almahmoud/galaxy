@@ -55,6 +55,13 @@ class ParameterError(ValueError):
     pass
 
 
+class ParameterValueError(ParameterError):
+    """``galaxy.tools.parameters.basic.ParameterValueError``: the message names the parameter."""
+
+    def __init__(self, message_suffix: str, parameter_name: str):
+        super().__init__(f"Parameter '{parameter_name}': {message_suffix}")
+
+
 @dataclass(frozen=True)
 class ToolOptions:
     sanitize: bool = True
@@ -91,9 +98,21 @@ class ToolParameter:
         if isinstance(sanitizer, Mapping):
             sanitizer = sanitizer.get("xml")
         self.sanitizer = ToolParameterSanitizer.from_element(XML(sanitizer)) if sanitizer else None
+        # Galaxy's validator models as dictionaries (``model_dump()``), in Galaxy's order.
+        self.validators: list[Mapping[str, Any]] = list(definition.get("validators") or [])
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} {self.name}>"
+
+    def validate(self, value, validators) -> None:
+        """``ToolParameter.validate`` with ``validators`` built from :attr:`validators`."""
+        if value in ["", None] and self.optional:
+            return
+        for validator in validators:
+            try:
+                validator.validate(value)
+            except ValueError as e:
+                raise ParameterValueError(str(e), self.name) from None
 
     def _sanitize(self, value):
         if self.tool is None or self.tool.options.sanitize:
@@ -147,6 +166,15 @@ class IntegerToolParameter(TextToolParameter):
     def __init__(self, tool, definition):
         super().__init__(tool, definition)
         self.multiple = bool(definition.get("multiple", False))
+
+    def validate(self, value, validators) -> None:
+        if not self.multiple or value is None:
+            return super().validate(value, validators)
+        values = value if isinstance(value, list) else [value]
+        if not values and not self.optional:
+            raise ParameterValueError("at least one integer is required", self.name)
+        for v in values:
+            super().validate(v, validators)
 
     def to_python(self, value):
         if self.multiple and value is not None:
@@ -251,6 +279,12 @@ class SelectToolParameter(ToolParameter):
 
     def to_python(self, value):
         return value
+
+    def validate(self, value, validators) -> None:
+        if not value:
+            super().validate(value, validators)
+        for v in value if self.multiple and isinstance(value, list) else [value]:
+            super().validate(v, validators)
 
     def to_param_dict_string(self, value, other_values=None):
         if value in (None, []):
@@ -358,6 +392,46 @@ class BaseDataToolParameter(ToolParameter):
         self.multiple = bool(definition.get("multiple", False))
         self.formats = definition.get("formats") or definition.get("extensions") or []
         self.load_contents = int(definition.get("load_contents") or 0)
+        self.min = definition.get("min")
+        self.max = definition.get("max")
+
+    def validate(self, value, validators) -> None:
+        """``BaseDataToolParameter.validate``: every dataset, including collection elements, and the dataset count."""
+        from galaxy.model import (
+            DatasetCollectionElement,
+            HistoryDatasetCollectionAssociation,
+        )
+
+        def check(dataset) -> None:
+            for validator in validators:
+                if (
+                    validator.requires_dataset_metadata
+                    and dataset
+                    and hasattr(dataset, "dataset")
+                    and dataset.dataset.state != "ok"
+                ):
+                    return
+                try:
+                    validator.validate(dataset)
+                except ValueError as e:
+                    raise ParameterValueError(str(e), self.name) from None
+
+        count = 0
+        items = (value if self.multiple and isinstance(value, list) else [value]) if value else []
+        for item in items:
+            if isinstance(item, HistoryDatasetCollectionAssociation):
+                datasets = item.collection.dataset_instances
+            elif isinstance(item, DatasetCollectionElement):
+                datasets = [item.hda] if item.hda else item.child_collection.dataset_instances
+            else:
+                datasets = [item]
+            for dataset in datasets:
+                count += 1
+                check(dataset)
+        if self.min is not None and self.min > count:
+            raise ParameterValueError(f"at least {self.min} datasets are required", self.name)
+        if self.max is not None and self.max < count:
+            raise ParameterValueError(f"at most {self.max} datasets are required", self.name)
 
     def value_from_basic(self, value, resolve: ResolveData):
         if value is None:

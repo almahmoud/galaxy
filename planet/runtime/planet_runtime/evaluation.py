@@ -23,6 +23,10 @@ import galaxy.model as model
 from galaxy.job_execution.output_format import resolve_format_source
 from galaxy.model.none_like import NoneDataset
 from galaxy.security.object_wrapper import wrap_with_safe_string
+from galaxy.tool_util_models.parameter_validators import (
+    DiscriminatedAnyValidatorModel,
+    StaticValidatorModel,
+)
 from galaxy.util import (
     find_instance_nested,
     unicodify,
@@ -45,6 +49,7 @@ from planet_runtime.parameters import (
     DataCollectionToolParameter,
     DataToolParameter,
     ParameterError,
+    ParameterValueError,
     params_from_basic,
     Repeat,
     Section,
@@ -197,6 +202,18 @@ def on_text_for_dataset_and_collections(dataset_hids: list[int], collection_hids
     return ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def static_validators(parameter) -> list[Any]:
+    """Galaxy's validators for the static validator models of ``parameter`` (regex, expression, length, ...).
+
+    Validators that need data tables or dataset metadata are not built.
+    """
+    try:
+        models = [DiscriminatedAnyValidatorModel.validate_python(definition) for definition in parameter.validators]
+    except ValueError as e:
+        raise ParameterValueError(f"invalid validator: {e}", parameter.name) from None
+    return galaxy_env.validation().to_validators(None, [m for m in models if isinstance(m, StaticValidatorModel)])
+
+
 def copy_state(value):
     """Copy the dictionaries and lists of a job state, sharing the values (``make_dict_copy``)."""
     if isinstance(value, dict):
@@ -329,6 +346,24 @@ class JobEvaluator:
             user.username = user_record.get("username") or ""
             user.id = user_record.get("id", 1)
         return model.User.user_template_environment(user)
+
+    def validate(self) -> None:
+        """Check the job state with the static validators, as ``check_param`` does when Galaxy creates the job.
+
+        Tool-author regular expressions and expressions run here, in the template child. Messages are joined
+        like those of Galaxy's ``RequestParameterInvalidException``.
+        """
+        errors: list[str] = []
+
+        def visitor(parameter, values, prefixed_name):
+            try:
+                parameter.validate(values.get(parameter.name), static_validators(parameter))
+            except ParameterError as e:
+                errors.append(str(e))
+
+        visit_inputs(self.inputs, self.incoming, visitor)
+        if errors:
+            raise EvaluationError("parameters", ", ".join(errors))
 
     # Outputs, as decided when Galaxy creates the job.
 
@@ -466,6 +501,9 @@ class JobEvaluator:
                 extra_files_path=self.layout.output_extra_files(uuid),
                 state="running",
             )
+            if plan is not None:
+                # Galaxy names output datasets with their label when it creates the job ($output.name).
+                hda.name = plan.label
             hda.init_meta()
             hdas[record["name"]] = hda
         return hdas

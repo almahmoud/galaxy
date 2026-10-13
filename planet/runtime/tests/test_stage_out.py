@@ -166,6 +166,8 @@ def test_tool_job_end_to_end(s3, layout, transfers, tmp_path, monkeypatch):
     discovered = {d["designation"]: d for d in results["discovered"] if d["output"] == "split"}
     assert sorted(discovered) == ["part1", "part2"]
     part2 = discovered["part2"]
+    # Galaxy names a discovered dataset after the output dataset, whose name is its label.
+    assert part2["name"] == "E2E on dataset 1 (part2)"
     assert part2["ext"] == "txt" and part2["visible"] is True
     assert part2["uuid"] == manifest["slots"][part2["slot"]]["uuid"]
     assert s3.get(f"datasets/{part2['uuid']}/data") == b"y\ny\n"
@@ -246,6 +248,21 @@ def test_walltime_without_exit_code(s3, layout, transfers, tmp_path, monkeypatch
     assert results["state"] == "error"
     assert results["job_stderr"]["text"] == "Job was active longer than specified deadline"
     assert results["tool_stdout"]["text"] == "partial log\n"
+
+
+def test_tool_that_never_starts_gets_not_started_results(s3, layout, transfers, tmp_path, monkeypatch):
+    manifest = simple_job(s3, tmp_path, FAILING_XML, "nostart1")
+    assert "limits" not in manifest
+    write_manifest(tmp_path, manifest, monkeypatch)
+    assert stage_in.run(layout, transfers) == 0
+    monkeypatch.setattr(stage_out, "DEFAULT_START_TIMEOUT_SECONDS", 0.5)
+    assert stage_out.run(layout, transfers) == 0
+    results = s3.json("jobs/nostart1/results.json")
+    validate(results, "results")
+    assert results["termination"] == "not_started"
+    assert results["state"] == "error"
+    assert results["job_messages"][0]["desc"] == "The tool container did not start."
+    assert results["outputs"]["out"]["state"] == "error"
 
 
 def test_template_error_fails_stage_in(s3, layout, transfers, tmp_path, monkeypatch):

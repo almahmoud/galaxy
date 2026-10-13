@@ -30,10 +30,15 @@ from planet_runtime import (
 )
 from planet_runtime.finishing import (
     FinishResult,
+    galaxy_registry,
     read_exit_code,
     ToolFinisher,
 )
 from planet_runtime.layout import Layout
+from planet_runtime.redact import (
+    error_message,
+    redact,
+)
 from planet_runtime.results import (
     dataset_state,
     DatasetTargets,
@@ -48,6 +53,8 @@ from planet_runtime.transfer import (
 
 log = logging.getLogger(__name__)
 
+DEFAULT_START_TIMEOUT_SECONDS = 900.0
+STARTED_POLL_SECONDS = 0.2
 SAFETY_POLL_SECONDS = 30.0
 
 
@@ -76,15 +83,18 @@ def wait_for_tool(layout: Layout, start_timeout: float | None = None) -> bool:
     last one is gone, a non-blocking read returns end-of-file and ``poll``
     reports POLLHUP. A read is checked as well as POLLHUP because Linux only
     reports POLLHUP for writers that opened after this reader.
-    Returns False if the tool did not start within ``start_timeout`` seconds.
+    Returns False if the tool did not start within ``start_timeout`` seconds
+    (``DEFAULT_START_TIMEOUT_SECONDS`` when None, no limit when 0).
     """
+    if start_timeout is None:
+        start_timeout = DEFAULT_START_TIMEOUT_SECONDS
     fd = os.open(layout.alive, os.O_RDONLY | os.O_NONBLOCK)
     try:
         deadline = time.monotonic() + start_timeout if start_timeout else None
         while not layout.started.exists():
             if deadline is not None and time.monotonic() > deadline:
                 return False
-            time.sleep(1.0)
+            time.sleep(STARTED_POLL_SECONDS)
         poller = select.poll()
         poller.register(fd, select.POLLIN | select.POLLHUP)
         while True:
@@ -164,7 +174,7 @@ def publish_datasets(
         try:
             outputs[name] = uploader.upload(hda, targets[name], state)
         except TransferError as e:
-            errors.append(f"Uploading output '{name}' failed: {e}")
+            errors.append(redact(f"Uploading output '{name}' failed: {e}"))
             raise
 
     slots = manifest.get("slots") or []
@@ -269,6 +279,7 @@ def finish_tool_job(
         exit_info.termination,
         input_dataset_keys=state.get("input_datasets"),
         input_ext=state.get("input_ext") or "data",
+        output_labels={name: plan.get("label") for name, plan in plans.items()},
     ).run()
     results.update(
         {
@@ -283,7 +294,7 @@ def finish_tool_job(
         }
     )
     if result.traceback:
-        results["traceback"] = result.traceback
+        results["traceback"] = redact(result.traceback)
     uploader = DatasetUploader(transfers, layout.stager, layout.root)
     results["outputs"], results["discovered"], results["output_collections"] = publish_datasets(
         manifest, uploader, result, results["errors"]
@@ -303,6 +314,11 @@ def run(layout: Layout, transfers: Transfers) -> int:
 
     manifest = state["manifest"]
     limits = manifest_module.limits(manifest)
+    try:
+        # Loaded while the tool runs rather than after it; finishing reports a failure.
+        galaxy_registry()
+    except Exception:
+        log.debug("Loading the datatypes registry failed", exc_info=True)
     exit_info = tool_exit(layout, manifest_module.id_tag(manifest), limits.get("start_timeout_seconds"))
     log.info("Tool finished: termination=%s exit_code=%s", exit_info.termination, exit_info.exit_code)
 
@@ -314,14 +330,14 @@ def run(layout: Layout, transfers: Transfers) -> int:
     except TransferError as e:
         ok = False
         results["state"] = "error"
-        results["errors"].append(str(e))
-        results["job_messages"].append(internal_message(f"Uploading job results failed: {e}"))
+        results["errors"].append(redact(str(e)))
+        results["job_messages"].append(internal_message(redact(f"Uploading job results failed: {e}")))
     except Exception as e:
         log.exception("Finishing the job failed")
         ok = False
         results["state"] = "error"
-        results["errors"].append(f"{type(e).__name__}: {e}")
-        results["traceback"] = traceback.format_exc()
+        results["errors"].append(error_message(e))
+        results["traceback"] = redact(traceback.format_exc())
         results["job_messages"].append(internal_message("Finishing the job failed in the pod."))
 
     results["timings"] = {

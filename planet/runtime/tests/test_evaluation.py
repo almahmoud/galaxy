@@ -289,3 +289,26 @@ def test_data_in_repeat_and_conditional_after_output_planning(layout):
     )
     assert result.outputs["o"].label == "dataset 4 and 9"
     assert sorted(evaluator.input_datasets) == ["opt|extra", "queries_0|part"]
+
+
+def test_output_names_are_their_labels(layout):
+    data = add_input(layout, "in1", "a\n", hid=3)
+    labelled, plain = new_uuid(), new_uuid()
+    manifest = tool_manifest(
+        "echo '$labelled.name' '$plain.name' '$input1.name'",
+        inputs=[{"name": "input1", "type": "data", "formats": ["txt"]}],
+        params={"input1": {"src": "hda", "key": "in1"}},
+        datasets={"in1": data},
+        outputs=[{"name": "labelled", "uuid": labelled}, {"name": "plain", "uuid": plain}],
+        tool_outputs={
+            "labelled": {
+                "model_class": "ToolOutput",
+                "name": "labelled",
+                "format": "txt",
+                "label": "${tool.name}: $input1.name",
+            },
+            "plain": {"model_class": "ToolOutput", "name": "plain", "format": "txt"},
+        },
+    )
+    _, result = evaluate(layout, manifest)
+    assert result.command_line == "echo 'Test Tool: in1' 'Test Tool on dataset 3' 'in1'"

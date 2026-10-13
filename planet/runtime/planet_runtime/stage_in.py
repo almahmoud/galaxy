@@ -35,6 +35,10 @@ from planet_runtime.layout import (
     ensure_empty_file,
     Layout,
 )
+from planet_runtime.redact import (
+    error_message,
+    redact,
+)
 from planet_runtime.template_worker import RESULT_PREFIX
 from planet_runtime.tool import normalize as normalize_tool
 from planet_runtime.transfer import (
@@ -123,38 +127,59 @@ def fetch_inputs(transfers: Transfers, layout: Layout, inputs: Mapping[str, Mapp
         list(pool.map(fetch, jobs))
 
 
-def evaluate_in_child(manifest: Mapping[str, Any], layout: Layout) -> dict[str, Any]:
-    """Run tool-author code in a child process that never sees a presigned request.
+class TemplateWorker:
+    """The child process that runs tool-author code and never sees a presigned request.
 
-    Processes the child leaves running are killed when it exits.
+    It starts before the downloads, so its imports run meanwhile, and gets the
+    manifest without requests once they are done. Processes it leaves running
+    are killed by the ``isolation.contained_children`` block around it.
     """
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in (manifest_module.MANIFEST_URL_ENV, manifest_module.MANIFEST_FILE_ENV)
-    }
-    environment["PLANET_ROOT"] = str(layout.root)
-    environment["PLANET_STAGER_ROOT"] = str(layout.stager)
-    with isolation.contained_children():
-        completed = subprocess.run(
+
+    def __init__(self, layout: Layout):
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in (manifest_module.MANIFEST_URL_ENV, manifest_module.MANIFEST_FILE_ENV)
+        }
+        environment["PLANET_ROOT"] = str(layout.root)
+        environment["PLANET_STAGER_ROOT"] = str(layout.stager)
+        self.process = subprocess.Popen(
             [sys.executable, "-m", "planet_runtime.template_worker"],
-            input=json.dumps(manifest_module.without_requests(manifest)),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=environment,
             cwd=layout.job,
-            timeout=TEMPLATE_TIMEOUT_SECONDS,
         )
-    for line in reversed(completed.stdout.splitlines()):
-        if line.startswith(RESULT_PREFIX):
-            result = json.loads(line[len(RESULT_PREFIX) :])
-            break
-    else:
-        detail = completed.stderr.strip().splitlines()[-1:] or [f"exit code {completed.returncode}"]
-        raise StageInError("templating", f"Template evaluation failed: {detail[0]}")
-    if not result.pop("ok"):
-        raise StageInError(result["phase"], result["message"])
-    return result
+
+    def __enter__(self) -> "TemplateWorker":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.communicate()
+
+    def evaluate(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            stdout, stderr = self.process.communicate(
+                json.dumps(manifest_module.without_requests(manifest)), timeout=TEMPLATE_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            raise StageInError(
+                "templating", f"Template evaluation did not finish within {TEMPLATE_TIMEOUT_SECONDS} seconds"
+            ) from None
+        for line in reversed(stdout.splitlines()):
+            if line.startswith(RESULT_PREFIX):
+                result = json.loads(line[len(RESULT_PREFIX) :])
+                break
+        else:
+            detail = stderr.strip().splitlines()[-1:] or [f"exit code {self.process.returncode}"]
+            raise StageInError("templating", f"Template evaluation failed: {detail[0]}")
+        if not result.pop("ok"):
+            raise StageInError(result["phase"], result["message"])
+        return result
 
 
 def check_volumes(layout: Layout) -> None:
@@ -173,17 +198,25 @@ def write_state(layout: Layout, state: Mapping[str, Any]) -> None:
         json.dump(state, fh)
 
 
-def stage_tool_job(manifest: Mapping[str, Any], layout: Layout, transfers: Transfers) -> dict[str, Any]:
-    """Prepare everything the tool container runs; returns the ``prepare.json`` fields."""
+def evaluate_tool_job(
+    manifest: Mapping[str, Any], layout: Layout, transfers: Transfers, worker: TemplateWorker
+) -> dict[str, Any]:
+    """Download the tool directory and the inputs, then evaluate the templates in ``worker``."""
+    check_volumes(layout)
+    fetch_tool_directory(transfers, layout, normalize_tool(manifest["tool"]))
+    fetch_inputs(transfers, layout, manifest.get("inputs") or {})
+    return worker.evaluate(manifest)
+
+
+def write_tool_job(manifest: Mapping[str, Any], layout: Layout, evaluation: Mapping[str, Any]) -> dict[str, Any]:
+    """Write what the tool container runs and stage-out's state; returns the ``prepare.json`` fields.
+
+    Called once the template worker and everything it started are gone.
+    """
     tool = normalize_tool(manifest["tool"])
     job = manifest["job"]
     id_tag = manifest_module.id_tag(manifest)
     shell = job.get("shell") or DEFAULT_SHELL
-
-    check_volumes(layout)
-    fetch_tool_directory(transfers, layout, tool)
-    fetch_inputs(transfers, layout, manifest.get("inputs") or {})
-    evaluation = evaluate_in_child(manifest, layout)
 
     output_definitions = tool.get("outputs") or {}
     produced = []
@@ -247,19 +280,22 @@ def run(layout: Layout, transfers: Transfers) -> int:
     prepare: dict[str, Any] = {"protocol": PROTOCOL_VERSION, "state": "ok", "errors": []}
     manifest: Mapping[str, Any] | None = None
     try:
-        manifest = manifest_module.load(transfers)
-        manifest_module.check(manifest, "tool")
-        prepare.update(job_id=manifest["job"]["id"], attempt=manifest["job"].get("attempt", 1))
         prepare_layout(layout)
-        prepare.update(stage_tool_job(manifest, layout, transfers))
+        # The worker imports Galaxy while the manifest, the tool directory and the inputs download.
+        with isolation.contained_children(), TemplateWorker(layout) as worker:
+            manifest = manifest_module.load(transfers)
+            manifest_module.check(manifest, "tool")
+            prepare.update(job_id=manifest["job"]["id"], attempt=manifest["job"].get("attempt", 1))
+            evaluation = evaluate_tool_job(manifest, layout, transfers, worker)
+        prepare.update(write_tool_job(manifest, layout, evaluation))
     except (StageInError, TransferError, manifest_module.ManifestError, OSError) as e:
         log.error("Stage-in failed: %s", e)
         prepare["state"] = "error"
-        prepare["errors"].append({"phase": getattr(e, "phase", "stage-in"), "message": str(e)})
+        prepare["errors"].append({"phase": getattr(e, "phase", "stage-in"), "message": redact(str(e))})
     except Exception as e:
         log.exception("Stage-in failed")
         prepare["state"] = "error"
-        prepare["errors"].append({"phase": "stage-in", "message": f"{type(e).__name__}: {e}"})
+        prepare["errors"].append({"phase": "stage-in", "message": error_message(e)})
     prepare["timings"] = {"stage_in_start": started, "stage_in_end": termination.utcnow()}
 
     target = manifest_module.job_file(manifest, "prepare") if manifest is not None else None

@@ -1,0 +1,189 @@
+"""Stage-in checks the job state with the tool's static validators, as Galaxy does when it creates a job."""
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+from conftest import (
+    dataset_targets,
+    job_files,
+    new_uuid,
+    write_manifest,
+)
+from test_evaluation import (
+    add_input,
+    tool_manifest,
+)
+
+from planet_runtime import (
+    isolation,
+    stage_in,
+)
+from planet_runtime.evaluation import (
+    EvaluationError,
+    JobEvaluator,
+)
+from planet_runtime.stage_in import prepare_layout
+
+COLUMNS = {
+    "type": "regex",
+    "message": "Column ordinal positions separated by commas",
+    "implicit": False,
+    "negate": False,
+    "expression": r"^(c?[1-9]\d*)(,c?[1-9]\d*)*$",
+}
+
+
+def text(name, *validators, **attributes):
+    return {"name": name, "type": "text", "validators": list(validators), **attributes}
+
+
+def validate(layout, inputs, params, datasets=None):
+    prepare_layout(layout)
+    JobEvaluator(tool_manifest("echo", inputs=inputs, params=params, datasets=datasets), layout).validate()
+
+
+def rejection(layout, inputs, params, datasets=None) -> str:
+    with pytest.raises(EvaluationError) as error:
+        validate(layout, inputs, params, datasets)
+    assert error.value.phase == "parameters"
+    return str(error.value)
+
+
+def test_valid_values_pass(layout):
+    inputs = [
+        text("columns", COLUMNS),
+        {"name": "n", "type": "integer", "validators": [{"type": "in_range", "min": 1, "max": 10, "implicit": True}]},
+        text("label", {"type": "length", "min": 1, "max": 5}, {"type": "empty_field"}),
+    ]
+    validate(layout, inputs, {"columns": "1,c3", "n": "4", "label": "abc"})
+
+
+def test_regex_uses_python_syntax_and_galaxy_messages(layout):
+    named = {"type": "regex", "expression": r"(?P<n>[0-9]+)\Z", "message": "Value '%s' is not a number"}
+    message = rejection(layout, [text("columns", COLUMNS), text("count", named)], {"columns": "1;2", "count": "12a"})
+    assert message == (
+        "Parameter 'columns': Column ordinal positions separated by commas, Parameter 'count': Value '12a' is not a number"
+    )
+
+
+def test_galaxy_default_messages_and_negation(layout):
+    message = rejection(
+        layout,
+        [
+            {
+                "name": "n",
+                "type": "integer",
+                "validators": [{"type": "in_range", "min": 1, "max": 10, "implicit": True}],
+            },
+            text("word", {"type": "regex", "expression": "^bad", "negate": True}),
+            text("name", {"type": "empty_field"}),
+            text("short", {"type": "length", "max": 2}),
+        ],
+        {"n": "11", "word": "badger", "name": "", "short": "abc"},
+    )
+    assert message == (
+        "Parameter 'n': Value ('11') must fulfill (1 <= value <= 10), "
+        "Parameter 'word': Value 'badger' does match regular expression '^bad', "
+        "Parameter 'name': Field requires a value, "
+        "Parameter 'short': Must have length of at least None and at most 2"
+    )
+
+
+def test_optional_empty_values_and_non_static_validators_are_skipped(layout):
+    inputs = [
+        text("opt", COLUMNS, optional=True),
+        {"name": "n", "type": "integer", "optional": True, "validators": [{"type": "in_range", "min": 1}]},
+        {"name": "build", "type": "text", "validators": [{"type": "unspecified_build"}]},
+    ]
+    validate(layout, inputs, {"opt": "", "n": None, "build": "x"})
+
+
+def test_nested_parameters_and_selects(layout):
+    inputs = [
+        {
+            "name": "cond",
+            "type": "conditional",
+            "test_param": {"name": "mode", "type": "select", "options": [{"value": "a"}, {"value": "b"}]},
+            "cases": [{"value": "a", "inputs": [text("cols", COLUMNS)]}, {"value": "b", "inputs": []}],
+        },
+        {"name": "rep", "type": "repeat", "inputs": [text("q", {"type": "length", "max": 3})]},
+        {
+            "name": "pick",
+            "type": "select",
+            "multiple": True,
+            "options": [{"value": "x"}, {"value": "yy"}],
+            "validators": [{"type": "regex", "expression": "^x$", "message": "only x, not %s"}],
+        },
+    ]
+    message = rejection(
+        layout,
+        inputs,
+        {"cond": {"mode": "a", "cols": "0"}, "rep": [{"q": "ok"}, {"q": "toolong"}], "pick": ["x", "yy"]},
+    )
+    assert message == (
+        "Parameter 'cols': Column ordinal positions separated by commas, "
+        "Parameter 'q': Must have length of at least None and at most 3, "
+        "Parameter 'pick': only x, not yy"
+    )
+
+
+def test_expression_validators_see_the_dataset(layout):
+    report = add_input(layout, "r1", "<html/>", ext="html")
+    inputs = [
+        {
+            "name": "input",
+            "type": "data",
+            "formats": ["txt"],
+            "validators": [
+                {
+                    "type": "expression",
+                    "message": "MultiQC does not accept the HTML report generated by FastQC, only the Raw Data",
+                    "expression": 'value is not None and value.extension != "html"',
+                },
+                {"type": "metadata", "implicit": True},
+            ],
+        }
+    ]
+    message = rejection(layout, inputs, {"input": {"src": "hda", "key": "r1"}}, {"r1": report})
+    assert message == (
+        "Parameter 'input': MultiQC does not accept the HTML report generated by FastQC, only the Raw Data"
+    )
+    data = add_input(layout, "d1", "x\n", ext="txt")
+    validate(layout, inputs, {"input": {"src": "hda", "key": "d1"}}, {"d1": data})
+
+
+def template_workers() -> set[int]:
+    # Tests run as PID 1 of the container, which also inherits orphans of other tests.
+    workers = set()
+    for pid in isolation.children(os.getpid()):
+        try:
+            if b"template_worker" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                workers.add(pid)
+        except OSError:
+            pass
+    return workers
+
+
+def test_invalid_value_fails_stage_in_with_galaxy_message(s3, layout, transfers, tmp_path, monkeypatch):
+    manifest = tool_manifest(
+        "echo '$columns' > '$out'",
+        inputs=[text("columns", COLUMNS)],
+        params={"columns": "1; touch /planet/pwned"},
+        outputs=[{"name": "out", **dataset_targets(s3, new_uuid())}],
+        tool_outputs={"out": {"model_class": "ToolOutput", "name": "out", "format": "txt"}},
+    )
+    manifest["job"]["id"] = "invalid1"
+    manifest["job_files"] = job_files(s3, "invalid1")
+    write_manifest(tmp_path, manifest, monkeypatch)
+    assert stage_in.run(layout, transfers) == 1
+    prepare = s3.json("jobs/invalid1/prepare.json")
+    assert prepare["state"] == "error"
+    assert prepare["errors"] == [
+        {"phase": "parameters", "message": "Parameter 'columns': Column ordinal positions separated by commas"}
+    ]
+    termination = json.loads((tmp_path / "termination-log").read_text())
+    assert termination["error"] == "Parameter 'columns': Column ordinal positions separated by commas"
+    assert not layout.tool_script.exists()
+    assert not template_workers()

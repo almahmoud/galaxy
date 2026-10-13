@@ -515,7 +515,7 @@
                 "name": { "type": "string" },
                 "value_ref": { "type": ["string", "null"] },
                 "value_ref_in_group": { "type": "boolean" },
-                "value_from": { "type": ["string", "null"], "description": "Python callable reference; cases are then unknown." },
+                "value_from": { "type": ["string", "null"], "description": "Galaxy reference <object>:<attribute path> to the callable that gives the cases. The generator computes the cases of self:app.datatypes_registry.* references; for others the cases are empty." },
                 "test_param": {
                     "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/parameter" }]
                 },

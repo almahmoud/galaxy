@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-planet-stager = "planet_runtime.cli:main"
+planet-stager = "planet_runtime.cli:entry"
 
 [tool.setuptools.packages.find]
 include = ["planet_runtime*"]

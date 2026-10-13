@@ -16,6 +16,7 @@ browser and as XML snippets for Galaxy's own classes in the job pod.
 import copy
 import logging
 import math
+from types import SimpleNamespace
 from typing import Any
 
 from galaxy.tool_util.loader import template_macro_params
@@ -42,12 +43,14 @@ from galaxy.tool_util.parser.util import (
     parse_tool_version_with_defaults,
     text_input_is_optional,
 )
+from galaxy.tool_util.parser.xml import XmlPageSource
 from galaxy.tool_util_models.parameter_validators import (
     InRangeParameterValidatorModel,
     MetadataParameterValidatorModel,
 )
 from galaxy.util import (
     string_as_bool,
+    XML,
     xml_to_string,
 )
 from galaxy.util.bunch import Bunch
@@ -145,7 +148,8 @@ def build_bundle(
     """Return the bundle for ``tool_source``.
 
     ``tool_id`` overrides the id in the tool source (Tool Shed GUIDs); ``datatypes_registry``
-    adds EDAM terms to outputs as ``ToolOutput.to_dict(app=...)`` does on a server.
+    adds EDAM terms to outputs as ``ToolOutput.to_dict(app=...)`` does on a server and gives
+    the cases of conditionals whose cases come from it (``value_from``).
     """
     profile = parse_profile_version(tool_source)
     profile_version = Version(str(profile))
@@ -179,8 +183,12 @@ def build_bundle(
     pages = tool_source.parse_input_pages()
     inputs_by_page: list[list[dict[str, Any]]] = []
     displays: list[str | None] = []
+    # The part of galaxy.tools.Tool that ``self`` in a conditional's ``value_from`` can reach here.
+    tool_stand_in = None
+    if datatypes_registry is not None:
+        tool_stand_in = SimpleNamespace(app=SimpleNamespace(datatypes_registry=datatypes_registry))
     for page_source in pages.page_sources:
-        inputs_by_page.append(_parse_input_elem(page_source, profile))
+        inputs_by_page.append(_parse_input_elem(page_source, profile, tool_stand_in))
         displays.append(page_source.parse_display())
     try:
         parameter_models = input_models_for_pages(pages, profile)
@@ -357,15 +365,15 @@ def _code_files(root) -> list[dict[str, Any]]:
 # --- inputs -----------------------------------------------------------------------------
 
 
-def _parse_input_elem(page_source: PageSource, profile: float) -> list[dict[str, Any]]:
+def _parse_input_elem(page_source: PageSource, profile: float, tool: Any = None) -> list[dict[str, Any]]:
     """Mirror ``Tool.parse_input_elem``: later inputs with the same name replace earlier ones."""
     inputs: dict[str, dict[str, Any]] = {}
     for input_source in page_source.parse_input_sources():
         input_type = input_source.parse_input_type()
         if input_type == "repeat":
-            group = _repeat(input_source, profile)
+            group = _repeat(input_source, profile, tool)
         elif input_type == "conditional":
-            group = _conditional(input_source, inputs, profile)
+            group = _conditional(input_source, inputs, profile, tool)
         elif input_type == "section":
             group = {
                 "model_class": "Section",
@@ -374,7 +382,7 @@ def _parse_input_elem(page_source: PageSource, profile: float) -> list[dict[str,
                 "title": input_source.get("title"),
                 "help": input_source.get("help", None),
                 "expanded": input_source.get_bool("expanded", False),
-                "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile),
+                "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile, tool),
             }
         elif input_type == "upload_dataset":
             elem = input_source.elem()
@@ -386,7 +394,7 @@ def _parse_input_elem(page_source: PageSource, profile: float) -> list[dict[str,
                 "file_type_name": elem.get("file_type_name", "file_type"),
                 "default_file_type": elem.get("default_file_type", "txt"),
                 "metadata_ref": elem.get("metadata_ref", "files_metadata"),
-                "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile),
+                "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile, tool),
             }
             file_type_param = inputs.get(group["file_type_name"])
             if file_type_param is not None and file_type_param["model_class"].endswith("Parameter"):
@@ -399,7 +407,7 @@ def _parse_input_elem(page_source: PageSource, profile: float) -> list[dict[str,
     return list(inputs.values())
 
 
-def _repeat(input_source: InputSource, profile: float) -> dict[str, Any]:
+def _repeat(input_source: InputSource, profile: float, tool: Any = None) -> dict[str, Any]:
     name = input_source.get("name")
     minimum = int(input_source.get("min", 0))
     maximum = float(input_source.get("max", math.inf))
@@ -415,11 +423,13 @@ def _repeat(input_source: InputSource, profile: float) -> dict[str, Any]:
         "default": default,
         "min": minimum,
         "max": None if math.isinf(maximum) else int(maximum),
-        "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile),
+        "inputs": _parse_input_elem(input_source.parse_nested_inputs_source(), profile, tool),
     }
 
 
-def _conditional(input_source: InputSource, siblings: dict[str, dict[str, Any]], profile: float) -> dict[str, Any]:
+def _conditional(
+    input_source: InputSource, siblings: dict[str, dict[str, Any]], profile: float, tool: Any = None
+) -> dict[str, Any]:
     name = input_source.get("name")
     value_ref = input_source.get("value_ref", None)
     value_from = input_source.get("value_from", None)
@@ -432,12 +442,12 @@ def _conditional(input_source: InputSource, siblings: dict[str, dict[str, Any]],
         "value_from": value_from,
     }
     if value_from:
-        # Cases come from Python code in the tool (only builtin tools use this).
+        # The test parameter is the preceding input named by value_ref.
         if value_ref not in siblings:
             raise BundleError(f"Conditional {name}: value_ref {value_ref!r} is not a preceding input")
         siblings[value_ref]["refresh_on_change"] = True
         group["test_param"] = None
-        group["cases"] = []
+        group["cases"] = _value_from_cases(value_from, profile, tool)
         return group
 
     test_param = parameter(input_source.parse_test_input_source(), profile)
@@ -454,7 +464,7 @@ def _conditional(input_source: InputSource, siblings: dict[str, dict[str, Any]],
         possible_cases = list(test_param["legal_values"])
     cases = []
     for value, case_source in input_source.parse_when_input_sources():
-        cases.append({"value": value, "inputs": _parse_input_elem(case_source, profile)})
+        cases.append({"value": value, "inputs": _parse_input_elem(case_source, profile, tool)})
         if value in possible_cases:
             possible_cases.remove(value)
     # Galaxy adds an empty case for each selectable value without a <when>.
@@ -463,6 +473,34 @@ def _conditional(input_source: InputSource, siblings: dict[str, dict[str, Any]],
     group["test_param"] = test_param
     group["cases"] = cases
     return group
+
+
+def _value_from_cases(value_from: str, profile: float, tool: Any) -> list[dict[str, Any]]:
+    """Cases Galaxy computes when it loads the tool: ``<object>:<attribute path>`` names a callable that
+    returns ``{case value: inputs XML}`` (``Tool.parse_input_elem``).
+
+    Only ``self:app.datatypes_registry.*`` (the upload tool's metadata conditional) resolves here; other
+    references, or no registry, leave the cases empty.
+    """
+    holder, _, path = value_from.partition(":")
+    if holder != "self" or tool is None or not path.startswith("app.datatypes_registry."):
+        return []
+    target = tool
+    try:
+        for attribute in path.split("."):
+            target = getattr(target, attribute)
+    except AttributeError:
+        return []
+    if not callable(target):
+        return []
+    cases = []
+    # Galaxy passes (context, the conditional, the tool); the registry's callables use none of them.
+    for value, inputs_xml in target(None, None, tool).items():
+        inputs = []
+        if inputs_xml:
+            inputs = _parse_input_elem(XmlPageSource(XML(f"<when>{inputs_xml}</when>")), profile, tool)
+        cases.append({"value": value, "inputs": inputs})
+    return cases
 
 
 def parameter(input_source: InputSource, profile: float) -> dict[str, Any]:

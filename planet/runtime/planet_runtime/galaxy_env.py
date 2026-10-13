@@ -2,9 +2,10 @@
 
 ``galaxy.tools`` is not part of any Galaxy package. The image carries the
 unmodified files the stager needs (``wrappers.py``, ``data_fetch.py``,
-``parameters/wrapped_json.py`` and ``parameters/sanitize.py``) from the same
-commit as the installed packages, under ``PLANET_GALAXY_LIB``. They are loaded
-under their real module names; ``galaxy.tools.parameters.basic`` is replaced by
+``parameters/wrapped_json.py``, ``parameters/sanitize.py`` and
+``parameters/validation.py``) from the same commit as the installed packages,
+under ``PLANET_GALAXY_LIB``. They are loaded under their real module names;
+``galaxy.tools.parameters.basic`` is replaced by
 :mod:`planet_runtime.parameters`, which implements the parameter behaviour the
 wrappers rely on. The generators also use ``galaxy.managers.datatypes`` and
 ``galaxy.managers.dbkeys``, which the image carries the same way.
@@ -30,6 +31,7 @@ _VENDORED = (
 )
 _WRAPPERS = ("galaxy.tools.wrappers", "galaxy/tools/wrappers.py")
 _DATA_FETCH = ("galaxy.tools.data_fetch", "galaxy/tools/data_fetch.py")
+_VALIDATION = ("galaxy.tools.parameters.validation", "galaxy/tools/parameters/validation.py")
 
 
 @functools.cache
@@ -125,6 +127,12 @@ def install() -> None:
 def data_fetch() -> types.ModuleType:
     install()
     return _load(*_DATA_FETCH)
+
+
+def validation() -> types.ModuleType:
+    """``galaxy.tools.parameters.validation``: the validator classes Galaxy checks job parameters with."""
+    install_base()
+    return _load(*_VALIDATION)
 
 
 @functools.cache

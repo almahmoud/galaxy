@@ -10,19 +10,36 @@ JSON Schemas: [`planet/runtime/schemas/`](../runtime/schemas): `manifest`,
 
 ## Objects
 
-All keys are relative to the configured bucket prefix.
+All keys are relative to the configured bucket prefix. Every dispatch of a job
+is an attempt, numbered from 1 (the manifest's `job.attempt`), with its own
+objects under `jobs/<job>/a<attempt>/`, so a later dispatch never rewrites what
+the pod of an earlier attempt reads or writes.
 
 | Key | Written by | Content |
 |---|---|---|
-| `jobs/<job>/manifest.json` | browser | The manifest. |
-| `jobs/<job>/prepare.json` | stage-in | Evaluated command and output decisions. |
-| `jobs/<job>/stdout`, `stderr` | stage-out | Full `tool_stdout` and `tool_stderr`. |
-| `jobs/<job>/results.json` | pod, last | Job and dataset results; its presence commits the job. |
+| `jobs/<job>/a<n>/manifest.json` | browser | The manifest of attempt `n`. |
+| `jobs/<job>/a<n>/dispatch.json` | browser | What the browser created for the attempt (below). Pods never read it. |
+| `jobs/<job>/a<n>/prepare.json` | stage-in | Evaluated command and output decisions. |
+| `jobs/<job>/a<n>/stdout`, `stderr` | stage-out | Full `tool_stdout` and `tool_stderr`. |
+| `jobs/<job>/a<n>/results.json` | pod, last | Job and dataset results; its presence commits the attempt. |
 | `datasets/<uuid>/data` | pod | Dataset content. |
 | `datasets/<uuid>/meta.json` | pod | The dataset record also found in `results.json`. |
 | `datasets/<uuid>/meta/<n>` | pod | Metadata files such as `bam_index`. |
 | `datasets/<uuid>/extra.tar`, `extra.json` | pod | Extra files as an uncompressed tar and its index. |
 | `datasets/<uuid>/extra/<n>` | pod | Optional copy of each extra file as its own object. |
+
+Jobs dispatched before attempts had their own prefix kept these objects
+directly under `jobs/<job>/`; the browser still reads them there when it
+ingests such a job, and writes nothing there.
+
+`dispatch.json` is the browser's record of one attempt: `protocol`, `job_id`,
+`attempt`, `dispatch_id` (a random hex string, also the
+`planet.dev/dispatch-id` annotation of the Kubernetes Job created from it),
+`kind`, `create_time`, `walltime_seconds`, `deadline_seconds`, `slots`,
+`memory_mb`, `slot_uuids` (the dataset UUIDs of the manifest's `slots`, in
+order) and `multipart` (the uploads the browser created for outputs: `output`,
+`uuid`, `key`, `upload_id`, `part_size`, `parts`). Ingest accepts discovered
+datasets only in those slots and completes or aborts those uploads.
 
 The browser chooses every key and presigns one URL per object. The manifest
 carries only presigned requests, `{"url": ..., "headers": {...}}` or a bare URL
@@ -84,29 +101,39 @@ memory or file descriptors.
 ### Stage-in
 
 1. Downloads the manifest, the tool archive and the inputs.
-2. Evaluates the command, config files and environment variables with
+2. Checks `params` with the static validators of each parameter (`regex`,
+   `expression`, `in_range`, `length`, `empty_field`, `no_options`) and the
+   dataset counts of data parameters, with Galaxy's validator classes and
+   messages, as Galaxy does when it creates a job. A failure fails stage-in
+   in phase `parameters` with Galaxy's message, for example
+   `Parameter 'columns': Column ordinal positions separated by commas`;
+   several are joined with `, `. Validators that need dataset metadata or
+   data tables are not checked in the pod.
+3. Evaluates the command, config files and environment variables with
    Galaxy's `fill_template`, `galaxy.tools.wrappers` and sanitization, as
    `ToolEvaluator` does. Output filters, `format="input"`, `format_source`,
    `change_format` and labels are resolved as Galaxy resolves them when it
-   creates a job. This tool-author code runs in a child process that gets
-   the manifest without presigned requests and an environment without
-   `PLANET_MANIFEST_URL`. Requests are removed by their place in the
-   manifest: `job_files` and `slots` entirely, the request fields of
-   `inputs`, `outputs` and `tool.archive`; `params` and the rest of `tool`
-   are passed unchanged. Processes the child leaves running are killed when
-   it exits.
-3. Creates every unfiltered declared output as an empty
+   creates a job, and declared outputs are named with their label, so
+   `$output.name` renders like in Galaxy. Validators and this tool-author code
+   run in a child process that gets the manifest without presigned requests
+   and an environment without `PLANET_MANIFEST_URL`. Requests are removed by
+   their place in the manifest: `job_files` and `slots` entirely, the request
+   fields of `inputs`, `outputs` and `tool.archive`; `params` and the rest of
+   `tool` are passed unchanged. The child starts before the downloads, so its
+   imports overlap them. Processes the child leaves running are killed when it
+   exits.
+4. Creates every unfiltered declared output as an empty
    `outputs/dataset_<uuid>.dat`.
-4. Writes Galaxy's job script (`DEFAULT_JOB_FILE_TEMPLATE.sh` with the
+5. Writes Galaxy's job script (`DEFAULT_JOB_FILE_TEMPLATE.sh` with the
    Kubernetes runner's options): slots and memory statements, `HOME` and
    temporary directories, `tool_script.sh` with stdout and stderr streamed
    through `tee` into `outputs/tool_stdout` and `outputs/tool_stderr`, the exit
    code file and the `from_work_dir` copies.
-5. Writes `run-tool` and the `alive` FIFO.
-6. Clears `/planet-stager`, writes `stage-in.json` there, then uploads
+6. Writes `run-tool` and the `alive` FIFO.
+7. Clears `/planet-stager`, writes `stage-in.json` there, then uploads
    `prepare.json`.
 
-It exits 1 when templating or a download fails; `prepare.json` then has
+It exits 1 when validation, templating or a download fails; `prepare.json` then has
 `"state": "error"` and `errors`.
 
 ### Tool container
@@ -135,12 +162,15 @@ datatypes. It uploads every dataset, then `results.json`.
 | `normal` | `rc` exists; the exit code is the tool's. |
 | `walltime` | The wrapper's walltime fired. |
 | `signal` | All tool processes died without `rc`: memory limit, eviction or a kill. |
-| `not_started` | The tool did not start within `limits.start_timeout_seconds`. |
+| `not_started` | The tool did not start within `limits.start_timeout_seconds` of stage-out starting (900 s when absent or null). |
 | `oom` | Not written by the pod; the browser may use it when pod status reports `OOMKilled`. |
 
 Every stager writes a JSON summary of at most 4 KiB to `/dev/termination-log`
 (`PLANET_TERMINATION_LOG`), with `stage`, `state` and `error`; set
-`terminationMessagePolicy: FallbackToLogsOnError`. Transfers retry with
+`terminationMessagePolicy: FallbackToLogsOnError`. Termination messages, logs
+and the `errors` and `traceback` the stagers report carry no presigned
+request: URL queries with SigV4 parameters and stray `X-Amz-*` or
+`Signature=` values are replaced by `[redacted]`. Transfers retry with
 exponential backoff on network errors, 408, 425, 429 and 5xx, for up to 10
 minutes in stage-in and 30 minutes otherwise. A stager exits 0 when it
 uploaded its result document, whatever the job's state.
@@ -220,7 +250,7 @@ media, sized for their expected file count.
 `input_datasets` maps Galaxy's job input names (such as `queries_0|input2`) to
 `inputs` keys; it is derived from `params` when absent. `limits` sets
 `max_discovered_files`, `max_metadata_value_size` and
-`start_timeout_seconds`.
+`start_timeout_seconds` (900 when absent or null, 0 for no limit).
 
 `upload` (kind `upload`) is the body of `POST /api/tools/fetch`. Elements with
 `"src": "planet"` and `"file": <key>` are downloaded from `upload.files` and

@@ -208,3 +208,26 @@ def test_galaxy_tools_produce_valid_bundles():
 def test_rejects_tools_for_newer_galaxy(tmp_path):
     with pytest.raises(BundleError, match="newer"):
         _bundle(tmp_path, _tool(attrs='profile="99.0"'))
+
+
+def test_value_from_conditional_gets_the_cases_galaxy_computes():
+    pytest.importorskip("edam_ontology")
+    from planet_runtime.generate.datatypes import load_registry
+
+    registry = load_registry()
+    upload = Path(galaxy_directory()) / "tools" / "data_source" / "upload.xml"
+    bundle = build_bundle(get_tool_source(str(upload)), datatypes_registry=registry)
+    (conditional,) = [i for i in bundle["inputs"] if i["name"] == "files_metadata"]
+    assert conditional["test_param"] is None and conditional["value_ref"] == "file_type"
+    expected = registry.get_upload_metadata_params(None, None, None)
+    assert [case["value"] for case in conditional["cases"]] == list(expected)
+    cases = {case["value"]: case["inputs"] for case in conditional["cases"]}
+    assert cases["txt"] == [] and "auto" in cases
+    velvet = {param["name"]: param for param in cases["velvet"]}
+    assert list(velvet) == ["base_name", "paired_end_reads", "long_reads", "short2_reads"]
+    assert velvet["base_name"]["type"] == "text" and velvet["base_name"]["value"] == "velvet"
+    assert velvet["base_name"]["label"] == 'Set metadata value for "base_name"'
+    assert not list(_validator().iter_errors(bundle))
+
+    without_registry = build_bundle(get_tool_source(str(upload)))
+    assert [i for i in without_registry["inputs"] if i["name"] == "files_metadata"][0]["cases"] == []

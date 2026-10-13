@@ -20,6 +20,7 @@ from planet_runtime import (
 )
 from planet_runtime.finishing import set_metadata_on
 from planet_runtime.layout import Layout
+from planet_runtime.redact import redact
 from planet_runtime.results import (
     DatasetTargets,
     DatasetUploader,
@@ -85,7 +86,7 @@ def run(layout: Layout, transfers: Transfers) -> int:
             outputs[entry["output"]] = uploader.upload(hda, targets[entry["output"]], dataset_state, upload_data=False)
     except (TransferError, KeyError, OSError) as e:
         log.error("Setting metadata failed: %s", e)
-        errors.append(str(e))
+        errors.append(redact(str(e)))
         state = "error"
 
     results = base_results(manifest, "set_metadata", state)

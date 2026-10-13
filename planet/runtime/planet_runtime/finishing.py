@@ -283,8 +283,10 @@ class ToolFinisher:
         termination: str,
         input_dataset_keys: Mapping[str, str | None] | None = None,
         input_ext: str = "data",
+        output_labels: Mapping[str, str | None] | None = None,
     ):
         self.manifest = manifest
+        self.output_labels = dict(output_labels or {})
         self.input_dataset_keys = dict(input_dataset_keys or self.manifest.get("input_datasets") or {})
         self.input_ext = input_ext
         self.layout = layout
@@ -318,6 +320,8 @@ class ToolFinisher:
             uuid = record["uuid"]
             extension = self.output_formats.get(name) or record.get("ext") or "data"
             hda = datasets.make_hda(record, self.layout.output_path(uuid), extension=extension, state="running")
+            if label := self.output_labels.get(name):
+                hda.name = label
             if isinstance(hda.id, int):
                 hda.dataset.id = hda.id
             definition = (self.tool.get("outputs") or {}).get(name) or {}

@@ -27,9 +27,18 @@ Multi-architecture images are built with
 `/planet-stager` are writable volumes. Galaxy files that no package ships are copied unmodified to
 `/opt/planet/galaxy`, a partial Galaxy root (`GALAXY_INCLUDES_ROOT`):
 `galaxy/tools/wrappers.py`, `data_fetch.py`, `parameters/sanitize.py`,
-`parameters/wrapped_json.py`, the job script templates,
+`parameters/validation.py`, `parameters/wrapped_json.py`, the job script templates,
 `datatypes_conf.xml.sample`, `galaxy/managers/datatypes.py` and `dbkeys.py`
 under `lib/`, Galaxy's `tools/` and `tool-data/shared/ucsc/builds.txt.sample`.
+
+Every module the stagers import, the standard library included, is compiled at
+build time with `--invalidation-mode unchecked-hash`: the image is never
+modified, so Python uses the bytecode without checking the sources, and a
+read-only root filesystem or uid 10001 never leads to compiling on each start.
+Mounting an edited source file over one in the image therefore has no effect;
+mount whole package directories or rebuild. Importing Galaxy's model still takes a few seconds per process, so stage-in
+starts its template process before the downloads and the stagers exit without
+the interpreter's teardown.
 
 ## Static data generators
 

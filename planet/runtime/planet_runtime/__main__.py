@@ -1,5 +1,3 @@
-import sys
+from planet_runtime.cli import entry
 
-from planet_runtime.cli import main
-
-sys.exit(main())
+entry()

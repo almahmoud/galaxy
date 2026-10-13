@@ -135,7 +135,8 @@
             "number",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "description": "Seconds stage-out waits for the tool container to start before it reports not_started: 900 when null or absent, no limit when 0."
         }
       }
     },

@@ -18,6 +18,7 @@
 !lib/galaxy/tools/wrappers.py
 !lib/galaxy/tools/parameters/wrapped_json.py
 !lib/galaxy/tools/parameters/sanitize.py
+!lib/galaxy/tools/parameters/validation.py
 !lib/galaxy/jobs/runners/util/job_script/*.sh
 !lib/galaxy/managers/__init__.py
 !lib/galaxy/managers/datatypes.py

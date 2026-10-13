@@ -1,6 +1,8 @@
+import gc
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tarfile
 import time
@@ -9,8 +11,10 @@ import pytest
 from conftest import SCHEMAS
 
 from planet_runtime import (
+    cli,
     results as results_module,
     stage_in,
+    stage_out,
     termination,
 )
 from planet_runtime.results import (
@@ -101,10 +105,37 @@ def test_wait_for_tool_outlives_background_processes(layout):
     assert exit_info.termination == "normal" and exit_info.exit_code == 0
 
 
-def test_wait_for_tool_start_timeout(layout):
+def test_wait_for_tool_start_timeout(layout, monkeypatch):
     prepare_layout(layout)
     assert wait_for_tool(layout, start_timeout=0.5) is False
     assert tool_exit(layout, "none", start_timeout=0.5).termination == "not_started"
+    monkeypatch.setattr(stage_out, "DEFAULT_START_TIMEOUT_SECONDS", 0.5)
+    assert tool_exit(layout, "none").termination == "not_started"
+
+
+def test_console_script_exits_with_its_output_flushed(layout):
+    prepare_layout(layout)
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONUNBUFFERED"}
+    environment.update(PLANET_ROOT=str(layout.root), PLANET_STAGER_ROOT=str(layout.stager))
+    completed = subprocess.run(
+        ["planet-stager", "wait", "--start-timeout", "0.2"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["termination"] == "not_started"
+
+
+def test_gc_paused_collects_again_afterwards():
+    gc.unfreeze()
+    try:
+        with cli.gc_paused():
+            assert not gc.isenabled()
+        assert gc.isenabled() and gc.get_freeze_count() > 0
+    finally:
+        gc.unfreeze()
 
 
 @pytest.mark.parametrize("name", ["manifest", "prepare", "results"])

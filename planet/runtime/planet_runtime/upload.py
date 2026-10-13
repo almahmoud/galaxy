@@ -30,6 +30,10 @@ from planet_runtime.finishing import (
     PlanetJobContext,
 )
 from planet_runtime.layout import Layout
+from planet_runtime.redact import (
+    error_message,
+    redact,
+)
 from planet_runtime.results import DatasetUploader
 from planet_runtime.stage_in import prepare_layout
 from planet_runtime.stage_out import (
@@ -124,12 +128,12 @@ def run(layout: Layout, transfers: Transfers) -> int:
         collections = hdcas
     except TransferError as e:
         log.error("Upload failed: %s", e)
-        errors.append(str(e))
+        errors.append(redact(str(e)))
         state = "error"
         discovered, collections = [], {}
     except Exception as e:
         log.exception("Upload failed")
-        errors.append(f"{type(e).__name__}: {e}")
+        errors.append(error_message(e))
         state = "error"
         discovered, collections = [], {}
     if state == "error":
@@ -170,7 +174,7 @@ def run(layout: Layout, transfers: Transfers) -> int:
     except TransferError as e:
         ok = False
         results["state"] = "error"
-        errors.append(str(e))
+        errors.append(redact(str(e)))
     results["timings"] = {"stage_out_start": started, "stage_out_end": termination.utcnow()}
     uploaded = publish_results(transfers, manifest, results)
     termination.write(
