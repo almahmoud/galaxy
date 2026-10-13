@@ -24,3 +24,17 @@ The image tag in `planet/scripts/e2e.sh` and `@playwright/test` in `package.json
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/planet/tests/e2e:/e2e" -w /e2e <image> \
     npm install --package-lock-only --ignore-scripts
 ```
+
+## Cluster test
+
+`tests/cluster.spec.ts` uses Planet as a user would against the local kind cluster: it saves the cluster and Local Garage settings on the welcome page, runs both connection tests, uploads a tabular and a FASTA file, runs Datamash, opens the output and its job information, runs Datamash with a field the input lacks and checks the error, and checks that the Kubernetes Jobs and pods are gone. It is skipped unless `PLANET_E2E_CLUSTER=1`:
+
+```sh
+planet/scripts/dev-cluster.sh up
+docker build -f planet/runtime/Dockerfile -t planet-runtime:dev .
+kind load docker-image planet-runtime:dev --name planet
+planet/scripts/dev-cluster.sh port-forward &
+PLANET_E2E_CLUSTER=1 planet/scripts/e2e.sh
+```
+
+`e2e.sh` reads the planet-client token and the Garage keys with `dev-cluster.sh`, passes them to the container as read-only files and deletes them afterwards. Inside the container, `cluster-relay.mjs` listens on 127.0.0.1:8001 and 127.0.0.1:8002, the addresses the page uses, and forwards to the port-forward on the Docker host through `host.docker.internal` (Docker Desktop). The test also writes `cluster-console-*.log` (the page's console) and the upload and job timings to `planet/build/e2e/`. Traces of this test record the token and keys it types; they stay in `planet/build/e2e/`, and the keys belong to the disposable kind cluster.

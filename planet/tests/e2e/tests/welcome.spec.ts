@@ -69,6 +69,7 @@ test.describe("welcome page", () => {
         page,
         health,
     }) => {
+        test.skip(process.env.PLANET_E2E_CLUSTER === "1", "the cluster relay listens on the gateway port");
         health.allow({
             text: /^Failed to load resource: net::ERR_CONNECTION_REFUSED/,
             url: /^http:\/\/127\.0\.0\.1:8001\//,

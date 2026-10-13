@@ -9,6 +9,8 @@ readonly GATEWAY_PORT="${PLANET_GATEWAY_PORT:-8001}"
 readonly S3_PORT="${PLANET_S3_PORT:-8002}"
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy" && pwd)"
 readonly DEPLOY_DIR
+# A kind binary in planet/build/bin takes precedence over the one on PATH.
+PATH="$(dirname "$DEPLOY_DIR")/build/bin:$PATH"
 
 usage() {
     cat <<EOF
@@ -22,6 +24,8 @@ Commands:
   storage       Print the Garage S3 settings, including the secret key, to stdout.
   port-forward  Forward the gateway to 127.0.0.1:${GATEWAY_PORT} (Kubernetes API) and
                 127.0.0.1:${S3_PORT} (S3) until interrupted.
+
+kind ${KIND_VERSION} is used from planet/build/bin when present, else from PATH.
 
 Environment:
   PLANET_GATEWAY_PORT  Local port for the Kubernetes API listener (default 8001).
@@ -61,7 +65,7 @@ error: kind is not installed. Install kind ${KIND_VERSION}, for example:
   curl -fsSLO https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-${os}-${arch}
   curl -fsSLO https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-${os}-${arch}.sha256sum
   shasum -a 256 -c kind-${os}-${arch}.sha256sum
-  chmod +x kind-${os}-${arch} && sudo mv kind-${os}-${arch} /usr/local/bin/kind
+  mkdir -p planet/build/bin && install -m 0755 kind-${os}-${arch} planet/build/bin/kind
 
 or with Go: go install sigs.k8s.io/kind@${KIND_VERSION}
 EOF

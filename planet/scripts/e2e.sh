@@ -14,6 +14,10 @@
 #   PLANET_E2E_IMAGE    image (default: the pinned mcr.microsoft.com/playwright image)
 #   PLANET_E2E_TRACE    Playwright trace mode (default retain-on-failure)
 #   PLANET_E2E_WORKERS  parallel workers (default 2)
+#   PLANET_E2E_CLUSTER  1 runs tests/cluster.spec.ts (unless tests are named) against the
+#                       kind cluster of planet/scripts/dev-cluster.sh, whose port-forward must
+#                       be running; the token and Garage keys are passed in a file under
+#                       planet/build that is removed afterwards
 set -euo pipefail
 
 # Keep the tag and @playwright/test in planet/tests/e2e/package.json on the same version.
@@ -25,7 +29,7 @@ if [ "${1:-}" = "--build" ]; then
     build=1
     shift
 elif [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -41,12 +45,45 @@ mkdir -p "$out_dir"
 find "$out_dir" -mindepth 1 -delete
 
 container="planet-e2e-$$"
+secrets_dir="$planet_dir/build/e2e-secrets-$$"
 cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
+    rm -rf "$secrets_dir"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+cluster_args=()
+if [ "${PLANET_E2E_CLUSTER:-0}" = 1 ]; then
+    for port in 8001 8002; do
+        if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            echo "error: nothing listens on 127.0.0.1:$port; run planet/scripts/dev-cluster.sh port-forward" >&2
+            exit 1
+        fi
+    done
+    (
+        umask 077
+        mkdir -p "$secrets_dir"
+        "$planet_dir/scripts/dev-cluster.sh" token >"$secrets_dir/token" 2>/dev/null
+        storage="$("$planet_dir/scripts/dev-cluster.sh" storage 2>/dev/null)"
+        sed -n 's/^access key ID: *//p' <<<"$storage" | tr -d '\n' >"$secrets_dir/access-key-id"
+        sed -n 's/^secret access key: *//p' <<<"$storage" | tr -d '\n' >"$secrets_dir/secret-access-key"
+    ) || {
+        echo "error: cannot read the cluster token and Garage keys with planet/scripts/dev-cluster.sh" >&2
+        exit 1
+    }
+    for name in token access-key-id secret-access-key; do
+        [ -s "$secrets_dir/$name" ] || {
+            echo "error: planet/scripts/dev-cluster.sh returned no $name" >&2
+            exit 1
+        }
+    done
+    cluster_args=(-e PLANET_E2E_CLUSTER=1 -e PLANET_E2E_SECRETS=/secrets -v "$secrets_dir:/secrets:ro")
+    if [ $# -eq 0 ]; then
+        set -- cluster.spec.ts
+    fi
+fi
 
 # npm and the browsers need a writable HOME; node_modules lives in the container only.
 container_script='
@@ -55,6 +92,13 @@ mkdir -p /tmp/home /tmp/e2e
 tar -C /src/e2e --exclude=./node_modules -cf - . | tar -C /tmp/e2e -xf -
 cd /tmp/e2e
 npm ci --no-audit --no-fund --loglevel=error
+if [ "${PLANET_E2E_CLUSTER:-0}" = 1 ]; then
+    node cluster-relay.mjs 8001 8002 >/out/relay.log 2>&1 &
+    for _ in $(seq 50); do
+        [ "$(grep -c "^relay: 127" /out/relay.log)" = 2 ] && break
+        sleep 0.1
+    done
+fi
 exec npx --no-install playwright test "$@"
 '
 
@@ -70,6 +114,7 @@ docker run --rm --init --name "$container" \
     -e PLANET_E2E_OUT=/out \
     -e PLANET_E2E_TRACE="${PLANET_E2E_TRACE:-retain-on-failure}" \
     -e PLANET_E2E_WORKERS="${PLANET_E2E_WORKERS:-2}" \
+    ${cluster_args[@]+"${cluster_args[@]}"} \
     -v "$planet_dir/dist:/repo/planet/dist:ro" \
     -v "$planet_dir/site:/repo/planet/site:ro" \
     -v "$planet_dir/scripts:/repo/planet/scripts:ro" \
