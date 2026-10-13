@@ -53,7 +53,7 @@ function onInput(event: Event) {
                 <div class="input-group-append">
                     <button
                         type="button"
-                        class="btn btn-outline-secondary"
+                        class="btn btn-outline-primary"
                         :aria-pressed="visible ? 'true' : 'false'"
                         @click="visible = !visible">
                         <FontAwesomeIcon :icon="visible ? faEyeSlash : faEye" fixed-width aria-hidden="true" />

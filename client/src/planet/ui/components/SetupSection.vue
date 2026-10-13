@@ -32,7 +32,7 @@ const emit = defineEmits<{ toggle: [] }>();
                 <StatusPill :state="state" />
                 <button
                     type="button"
-                    class="btn btn-sm btn-outline-secondary pw-section__toggle"
+                    class="btn btn-sm btn-outline-primary pw-section__toggle"
                     :aria-expanded="expanded ? 'true' : 'false'"
                     :aria-controls="`${id}-body`"
                     @click="emit('toggle')">

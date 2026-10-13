@@ -351,8 +351,13 @@ function waitForControllerChange(container: ServiceWorkerContainer, timeoutMs: n
     });
 }
 
-function register(container: ServiceWorkerContainer): Promise<ServiceWorkerRegistration> {
-    return container.register(SERVICE_WORKER_URL, { scope: "/", updateViaCache: "none" });
+async function register(container: ServiceWorkerContainer): Promise<ServiceWorkerRegistration> {
+    const registration = await container.register(SERVICE_WORKER_URL, { scope: "/", updateViaCache: "none" });
+    // Some browsers and automation modes that block service workers resolve without a registration.
+    if (!registration) {
+        throw new Error("The browser did not register the service worker.");
+    }
+    return registration;
 }
 
 export async function boot(context: BootContext): Promise<BootResult> {
@@ -361,6 +366,15 @@ export async function boot(context: BootContext): Promise<BootResult> {
         now: context.now ?? Date.now,
         timeouts: { ...DEFAULT_TIMEOUTS, ...context.timeouts },
     };
+    try {
+        return await bootWith(runtime);
+    } catch (error) {
+        showFailure(runtime, "registration-failed", describeError(error));
+        return "registration-failed";
+    }
+}
+
+async function bootWith(runtime: Runtime): Promise<BootResult> {
     const { container, document: doc } = runtime;
 
     if (!container) {

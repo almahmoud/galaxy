@@ -225,6 +225,28 @@ describe("boot gate", () => {
         );
     });
 
+    it("reports a registration call that resolves without a registration", async () => {
+        const container = new FakeContainer();
+        container.register.mockResolvedValueOnce(undefined as unknown as FakeRegistration);
+        const { context } = createContext({ container });
+
+        await expect(boot(context)).resolves.toBe("registration-failed");
+        expect(failureReason(context.document)).toBe("registration-failed");
+    });
+
+    it("shows a failure page for unexpected errors instead of hanging", async () => {
+        const container = new FakeContainer();
+        Object.defineProperty(container.registration, "active", {
+            get() {
+                throw new Error("boom");
+            },
+        });
+        const { context } = createContext({ container });
+
+        await expect(boot(context)).resolves.toBe("registration-failed");
+        expect(context.document.querySelector(".planet-boot-detail")?.textContent).toBe("boom");
+    });
+
     it("reports a worker that fails to install", async () => {
         const container = new FakeContainer();
         const worker = new FakeWorker("installing");

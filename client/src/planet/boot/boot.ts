@@ -1,6 +1,7 @@
 import "./boot.css";
 
 import { boot } from "./gate";
+import { suppressJavascriptLinks } from "./links";
 
 declare const __PLANET_BUILD_ID__: string;
 
@@ -21,6 +22,8 @@ function sessionStore(): Storage | undefined {
         return undefined;
     }
 }
+
+suppressJavascriptLinks(document);
 
 void boot({
     buildId: __PLANET_BUILD_ID__,

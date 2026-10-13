@@ -214,7 +214,7 @@ onBeforeUnmount(() => unsubscribe?.());
             </div>
             <a
                 v-if="framed"
-                class="btn btn-sm btn-outline-secondary pw-hero__link"
+                class="btn btn-sm btn-outline-primary pw-hero__link"
                 href="/static/welcome.html"
                 target="_blank"
                 rel="noopener">

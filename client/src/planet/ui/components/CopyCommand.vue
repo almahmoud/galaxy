@@ -42,7 +42,7 @@ onBeforeUnmount(() => clearTimeout(timer));
     <div class="pw-copy" :class="{ 'pw-copy--multiline': multiline }">
         <pre v-if="multiline" class="pw-copy__text"><code ref="code">{{ text }}</code></pre>
         <code v-else ref="code" class="pw-copy__text">{{ text }}</code>
-        <button type="button" class="btn btn-sm btn-outline-secondary pw-copy__button" @click="copy">
+        <button type="button" class="btn btn-sm btn-outline-primary pw-copy__button" @click="copy">
             <FontAwesomeIcon :icon="state === 'copied' ? faCheck : faCopy" fixed-width aria-hidden="true" />
             <span class="sr-only">Copy {{ label }}</span>
         </button>
