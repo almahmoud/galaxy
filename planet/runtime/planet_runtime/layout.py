@@ -1,8 +1,9 @@
-"""Directory layout of the shared pod volume.
+"""Directory layout of the pod volumes.
 
-All three containers mount the volume at ``/planet``. The job working directory
-follows Galaxy's layout (``working``, ``outputs``, ``configs``, ``metadata``,
-``tmp``, ``home``).
+All containers mount the shared volume at ``/planet``. The job working
+directory follows Galaxy's layout (``working``, ``outputs``, ``configs``,
+``metadata``, ``tmp``, ``home``). Only the stager containers mount the stager
+volume at ``/planet-stager``.
 """
 
 import os
@@ -10,15 +11,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_ROOT = "/planet"
+DEFAULT_STAGER_ROOT = "/planet-stager"
 
 
 @dataclass(frozen=True)
 class Layout:
     root: Path
+    # Not mounted in the tool container: stager home, cache, scratch files and stage-in's state.
+    stager: Path
 
     @classmethod
     def from_env(cls) -> "Layout":
-        return cls(Path(os.environ.get("PLANET_ROOT", DEFAULT_ROOT)))
+        return cls(
+            Path(os.environ.get("PLANET_ROOT", DEFAULT_ROOT)),
+            Path(os.environ.get("PLANET_STAGER_ROOT", DEFAULT_STAGER_ROOT)),
+        )
 
     @property
     def ctl(self) -> Path:
@@ -119,13 +126,17 @@ class Layout:
         return self.root / "tmp"
 
     @property
-    def stager(self) -> Path:
-        """Home and private state of the stager containers."""
-        return self.root / "stager"
+    def state_file(self) -> Path:
+        """Stage-in's decisions and the manifest, for stage-out."""
+        return self.stager / "stage-in.json"
 
     @property
-    def state_file(self) -> Path:
-        return self.stager / "stage-in.json"
+    def stager_home(self) -> Path:
+        return self.stager / "home"
+
+    @property
+    def stager_cache(self) -> Path:
+        return self.stager / "cache"
 
     @property
     def objects(self) -> Path:
@@ -151,9 +162,11 @@ class Layout:
             self.tool_directory,
             self.tool_data,
             self.tmp,
-            self.stager,
             self.objects,
         ]
+
+    def stager_directories(self) -> list[Path]:
+        return [self.stager, self.stager_home, self.stager_cache]
 
 
 def ensure_empty_file(path: Path) -> None:

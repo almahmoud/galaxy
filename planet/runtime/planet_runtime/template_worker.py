@@ -1,8 +1,9 @@
 """Child process of stage-in that evaluates tool-author code: Cheetah templates and output filters.
 
 It receives the manifest without presigned requests on stdin and an
-environment without ``PLANET_MANIFEST_URL``, so tool code cannot reach the
-job's upload URLs. It prints one JSON document as its last line of output.
+environment without ``PLANET_MANIFEST_URL``, and the stager is not dumpable,
+so tool code cannot reach the job's upload URLs (see ``isolation``). It prints
+one JSON document as its last line of output.
 """
 
 import json

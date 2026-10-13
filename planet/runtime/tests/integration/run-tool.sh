@@ -24,7 +24,9 @@ run_case() {
     name=$1 command=$2 walltime=$3 expected_termination=$4 expected_exit=$5 mode=${6:-}
     volume="$PREFIX-$name"
     docker volume create "$volume" >/dev/null
-    docker run --rm -u 0 -v "$volume:/planet" --entrypoint /bin/sh "$RUNTIME_IMAGE" -c 'chown 10001:10001 /planet'
+    docker volume create "$volume-stager" >/dev/null
+    docker run --rm -u 0 -v "$volume:/planet" -v "$volume-stager:/planet-stager" --entrypoint /bin/sh "$RUNTIME_IMAGE" \
+        -c 'chown 10001:10001 /planet /planet-stager'
 
     manifest=$(cat <<EOF
 {"protocol": 1, "kind": "tool",
@@ -35,10 +37,11 @@ run_case() {
  "outputs": [{"name": "out", "uuid": "00000000-0000-4000-8000-000000000001"}]}
 EOF
 )
-    printf '%s' "$manifest" | docker run --rm -i -v "$volume:/planet" -e PLANET_TERMINATION_LOG=/planet/stage-in.log \
+    printf '%s' "$manifest" | docker run --rm -i -v "$volume:/planet" -v "$volume-stager:/planet-stager" \
+        -e PLANET_TERMINATION_LOG=/planet/stage-in.log \
         --entrypoint /bin/sh "$RUNTIME_IMAGE" -c 'cat > /planet/manifest.json && PLANET_MANIFEST_FILE=/planet/manifest.json planet-stager in 2>/dev/null'
 
-    docker run -d --name "$PREFIX-wait-$name" -v "$volume:/planet" "$RUNTIME_IMAGE" \
+    docker run -d --name "$PREFIX-wait-$name" -v "$volume:/planet" -v "$volume-stager:/planet-stager" "$RUNTIME_IMAGE" \
         planet-stager wait --id-tag t1 >/dev/null
     started=$(date +%s)
     if [ "$mode" = kill ]; then
@@ -63,7 +66,7 @@ EOF
         failures=$((failures + 1))
     fi
     docker rm -f "$PREFIX-wait-$name" "$PREFIX-tool-$name" >/dev/null 2>&1 || true
-    docker volume rm "$volume" >/dev/null
+    docker volume rm "$volume" "$volume-stager" >/dev/null
 }
 
 run_case normal 'echo hello; (sleep 1; echo late) & wait' 60 normal 0

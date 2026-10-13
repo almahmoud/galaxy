@@ -23,8 +23,8 @@ docker build -f planet/runtime/Dockerfile -t planet-runtime:dev .
 
 Multi-architecture images are built with
 `docker buildx build --platform linux/amd64,linux/arm64 ...`. The image runs as uid
-10001 and works with a read-only root filesystem when `/planet` is a writable
-volume. Galaxy files that no package ships are copied unmodified to
+10001 and works with a read-only root filesystem when `/planet` and
+`/planet-stager` are writable volumes. Galaxy files that no package ships are copied unmodified to
 `/opt/planet/galaxy`, a partial Galaxy root (`GALAXY_INCLUDES_ROOT`):
 `galaxy/tools/wrappers.py`, `data_fetch.py`, `parameters/sanitize.py`,
 `parameters/wrapped_json.py`, the job script templates,

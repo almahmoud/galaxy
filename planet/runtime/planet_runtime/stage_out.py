@@ -1,5 +1,7 @@
 """``planet-stager out``: waits for the tool container, finishes the job and uploads its results.
 
+The manifest and stage-in's decisions come from the stager volume, which the
+tool container does not mount; everything on the shared volume is the tool's.
 ``results.json`` is uploaded last and is the job's commit marker.
 """
 
@@ -241,11 +243,22 @@ def internal_message(description: str) -> dict[str, Any]:
     return {"type": "internal", "desc": description, "code_desc": None, "error_level": StdioErrorLevel.FATAL}
 
 
+def read_state(layout: Layout) -> dict[str, Any]:
+    """Load stage-in's state and remove it, so no request is left on disk while the tool's files are read."""
+    with open(layout.state_file, "rb") as fh:
+        state = json.load(fh)
+    layout.state_file.unlink()
+    if not isinstance(state, dict):
+        raise manifest_module.ManifestError("Stage-in state is not a JSON object")
+    manifest_module.check(state.get("manifest"), "tool")
+    return state
+
+
 def finish_tool_job(
-    manifest: Mapping[str, Any], layout: Layout, transfers: Transfers, exit_info: ToolExit, results: dict[str, Any]
+    state: Mapping[str, Any], layout: Layout, transfers: Transfers, exit_info: ToolExit, results: dict[str, Any]
 ) -> None:
     """Run Galaxy's finishing and upload every dataset; fills ``results``."""
-    state = json.loads(layout.state_file.read_text())
+    manifest = state["manifest"]
     plans = state.get("outputs") or {}
     result = ToolFinisher(
         manifest,
@@ -282,13 +295,13 @@ def finish_tool_job(
 def run(layout: Layout, transfers: Transfers) -> int:
     stage_out_start = termination.utcnow()
     try:
-        manifest = manifest_module.load(transfers)
-        manifest_module.check(manifest, "tool")
-    except (TransferError, manifest_module.ManifestError) as e:
-        log.error("Cannot load the manifest: %s", e)
+        state = read_state(layout)
+    except (OSError, ValueError) as e:
+        log.error("Cannot load stage-in's state: %s", e)
         termination.write({"stage": "out", "state": "error", "results": "failed", "error": str(e)})
         return 1
 
+    manifest = state["manifest"]
     limits = manifest_module.limits(manifest)
     exit_info = tool_exit(layout, manifest_module.id_tag(manifest), limits.get("start_timeout_seconds"))
     log.info("Tool finished: termination=%s exit_code=%s", exit_info.termination, exit_info.exit_code)
@@ -297,7 +310,7 @@ def run(layout: Layout, transfers: Transfers) -> int:
     results.update(exit_code=exit_info.exit_code, termination=exit_info.termination)
     ok = True
     try:
-        finish_tool_job(manifest, layout, transfers, exit_info, results)
+        finish_tool_job(state, layout, transfers, exit_info, results)
     except TransferError as e:
         ok = False
         results["state"] = "error"

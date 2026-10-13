@@ -124,11 +124,14 @@ def s3():
 @pytest.fixture
 def layout(tmp_path, monkeypatch) -> Layout:
     root = tmp_path / "planet"
+    stager = tmp_path / "planet-stager"
     root.mkdir()
+    stager.mkdir()
     monkeypatch.setenv("PLANET_ROOT", str(root))
+    monkeypatch.setenv("PLANET_STAGER_ROOT", str(stager))
     monkeypatch.setenv("PLANET_TERMINATION_LOG", str(tmp_path / "termination-log"))
     monkeypatch.setenv("HOME", str(tmp_path))
-    return Layout(root)
+    return Layout(root, stager)
 
 
 @pytest.fixture

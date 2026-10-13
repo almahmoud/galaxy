@@ -74,17 +74,18 @@ LABEL org.opencontainers.image.title="planet-runtime" \
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     PATH="/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1 \
     PLANET_GALAXY_LIB=/opt/planet/galaxy/lib \
     GALAXY_INCLUDES_ROOT=/opt/planet/galaxy \
-    HOME=/planet/stager \
+    HOME=/planet-stager/home \
     TMPDIR=/planet/tmp \
-    XDG_CACHE_HOME=/planet/cache
+    XDG_CACHE_HOME=/planet-stager/cache
 RUN apt-get update && apt-get install -y --no-install-recommends libmagic1t64 libgomp1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/python3.*/site-packages/pip /usr/local/lib/python3.*/site-packages/pip-* /usr/local/bin/pip* \
     && groupadd --gid 10001 planet \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /planet/stager --shell /usr/sbin/nologin planet
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /planet-stager/home --shell /usr/sbin/nologin planet
 COPY --from=build /venv /venv
 COPY --from=build /opt/planet /opt/planet
 RUN HOME=/tmp TMPDIR=/tmp XDG_CACHE_HOME=/tmp/planet-build-cache python -c "\

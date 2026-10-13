@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from planet_runtime import (
+    isolation,
     manifest as manifest_module,
     PROTOCOL_VERSION,
     termination,
@@ -55,7 +56,7 @@ class StageInError(Exception):
 
 
 def prepare_layout(layout: Layout) -> None:
-    for directory in layout.directories():
+    for directory in [*layout.directories(), *layout.stager_directories()]:
         directory.mkdir(parents=True, exist_ok=True)
     if not layout.alive.exists():
         os.mkfifo(layout.alive, 0o600)
@@ -123,22 +124,27 @@ def fetch_inputs(transfers: Transfers, layout: Layout, inputs: Mapping[str, Mapp
 
 
 def evaluate_in_child(manifest: Mapping[str, Any], layout: Layout) -> dict[str, Any]:
-    """Run tool-author code in a child process that never sees a presigned request."""
+    """Run tool-author code in a child process that never sees a presigned request.
+
+    Processes the child leaves running are killed when it exits.
+    """
     environment = {
         key: value
         for key, value in os.environ.items()
         if key not in (manifest_module.MANIFEST_URL_ENV, manifest_module.MANIFEST_FILE_ENV)
     }
     environment["PLANET_ROOT"] = str(layout.root)
-    completed = subprocess.run(
-        [sys.executable, "-m", "planet_runtime.template_worker"],
-        input=json.dumps(manifest_module.without_requests(manifest)),
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=layout.job,
-        timeout=TEMPLATE_TIMEOUT_SECONDS,
-    )
+    environment["PLANET_STAGER_ROOT"] = str(layout.stager)
+    with isolation.contained_children():
+        completed = subprocess.run(
+            [sys.executable, "-m", "planet_runtime.template_worker"],
+            input=json.dumps(manifest_module.without_requests(manifest)),
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=layout.job,
+            timeout=TEMPLATE_TIMEOUT_SECONDS,
+        )
     for line in reversed(completed.stdout.splitlines()):
         if line.startswith(RESULT_PREFIX):
             result = json.loads(line[len(RESULT_PREFIX) :])
@@ -151,6 +157,22 @@ def evaluate_in_child(manifest: Mapping[str, Any], layout: Layout) -> dict[str, 
     return result
 
 
+def check_volumes(layout: Layout) -> None:
+    root, stager = layout.root.resolve(), layout.stager.resolve()
+    if root == stager or root in stager.parents or stager in root.parents:
+        raise StageInError("stage-in", f"The stager volume {layout.stager} must be separate from {layout.root}")
+
+
+def write_state(layout: Layout, state: Mapping[str, Any]) -> None:
+    """Write stage-out's state to a stager volume cleared of anything the template evaluation left there."""
+    isolation.clear_directory(layout.stager)
+    for directory in layout.stager_directories():
+        directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(layout.state_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(state, fh)
+
+
 def stage_tool_job(manifest: Mapping[str, Any], layout: Layout, transfers: Transfers) -> dict[str, Any]:
     """Prepare everything the tool container runs; returns the ``prepare.json`` fields."""
     tool = normalize_tool(manifest["tool"])
@@ -158,6 +180,7 @@ def stage_tool_job(manifest: Mapping[str, Any], layout: Layout, transfers: Trans
     id_tag = manifest_module.id_tag(manifest)
     shell = job.get("shell") or DEFAULT_SHELL
 
+    check_volumes(layout)
     fetch_tool_directory(transfers, layout, tool)
     fetch_inputs(transfers, layout, manifest.get("inputs") or {})
     evaluation = evaluate_in_child(manifest, layout)
@@ -199,14 +222,17 @@ def stage_tool_job(manifest: Mapping[str, Any], layout: Layout, transfers: Trans
         ),
     )
 
-    state = {
-        "id_tag": id_tag,
-        "outputs": evaluation["outputs"],
-        "input_datasets": evaluation["input_datasets"],
-        "input_ext": evaluation["input_ext"],
-        "command_line": command_line,
-    }
-    layout.state_file.write_text(json.dumps(state))
+    write_state(
+        layout,
+        {
+            "id_tag": id_tag,
+            "outputs": evaluation["outputs"],
+            "input_datasets": evaluation["input_datasets"],
+            "input_ext": evaluation["input_ext"],
+            "command_line": command_line,
+            "manifest": manifest,
+        },
+    )
     return {
         "command_line": command_line,
         "version_command": evaluation["version_command_line"],

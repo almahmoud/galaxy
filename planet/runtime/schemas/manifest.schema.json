@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:planet:job-protocol:1:manifest",
   "title": "Planet job manifest",
-  "description": "Everything a job pod needs, written by the browser and read by the stager through PLANET_MANIFEST_URL. See planet/docs/job-protocol.md.",
+  "description": "Everything a job pod needs, written by the browser. Stage-in, or the single stager container of upload and set_metadata jobs, reads it once through PLANET_MANIFEST_URL, a presigned GET whose expiry covers scheduling (default 24 h, at most activeDeadlineSeconds); stage-out reads the copy stage-in keeps on the stager volume. Presigned requests appear only at the places of #/$defs/request below. See planet/docs/job-protocol.md.",
   "type": "object",
   "required": [
     "protocol",
@@ -265,7 +265,7 @@
   ],
   "$defs": {
     "request": {
-      "description": "A presigned request. Headers, when given, are sent as they are (for example signed Content-Type).",
+      "description": "A presigned request. Headers, when given, are sent as they are (for example signed Content-Type). Requests expire activeDeadlineSeconds plus one hour after the Job is created and are hidden from tool templates.",
       "oneOf": [
         {
           "type": "string",

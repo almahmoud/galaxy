@@ -7,7 +7,10 @@ import logging
 import os
 import sys
 
-from planet_runtime import __version__
+from planet_runtime import (
+    __version__,
+    isolation,
+)
 from planet_runtime.layout import Layout
 from planet_runtime.transfer import (
     RetryPolicy,
@@ -24,6 +27,8 @@ RETRY_SECONDS = {"in": 600.0, "out": 1800.0, "upload": 1800.0, "set-metadata": 1
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before the manifest URL is read and before any child process starts.
+    isolation.make_undumpable()
     parser = argparse.ArgumentParser(prog="planet-stager", description="Planet job pod runtime.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)

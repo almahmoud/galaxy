@@ -26,8 +26,15 @@ All keys are relative to the configured bucket prefix.
 
 The browser chooses every key and presigns one URL per object. The manifest
 carries only presigned requests, `{"url": ..., "headers": {...}}` or a bare URL
-string; headers, when present, are sent with the request as given. Expiry
-should cover `activeDeadlineSeconds` plus one hour.
+string; headers, when present, are sent with the request as given. Requests in
+the manifest should expire `activeDeadlineSeconds` plus one hour after the Job
+is created.
+
+The manifest itself is read once, by stage-in when it starts, so its presigned
+GET has a shorter expiry of its own: long enough for the pod to be scheduled and
+its images pulled, 24 hours by default, configurable, and never longer than
+`activeDeadlineSeconds`. If it expires while the pod is pending, stage-in fails
+without `prepare.json`; the browser then creates a new attempt with a new URL.
 
 ## Pod
 
@@ -40,22 +47,39 @@ should cover `activeDeadlineSeconds` plus one hour.
 Upload and set-metadata jobs use one container running `planet-stager upload`
 or `planet-stager set-metadata`.
 
-Stager containers need `PLANET_MANIFEST_URL` (the presigned GET of the
-manifest). The tool container must not receive it. All containers mount one
-volume at `/planet` and should run as uid and gid 10001.
+`PLANET_MANIFEST_URL` (the presigned GET of the manifest) goes to stage-in
+and to the container of upload and set-metadata jobs only; stage-out and the
+tool container must not receive it. The URL is part of the Job and Pod specs,
+so until it expires anyone who can get or list pods or jobs in the namespace,
+read etcd or read audit logs at the `RequestResponse` level can read it, and
+with it the manifest and every presigned request the manifest holds.
+
+The pod has `restartPolicy: Never`, must not set `shareProcessNamespace`, and
+has two `emptyDir` volumes. Every container should run as uid and gid 10001.
+
+| Volume | Mounted at | Containers |
+|---|---|---|
+| `planet` | `/planet` | all |
+| `planet-stager` | `/planet-stager` | stage-in and stage-out, or the single stager container; never the tool container |
 
 | Path | Use |
 |---|---|
 | `/planet/job` | Galaxy job directory: `working`, `outputs`, `configs`, `metadata`, `tmp`, `home`, `registry.xml`, `galaxy_<job>.sh`, `tool_script.sh` |
 | `/planet/inputs` | `dataset_<uuid>.dat`, `dataset_<uuid>_files/`, `metadata/<uuid>_<name>` |
 | `/planet/tool` | The extracted tool archive |
-| `/planet/tmp` | Mount it at `/tmp` in the tool container (`subPath: tmp`) |
+| `/planet/tmp` | Mount it at `/tmp` in the tool container (`subPath: tmp`); the stagers' `TMPDIR` |
 | `/planet/ctl` | `alive` FIFO, `started`, `rc`, `walltime` |
 | `/planet/bin/run-tool` | Tool container entry point |
-| `/planet/stager`, `/planet/cache` | Stager home and cache (`HOME`, `XDG_CACHE_HOME`) |
+| `/planet/objects` | Datasets discovered after the tool ran |
+| `/planet-stager/stage-in.json` | Stage-in's decisions and the manifest, for stage-out |
+| `/planet-stager/home`, `/planet-stager/cache` | Stager `HOME` and `XDG_CACHE_HOME` (the image's defaults) |
 
-Everything under `/planet` is writable by the tool. Stage-out never reads a
-file that resolves outside `/planet`; such outputs end in state `error`.
+Everything under `/planet` is writable by the tool, so the stagers keep their
+own state on `/planet-stager`. Stage-out never reads a file that resolves
+outside `/planet`; such outputs end in state `error`. The stagers make
+themselves non-dumpable (`PR_SET_DUMPABLE`) before reading the manifest, so
+other processes with the same uid cannot read their `/proc/<pid>/environ`,
+memory or file descriptors.
 
 ### Stage-in
 
@@ -66,7 +90,11 @@ file that resolves outside `/planet`; such outputs end in state `error`.
    `change_format` and labels are resolved as Galaxy resolves them when it
    creates a job. This tool-author code runs in a child process that gets
    the manifest without presigned requests and an environment without
-   `PLANET_MANIFEST_URL`.
+   `PLANET_MANIFEST_URL`. Requests are removed by their place in the
+   manifest: `job_files` and `slots` entirely, the request fields of
+   `inputs`, `outputs` and `tool.archive`; `params` and the rest of `tool`
+   are passed unchanged. Processes the child leaves running are killed when
+   it exits.
 3. Creates every unfiltered declared output as an empty
    `outputs/dataset_<uuid>.dat`.
 4. Writes Galaxy's job script (`DEFAULT_JOB_FILE_TEMPLATE.sh` with the
@@ -74,7 +102,9 @@ file that resolves outside `/planet`; such outputs end in state `error`.
    temporary directories, `tool_script.sh` with stdout and stderr streamed
    through `tee` into `outputs/tool_stdout` and `outputs/tool_stderr`, the exit
    code file and the `from_work_dir` copies.
-5. Writes `run-tool` and the `alive` FIFO, then uploads `prepare.json`.
+5. Writes `run-tool` and the `alive` FIFO.
+6. Clears `/planet-stager`, writes `stage-in.json` there, then uploads
+   `prepare.json`.
 
 It exits 1 when templating or a download fails; `prepare.json` then has
 `"state": "error"` and `errors`.
@@ -91,13 +121,14 @@ and `job.memory_mb` when the pod does not set them.
 
 ### Stage-out
 
-Waits until every process of the tool container has exited (end-of-file on the
-`alive` FIFO), including when the kernel or kubelet killed them. It then runs
-Galaxy's finishing: the stdio check (`galaxy.tool_util.output_checker`),
-`galaxy.json`, output discovery (`collect_primary_datasets`,
-`collect_dynamic_outputs`), and for every dataset `set_meta(overwrite=False)`
-and `set_peek` with Galaxy's datatypes. It uploads every dataset, then
-`results.json`.
+Reads the manifest and stage-in's decisions from `/planet-stager/stage-in.json`
+and deletes the file; it does not fetch the manifest. Waits until every process
+of the tool container has exited (end-of-file on the `alive` FIFO), including
+when the kernel or kubelet killed them. It then runs Galaxy's finishing: the
+stdio check (`galaxy.tool_util.output_checker`), `galaxy.json`, output
+discovery (`collect_primary_datasets`, `collect_dynamic_outputs`), and for
+every dataset `set_meta(overwrite=False)` and `set_peek` with Galaxy's
+datatypes. It uploads every dataset, then `results.json`.
 
 | Termination | Meaning |
 |---|---|

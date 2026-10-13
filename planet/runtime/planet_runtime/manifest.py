@@ -1,5 +1,6 @@
 """Loading and checking the job manifest (see ``planet/docs/job-protocol.md``)."""
 
+import copy
 import json
 import os
 import re
@@ -26,7 +27,8 @@ class ManifestError(ValueError):
 
 
 def load(transfers: Transfers) -> dict[str, Any]:
-    if url := os.environ.get(MANIFEST_URL_ENV):
+    """Fetch the manifest once; the URL is removed from the environment of the processes started later."""
+    if url := os.environ.pop(MANIFEST_URL_ENV, None):
         raw = transfers.get_bytes(PresignedRequest(url), limit=MAX_MANIFEST_BYTES)
     elif path := os.environ.get(MANIFEST_FILE_ENV):
         with open(path, "rb") as fh:
@@ -108,14 +110,53 @@ def limits(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     return manifest.get("limits") or {}
 
 
-def without_requests(value: Any) -> Any:
-    """A copy of ``value`` without presigned requests, for code that runs tool-author templates."""
-    if isinstance(value, Mapping):
-        if "url" in value:
-            return None
-        return {key: without_requests(item) for key, item in value.items() if key not in ("job_files", "slots")}
-    if isinstance(value, list):
-        return [without_requests(item) for item in value]
-    if isinstance(value, str) and ("X-Amz-Signature=" in value or "X-Amz-Credential=" in value):
-        return None
-    return value
+# Every presigned request of manifest.schema.json by its place; "*" stands for any key or index.
+_TARGET_REQUESTS = (
+    ("data", "put"),
+    ("data", "multipart", "parts", "*"),
+    ("meta",),
+    ("extra",),
+    ("extra_index",),
+    ("sanitized",),
+    ("metadata_files", "*"),
+    ("extra_objects", "*", "request"),
+)
+REQUEST_PATHS: tuple[tuple[str, ...], ...] = (
+    ("job_files", "*"),
+    ("tool", "archive", "request"),
+    ("inputs", "*", "data"),
+    ("inputs", "*", "extra"),
+    ("inputs", "*", "metadata_files", "*"),
+    *(("outputs", "*", *path) for path in _TARGET_REQUESTS),
+    *(("slots", "*", *path) for path in _TARGET_REQUESTS),
+    ("upload", "files", "*", "request"),
+)
+# Sections tool-author code has no use for.
+_NOT_FOR_TEMPLATES = ("job_files", "slots")
+
+
+def without_requests(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of ``manifest`` for code that runs tool-author templates, with every request set to None.
+
+    Requests are found by their place in the protocol only: parameters and
+    bundle fields reach templates unchanged, whatever their names or values.
+    """
+    redacted = {key: copy.deepcopy(value) for key, value in manifest.items() if key not in _NOT_FOR_TEMPLATES}
+    for path in REQUEST_PATHS:
+        _clear(redacted, path)
+    return redacted
+
+
+def _clear(value: Any, path: tuple[str, ...]) -> None:
+    head, rest = path[0], path[1:]
+    if isinstance(value, dict):
+        keys: list[Any] = list(value) if head == "*" else [head] if head in value else []
+    elif isinstance(value, list) and head == "*":
+        keys = list(range(len(value)))
+    else:
+        return
+    for key in keys:
+        if rest:
+            _clear(value[key], rest)
+        else:
+            value[key] = None
