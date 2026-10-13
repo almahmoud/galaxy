@@ -104,13 +104,35 @@ function parseJson(bytes: ArrayBuffer, url: string): unknown {
 }
 
 /**
+ * The path of `url` as build.json records it: the file's path in the site, so percent-escapes are decoded (tool
+ * bundle URLs encode `+` in versions as `%2B`).
+ */
+function sitePath(url: string): string {
+    try {
+        return url
+            .split("/")
+            .map((segment) => {
+                const decoded = decodeURIComponent(segment);
+                if (decoded.includes("/")) {
+                    throw new URIError(segment);
+                }
+                return decoded;
+            })
+            .join("/");
+    } catch {
+        throw configError(`Planet data file ${url} is not a valid path`);
+    }
+}
+
+/**
  * Reads the data file at `url` for `source.buildId`. Unbundled code (tests, the dev server) has no build.json and
  * reads the network directly.
  *
  * @throws ApiError 500 (`CONFIG_ERROR`) when the file is missing, not part of the build, from another build, or
  * not JSON
  */
-export async function readStaticFile(url: string, source: StaticDataSource = defaultSource()): Promise<unknown> {
+export async function readStaticFile(encodedUrl: string, source: StaticDataSource = defaultSource()): Promise<unknown> {
+    const url = sitePath(encodedUrl);
     const cache = await openBuildCache(source);
     const cached = await cache?.match(url);
     if (cached) {

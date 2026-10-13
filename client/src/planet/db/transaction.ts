@@ -3,6 +3,7 @@ import type { IDBPObjectStore, IDBPTransaction } from "idb";
 import { type PlanetEvent, publish } from "@/planet/util/events";
 import { formatGalaxyTime, nextMicros } from "@/planet/util/time";
 
+import { checkLeaderFence, leaderFence } from "./fence";
 import type { PlanetDB, PlanetDBSchema, StoreName } from "./schema";
 
 /** A transaction that can read the stores it was opened on. */
@@ -113,9 +114,13 @@ export async function runTransaction<R>(
             throw error;
         }
     }
-    const raw = db.transaction(scopeOf(stores, mode), "readwrite");
+    const scope = scopeOf(stores, mode);
+    const raw = db.transaction(scope, "readwrite");
     try {
         const kv = raw.objectStore("kv");
+        if (leaderFence() !== null && scope.includes("jobs")) {
+            checkLeaderFence(await kv.get("leader_epoch"));
+        }
         const last = await kv.get("clock");
         const micros = nextMicros(typeof last === "number" ? last : 0);
         await kv.put(micros, "clock");

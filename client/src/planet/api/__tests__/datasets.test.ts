@@ -716,7 +716,7 @@ describe("dataset details", () => {
         });
     });
 
-    it("summarizes the parameters and metrics of the creating job", async () => {
+    it("reports parameter errors and metrics for a creating job whose tool is not in the toolbox", async () => {
         const { hda } = await addFile("txt", "x");
         const job = await jobs.create({
             tool_id: "cat1",
@@ -729,8 +729,8 @@ describe("dataset details", () => {
         await hdas.update(hda.id, { creating_job_id: job.id });
         const router = makeRouter();
         expect(await fetchJson(router, "GET", `/api/datasets/${hda.id}/parameters_display?hda_ldda=hda`)).toEqual({
-            parameters: [{ text: "sep", depth: 1, value: "tab" }],
-            has_parameter_errors: false,
+            parameters: [],
+            has_parameter_errors: true,
             outputs: { out: [{ label: null, value: { src: "hda", id: hda.id } }] },
         });
         expect(await fetchJson(router, "GET", `/api/datasets/${hda.id}/metrics`)).toEqual(job.metrics);

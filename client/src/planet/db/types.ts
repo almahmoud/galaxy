@@ -225,6 +225,20 @@ export interface JobMetricRecord {
     raw_value: string;
 }
 
+/** How a container of the job's pod ended, as Kubernetes reported it (`containerStatuses[].state.terminated`). */
+export interface ContainerTermination {
+    /** `OOMKilled`, `Error`, `Completed`, `StartError`, ... */
+    reason: string | null;
+    exit_code: number | null;
+    message: string | null;
+}
+
+/** A multipart upload the browser created for one of the job's outputs. */
+export interface JobMultipartUpload {
+    key: string;
+    upload_id: string;
+}
+
 /** Kubernetes bookkeeping for a dispatched job. */
 export interface JobKubernetesInfo {
     namespace: string;
@@ -235,7 +249,18 @@ export interface JobKubernetesInfo {
     spec_hash: string | null;
     pod_name: string | null;
     node_name: string | null;
+    /** The tool container's image; null for upload and set-metadata jobs. */
     image: string | null;
+    /** Pod layout: a tool pod (stage-in, tool, stage-out) or one stager container. */
+    kind: "tool" | "upload" | "set_metadata";
+    /** `metadata.creationTimestamp` of the Kubernetes Job. */
+    created: string | null;
+    /** Whether the decisions in `prepare.json` were applied to the job's outputs. */
+    prepared: boolean;
+    /** How the tool container ended, recorded before results are ingested (`OOMKilled` marks a memory kill). */
+    tool_termination: ContainerTermination | null;
+    /** Multipart uploads created at dispatch, completed at ingest and aborted on failure or cancel. */
+    multipart: JobMultipartUpload[];
 }
 
 /** Galaxy's `Job`. */
@@ -273,9 +298,30 @@ export interface JobRecord {
     state_history: { state: JobState; time: string }[];
 }
 
-/** Work for the leader tab (dispatch, cancel, ingest, cleanup). */
+/** Kinds of outbox entries the leader tab processes. */
+export type OutboxKind = "dispatch" | "cancel" | "cleanup" | "purge";
+
+/** Payload of a `dispatch` entry; `attempt` requests a new attempt of an already dispatched job. */
+export interface DispatchPayload {
+    attempt?: number;
+}
+
+/** Payload of a `cleanup` entry: Kubernetes Jobs to delete and multipart uploads to abort. */
+export interface CleanupPayload {
+    k8s_jobs?: string[];
+    multipart?: JobMultipartUpload[];
+}
+
+/** Payload of a `purge` entry: datasets whose bucket objects are deleted. */
+export interface PurgePayload {
+    dataset_ids?: string[];
+    uuids?: string[];
+}
+
+/** Work for the leader tab (dispatch, cancel, cleanup, purge). */
 export interface OutboxRecord {
     id: string;
+    /** An {@link OutboxKind}. */
     kind: string;
     job_id: string | null;
     payload: unknown;
@@ -336,6 +382,24 @@ export interface UploadRecord {
     update_time: string;
 }
 
+/** The job leader's heartbeat (`kv` key `leader`). */
+export interface LeaderRecord {
+    epoch: number;
+    /** Random id of the leading tab. */
+    tab_id: string;
+    /** Last heartbeat, in milliseconds since the epoch. */
+    heartbeat: number;
+    /** Whether the leading tab's document was visible at the last heartbeat. */
+    visible: boolean;
+}
+
+/** A resolved tool container, cached by its requirements (`kv` keys `container:<requirements>`). */
+export interface ContainerCacheEntry {
+    image: string;
+    /** When it was resolved, in milliseconds since the epoch. */
+    resolved: number;
+}
+
 /** Typed values of the `kv` store. */
 export interface KvValues {
     /** Last timestamp issued by a write transaction, in microseconds since the epoch. */
@@ -343,9 +407,13 @@ export interface KvValues {
     current_history_id: string;
     /** Incremented by each tab that becomes job leader. */
     leader_epoch: number;
+    leader: LeaderRecord;
     /** The user's preferences (Galaxy's `User.preferences`): string values, JSON-encoded where Galaxy encodes them. */
     preferences: Record<string, string>;
     [counter: `counter:${string}`]: number;
+    /** When a client last read the job's live console output, in milliseconds since the epoch. */
+    [console: `console:${string}`]: number;
+    [container: `container:${string}`]: ContainerCacheEntry;
 }
 
 export type KvKey = keyof KvValues & string;

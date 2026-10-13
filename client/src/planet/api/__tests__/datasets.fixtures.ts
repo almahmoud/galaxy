@@ -7,6 +7,7 @@
 import { vi } from "vitest";
 
 import { settings } from "@/planet/db";
+import { findStaticFile } from "@/planet/util/staticFiles.fixtures";
 
 export const S3_ENDPOINT = "https://s3.test";
 export const BUCKET = "bucket";
@@ -94,10 +95,9 @@ export function stubNetwork(
         if (handled) {
             return handled;
         }
-        if (Object.hasOwn(files, url.pathname)) {
-            return new Response(JSON.stringify(files[url.pathname]), {
-                headers: { "Content-Type": "application/json" },
-            });
+        const body = findStaticFile(files, url.pathname);
+        if (body !== undefined) {
+            return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
         }
         return new Response("not found", { status: 404 });
     });

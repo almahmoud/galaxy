@@ -4,7 +4,7 @@ import { ApiError } from "@/planet/util/errors";
 
 import { buildOutboxEntry, type NewOutboxEntry } from "./records";
 import { type ReadTx, useRead, useWrite, type WriteTx } from "./tx";
-import type { OutboxRecord } from "./types";
+import type { OutboxKind, OutboxRecord } from "./types";
 
 export type { NewOutboxEntry };
 
@@ -50,6 +50,32 @@ export function reschedule(id: string, notBefore: string, error: string | null, 
         await store.put(next);
         t.notify({ type: "outbox-changed" });
         return next;
+    });
+}
+
+/** Postpones the entry until `notBefore` without counting a failed attempt. */
+export function postpone(id: string, notBefore: string, tx?: WriteTx): Promise<OutboxRecord | undefined> {
+    return useWrite(tx, ["outbox"], async (t) => {
+        const store = t.store("outbox");
+        const entry = await store.get(id);
+        if (!entry) {
+            return undefined;
+        }
+        const next: OutboxRecord = { ...entry, not_before: notBefore };
+        await store.put(next);
+        return next;
+    });
+}
+
+/** Removes every entry of `kind` for a job. */
+export function removeForJob(jobId: string, kind: OutboxKind, tx?: WriteTx): Promise<void> {
+    return useWrite(tx, ["outbox"], async (t) => {
+        const store = t.store("outbox");
+        for (const entry of await store.index("job_id").getAll(jobId)) {
+            if (entry.kind === kind) {
+                await store.delete(entry.id);
+            }
+        }
     });
 }
 

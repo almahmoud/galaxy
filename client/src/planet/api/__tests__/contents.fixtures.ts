@@ -23,6 +23,7 @@ import type { NewDataset } from "@/planet/db/records";
 import { Router } from "@/planet/sw/router";
 import { type PlanetEvent, subscribe } from "@/planet/util/events";
 import { resetStaticData } from "@/planet/util/staticData";
+import { findStaticFile } from "@/planet/util/staticFiles.fixtures";
 
 import { register as registerConfiguration } from "../configuration";
 import { register as registerContents } from "../contents";
@@ -131,10 +132,9 @@ const STATIC_FILES: Record<string, unknown> = {
 export function stubStaticData(files: Record<string, unknown> = STATIC_FILES) {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, ORIGIN);
-        if (Object.hasOwn(files, url.pathname)) {
-            return new Response(JSON.stringify(files[url.pathname]), {
-                headers: { "Content-Type": "application/json" },
-            });
+        const body = findStaticFile(files, url.pathname);
+        if (body !== undefined) {
+            return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
         }
         return new Response("not found", { status: 404 });
     });

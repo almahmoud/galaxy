@@ -102,6 +102,32 @@ describe("readStaticFile", () => {
         await expect(readStaticFile(CONFIG, replaced.source)).rejects.toThrow(/Planet was updated; reload the page/);
     });
 
+    it("looks up percent-encoded paths under the file names build.json records", async () => {
+        const bundle = "/static/planet/data/toolbox/bundles/repos/iuc/datamash_ops/1.9+galaxy0.json";
+        const encoded = "/static/planet/data/toolbox/bundles/repos/iuc/datamash_ops/1.9%2Bgalaxy0.json";
+        const fetched = await setup({
+            network: { [bundle]: '{"id":"datamash_ops"}' },
+            manifest: await describeBuild({ [bundle]: '{"id":"datamash_ops"}' }),
+        });
+        expect(await readStaticFile(encoded, fetched.source)).toEqual({ id: "datamash_ops" });
+        expect(fetched.fetch).toHaveBeenCalledWith(bundle, { credentials: "same-origin", cache: "no-cache" });
+
+        const cached = await setup({ network: {}, cached: { [bundle]: '{"id":"cached"}' } });
+        expect(await readStaticFile(encoded, cached.source)).toEqual({ id: "cached" });
+        expect(cached.fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed and segment-joining escapes", async () => {
+        const env = await setup({ network: {} });
+        await expect(readStaticFile("/static/planet/data/%E0%A4%A.json", env.source)).rejects.toThrow(
+            /is not a valid path/,
+        );
+        await expect(readStaticFile("/static/planet/data/a%2F..%2Fconfig.json", env.source)).rejects.toThrow(
+            /is not a valid path/,
+        );
+        expect(env.fetch).not.toHaveBeenCalled();
+    });
+
     it("reads the network directly in unbundled code", async () => {
         const env = await setup({ network: { [CONFIG]: '{"brand":"dev"}' }, manifest: null, buildId: "dev" });
         expect(await readStaticFile(CONFIG, env.source)).toEqual({ brand: "dev" });

@@ -46,6 +46,15 @@ export function get(tx?: ReadTx): Promise<PlanetSettings> {
     });
 }
 
+/** Whether the cluster and the storage settings, secrets included, are complete enough to run jobs. */
+export function configured(current: PlanetSettings): { cluster: boolean; storage: boolean } {
+    const { cluster, storage } = current;
+    return {
+        cluster: Boolean(cluster.gateway_url && cluster.namespace && cluster.has_token),
+        storage: Boolean(storage.endpoint && storage.bucket && storage.access_key_id && storage.has_secret),
+    };
+}
+
 /** Returns the stored settings without secret flags. */
 export function getStored(tx?: ReadTx): Promise<StoredSettings> {
     return useRead(tx, ["settings"], readStored);

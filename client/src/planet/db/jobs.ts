@@ -84,3 +84,29 @@ export function update(id: string, patch: JobPatch, tx?: WriteTx): Promise<JobRe
         return next;
     });
 }
+
+/**
+ * Records that a client is reading the job's live console output, so the leader tab keeps the job's
+ * `tool_stdout` current with the tool container's log. Call it from `GET /api/jobs/{id}/console_output` while
+ * the job runs.
+ */
+export function requestConsole(id: string, tx?: WriteTx): Promise<void> {
+    return useWrite(tx, ["kv"], async (t) => {
+        await t.store("kv").put(Date.now(), `console:${id}`);
+    });
+}
+
+/** When a client last read the job's live console output (milliseconds since the epoch), or null. */
+export function consoleRequestedAt(id: string, tx?: ReadTx): Promise<number | null> {
+    return useRead(tx, ["kv"], async (t) => {
+        const value = await t.store("kv").get(`console:${id}`);
+        return typeof value === "number" ? value : null;
+    });
+}
+
+/** Forgets the console request of a finished job. */
+export function clearConsoleRequest(id: string, tx?: WriteTx): Promise<void> {
+    return useWrite(tx, ["kv"], async (t) => {
+        await t.store("kv").delete(`console:${id}`);
+    });
+}
