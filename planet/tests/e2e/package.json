@@ -1,0 +1,14 @@
+{
+    "name": "planet-e2e",
+    "private": true,
+    "description": "Browser tests for the built Planet site",
+    "scripts": {
+        "test": "playwright test",
+        "typecheck": "tsc --noEmit -p tsconfig.json"
+    },
+    "devDependencies": {
+        "@playwright/test": "1.63.0",
+        "@types/node": "24.13.6",
+        "typescript": "5.8.3"
+    }
+}
