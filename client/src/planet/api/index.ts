@@ -13,6 +13,7 @@ import { register as registerLegacyHistory } from "./legacyHistory";
 import { register as registerPlanet } from "./planet";
 import { register as registerStubs } from "./stubs";
 import { register as registerTools } from "./tools";
+import { register as registerUploads } from "./uploads";
 import { register as registerUsers } from "./users";
 
 /** Registers every API handler module on `router`. Registration order breaks ties between equally specific routes. */
@@ -28,6 +29,7 @@ export function registerAll(router: Router): void {
     registerDatatypes(router);
     registerGenomes(router);
     registerTools(router);
+    registerUploads(router);
     registerJobs(router);
     registerStubs(router);
     registerPlanet(router);
