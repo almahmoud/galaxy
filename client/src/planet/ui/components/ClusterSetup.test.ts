@@ -2,17 +2,17 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { settingsFixture } from "../__tests__/fakes";
-import { testServices } from "../__tests__/services";
-import { PlanetApiError } from "../lib/api";
+import { PINNED_RUNTIME, statusFor, testServices } from "../__tests__/services";
+import { PlanetApiError, type RuntimeStatus } from "../lib/api";
 
 import ClusterSetup from "./ClusterSetup.vue";
 
 const SAVED = settingsFixture({ cluster: { gateway_url: "http://127.0.0.1:8001", has_token: true } });
 
-function mountSetup(settings = settingsFixture(), overrides = {}) {
+function mountSetup(settings = settingsFixture(), overrides = {}, runtime: RuntimeStatus | null = null) {
     const context = testServices(settings, overrides);
     const wrapper = mount(ClusterSetup, {
-        props: { settings },
+        props: { settings, runtime },
         global: { provide: context.provide },
         attachTo: document.body,
     });
@@ -194,5 +194,49 @@ describe("ClusterSetup", () => {
         await flushPromises();
         expect(toggle.attributes("aria-expanded")).toBe("true");
         expect(document.activeElement).toBe(wrapper.find("#pw-cluster-memory").element);
+    });
+
+    describe("runtime image", () => {
+        const TAG = "ghcr.io/almahmoud/planet-runtime:latest";
+        const UNPINNED_BUILD: RuntimeStatus = {
+            image: TAG,
+            source: "fallback",
+            default_image: TAG,
+            build_image: null,
+            pinned: false,
+        };
+
+        function warning(wrapper: ReturnType<typeof mountSetup>["wrapper"]) {
+            return wrapper.find("#pw-cluster-image-warning");
+        }
+
+        it("is quiet when the build pins its image", () => {
+            const { wrapper } = mountSetup(settingsFixture(), {}, statusFor(settingsFixture()).runtime);
+            expect(warning(wrapper).exists()).toBe(false);
+            expect(wrapper.find(".pw-disclosure__note").exists()).toBe(false);
+            expect(wrapper.find("#pw-cluster-image").attributes("placeholder")).toBe(PINNED_RUNTIME);
+        });
+
+        it("warns about a tag entered in the field until it is pinned", async () => {
+            const { wrapper } = mountSetup(settingsFixture(), {}, statusFor(settingsFixture()).runtime);
+            const input = wrapper.find("#pw-cluster-image");
+            await input.setValue("ghcr.io/example/planet-runtime:main");
+            expect(warning(wrapper).text()).toContain("tag without a digest");
+            expect(input.attributes("aria-describedby")).toContain("pw-cluster-image-warning");
+            await input.setValue(`ghcr.io/example/planet-runtime@sha256:${"cd".repeat(32)}`);
+            expect(warning(wrapper).exists()).toBe(false);
+            await input.setValue("Not An Image");
+            expect(warning(wrapper).exists()).toBe(false);
+        });
+
+        it("warns when the build's default image is a tag, also while the section is closed", async () => {
+            const { wrapper } = mountSetup(settingsFixture(), {}, UNPINNED_BUILD);
+            const toggle = wrapper.find("button[aria-controls='pw-cluster-advanced']");
+            expect(toggle.attributes("aria-expanded")).toBe("false");
+            expect(toggle.find(".pw-disclosure__note").text()).toBe("runtime image not pinned");
+            expect(warning(wrapper).text()).toContain(`so jobs use the tag ${TAG}`);
+            await toggle.trigger("click");
+            expect(toggle.find(".pw-disclosure__note").exists()).toBe(false);
+        });
     });
 });

@@ -2,18 +2,19 @@
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed } from "vue";
 
-import { CARD_STATES, type CardState } from "../lib/display";
+import { CARD_STATES, type CardState, type PillInfo } from "../lib/display";
 
 defineOptions({ compatConfig: { MODE: 3 } });
 
-const props = defineProps<{ state: CardState }>();
+/** Shows a connection `state`, or `pill` for other kinds of status. */
+const props = defineProps<{ state?: CardState; pill?: PillInfo }>();
 
-const info = computed(() => CARD_STATES[props.state]);
+const info = computed(() => props.pill ?? CARD_STATES[props.state ?? "unknown"]);
 </script>
 
 <template>
     <span class="pw-pill" :class="`pw-pill--${info.tone}`">
-        <FontAwesomeIcon :icon="info.icon" :spin="state === 'checking'" fixed-width aria-hidden="true" />
+        <FontAwesomeIcon :icon="info.icon" :spin="info.spin" fixed-width aria-hidden="true" />
         {{ info.label }}
     </span>
 </template>

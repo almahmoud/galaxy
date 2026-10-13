@@ -15,16 +15,25 @@ import type { CheckItem, CheckStatus, ComponentState, StorageReport } from "./ch
 export type CardState = ComponentState | "checking" | "unknown";
 export type Tone = "success" | "warning" | "danger" | "info" | "neutral";
 
-export const CARD_STATES: Record<CardState, { label: string; tone: Tone; icon: typeof faCheckCircle }> = {
+/** What a status pill shows. */
+export interface PillInfo {
+    label: string;
+    tone: Tone;
+    icon: typeof faCheckCircle;
+    /** Spins the icon while something is in progress. */
+    spin?: boolean;
+}
+
+export const CARD_STATES: Record<CardState, PillInfo> = {
     ok: { label: "Connected", tone: "success", icon: faCheckCircle },
     warning: { label: "Connected with warnings", tone: "warning", icon: faExclamationTriangle },
     error: { label: "Needs attention", tone: "danger", icon: faTimesCircle },
     not_configured: { label: "Not configured", tone: "neutral", icon: faMinusCircle },
-    checking: { label: "Checking", tone: "info", icon: faCircleNotch },
+    checking: { label: "Checking", tone: "info", icon: faCircleNotch, spin: true },
     unknown: { label: "Not checked", tone: "neutral", icon: faQuestionCircle },
 };
 
-export const CHECK_STATUSES: Record<CheckStatus, { label: string; tone: Tone; icon: typeof faCheckCircle }> = {
+export const CHECK_STATUSES: Record<CheckStatus, PillInfo> = {
     ok: { label: "Passed", tone: "success", icon: faCheckCircle },
     warning: { label: "Warning", tone: "warning", icon: faExclamationTriangle },
     error: { label: "Failed", tone: "danger", icon: faTimesCircle },

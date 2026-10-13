@@ -3,7 +3,7 @@ import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed } from "vue";
 
-import { CARD_STATES, type CardState } from "../lib/display";
+import { CARD_STATES, type CardState, type PillInfo } from "../lib/display";
 
 import StatusPill from "./StatusPill.vue";
 
@@ -12,30 +12,48 @@ defineOptions({ compatConfig: { MODE: 3 } });
 const props = defineProps<{
     title: string;
     icon: IconDefinition;
-    state: CardState;
+    /** A connection state, or `pill` for other kinds of status. */
+    state?: CardState;
+    pill?: PillInfo;
     detail: string;
-    actionLabel: string;
+    /** The action button; none without a label. */
+    actionLabel?: string;
+    /** Makes the action a link to this URL instead of a button. */
+    actionHref?: string;
     /** Id of the setup section the action opens. */
-    controls: string;
+    controls?: string;
+    /** The action's emphasis; by default primary for unconfigured and failed connections. */
+    actionStyle?: "primary" | "secondary";
 }>();
 
 const emit = defineEmits<{ action: [] }>();
 
-const tone = computed(() => CARD_STATES[props.state].tone);
-const primary = computed(() => props.state === "not_configured" || props.state === "error");
+const info = computed(() => props.pill ?? CARD_STATES[props.state ?? "unknown"]);
+const primary = computed(() =>
+    props.actionStyle ? props.actionStyle === "primary" : props.state === "not_configured" || props.state === "error",
+);
 </script>
 
 <template>
-    <article class="pw-status" :class="`pw-status--${tone}`">
+    <article class="pw-status" :class="`pw-status--${info.tone}`">
         <div class="pw-status__head">
             <span class="pw-status__icon" aria-hidden="true">
                 <FontAwesomeIcon :icon="icon" fixed-width />
             </span>
             <h3 class="pw-status__title">{{ title }}</h3>
         </div>
-        <StatusPill :state="state" />
+        <StatusPill :pill="info" />
         <p class="pw-status__detail">{{ detail }}</p>
+        <slot />
+        <a
+            v-if="actionLabel && actionHref"
+            class="btn btn-sm pw-status__action"
+            :class="primary ? 'btn-primary' : 'btn-outline-primary'"
+            :href="actionHref">
+            {{ actionLabel }}
+        </a>
         <button
+            v-else-if="actionLabel"
             type="button"
             class="btn btn-sm pw-status__action"
             :class="primary ? 'btn-primary' : 'btn-outline-primary'"

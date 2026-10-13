@@ -1,6 +1,6 @@
 import type { FrameLocator, Locator, Page } from "@playwright/test";
 
-import { api, expect, openGalaxy, saveScreenshot, test } from "./fixtures";
+import { api, expect, fillSecret, openGalaxy, saveScreenshot, test } from "./fixtures";
 
 const UNREACHABLE_GATEWAY = "http://127.0.0.1:8001";
 
@@ -82,12 +82,11 @@ test.describe("welcome page", () => {
         await form.getByRole("button", { name: "Save" }).click();
         await expect(form.getByRole("status")).toHaveText("Saved.");
 
-        const { body: settings } = await api<{ cluster: { gateway_url: string; namespace: string } }>(
-            page,
-            "/api/planet/settings",
-        );
+        const { body: settings } = await api<{
+            cluster: { gateway_url: string; namespace: string; has_token: boolean };
+        }>(page, "/api/planet/settings");
         expect(settings.cluster).toEqual(
-            expect.objectContaining({ gateway_url: UNREACHABLE_GATEWAY, namespace: "planet" }),
+            expect.objectContaining({ gateway_url: UNREACHABLE_GATEWAY, namespace: "planet", has_token: false }),
         );
         await expect(statusCard(page, "Kubernetes cluster")).toContainText("Not configured");
 
@@ -97,8 +96,14 @@ test.describe("welcome page", () => {
         await expect(report).toContainText("port-forward");
 
         await page.reload();
-        await expect(page.getByRole("form", { name: "Cluster settings" }).getByLabel("Gateway URL")).toHaveValue(
-            UNREACHABLE_GATEWAY,
-        );
+        const reloaded = page.getByRole("form", { name: "Cluster settings" });
+        await expect(reloaded.getByLabel("Gateway URL")).toHaveValue(UNREACHABLE_GATEWAY);
+
+        // The way the cluster test enters credentials reaches the form like typing does.
+        await fillSecret(reloaded.getByLabel("Token"), "e2e-placeholder-token");
+        await reloaded.getByRole("button", { name: "Save" }).click();
+        await expect(reloaded.getByRole("status")).toHaveText("Saved.");
+        const { body: saved } = await api<{ cluster: { has_token: boolean } }>(page, "/api/planet/settings");
+        expect(saved.cluster.has_token).toBe(true);
     });
 });

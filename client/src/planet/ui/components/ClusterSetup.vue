@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
     faChevronRight,
+    faExclamationTriangle,
     faExternalLinkAlt,
     faInfoCircle,
     faPlug,
@@ -12,7 +13,7 @@ import { computed, nextTick, ref, shallowRef, watch } from "vue";
 
 import type { PlanetSettings } from "@/planet/db/types";
 
-import { PlanetApiError } from "../lib/api";
+import { PlanetApiError, type RuntimeStatus } from "../lib/api";
 import type { ClusterReport } from "../lib/checks";
 import { CLUSTER_GUIDE_URL, clusterCommands, DEFAULT_GATEWAY_URL, localClusterCommands } from "../lib/commands";
 import { testCluster } from "../lib/connection";
@@ -25,7 +26,8 @@ import {
     validateClusterForm,
 } from "../lib/forms";
 import { addressSpace } from "../lib/network";
-import { type FieldErrors, MAX_WALLTIME_SECONDS } from "../lib/rules";
+import { type FieldErrors, imageError, MAX_WALLTIME_SECONDS } from "../lib/rules";
+import { runtimeImageWarning } from "../lib/runtime";
 import { useServices } from "../lib/services";
 
 import CheckReport from "./CheckReport.vue";
@@ -35,7 +37,11 @@ import SecretField from "./SecretField.vue";
 
 defineOptions({ compatConfig: { MODE: 3 } });
 
-const props = defineProps<{ settings: PlanetSettings }>();
+const props = defineProps<{
+    settings: PlanetSettings;
+    /** The runtime image jobs use, from the status; null until it is known. */
+    runtime?: RuntimeStatus | null;
+}>();
 
 const emit = defineEmits<{
     saved: [settings: PlanetSettings];
@@ -70,6 +76,15 @@ const commands = computed(() =>
 const localGateway = computed(() => {
     const url = form.value.gateway_url.trim();
     return url !== "" && addressSpace(url) !== "public";
+});
+/** Warns while the runtime image in the form, or the default one when it is empty, names no digest. */
+const runtimeWarning = computed(() => {
+    const value = form.value.runtime_image.trim();
+    if (value) {
+        return imageError(value) ? null : runtimeImageWarning(value, "settings");
+    }
+    const runtime = props.runtime;
+    return runtime ? runtimeImageWarning(runtime.default_image, runtime.build_image ? "build" : "fallback") : null;
 });
 const walltimeHours = computed(() => {
     const seconds = Number(form.value.default_walltime_seconds);
@@ -314,6 +329,10 @@ defineExpose({ test, focus });
                 @click="showAdvanced = !showAdvanced">
                 <FontAwesomeIcon :icon="faChevronRight" class="pw-disclosure__chevron" fixed-width aria-hidden="true" />
                 Job defaults and runtime
+                <span v-if="runtimeWarning && !showAdvanced" class="pw-disclosure__note">
+                    <FontAwesomeIcon :icon="faExclamationTriangle" fixed-width aria-hidden="true" />
+                    runtime image not pinned
+                </span>
             </button>
             <div v-show="showAdvanced" id="pw-cluster-advanced" class="pw-panel">
                 <p class="pw-panel__text">Tools that declare their own resources use those instead.</p>
@@ -397,7 +416,8 @@ defineExpose({ test, focus });
                         label="Runtime image"
                         help="Runs Galaxy's job preparation and collection steps. Leave empty for the image this Planet build was tested with."
                         optional
-                        :error="errors['cluster.runtime_image']">
+                        :error="errors['cluster.runtime_image']"
+                        :warning="runtimeWarning">
                         <template v-slot="{ describedBy, invalid }">
                             <input
                                 :id="ids.image"
@@ -405,7 +425,7 @@ defineExpose({ test, focus });
                                 type="text"
                                 class="form-control"
                                 :class="{ 'is-invalid': invalid }"
-                                placeholder="ghcr.io/almahmoud/planet-runtime:latest"
+                                :placeholder="runtime?.default_image"
                                 autocomplete="off"
                                 spellcheck="false"
                                 :aria-describedby="describedBy"
@@ -507,6 +527,18 @@ defineExpose({ test, focus });
 
 <style scoped lang="scss">
 @import "../styles/form.scss";
+
+.pw-disclosure__note {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: 0.25rem;
+    padding: 0 0.5rem;
+    border-radius: 999px;
+    background: map-get(map-get($pw-tones, "warning"), "background");
+    color: map-get(map-get($pw-tones, "warning"), "text");
+    font-size: 0.8125rem;
+}
 
 .pw-check-field {
     align-self: center;

@@ -1,8 +1,9 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { settingsFixture } from "./__tests__/fakes";
-import { testServices } from "./__tests__/services";
+import { ACTIVE_LEADER, NO_LEADER, statusFor, testServices } from "./__tests__/services";
+import type { LeaderStatus, PlanetStatus } from "./lib/api";
 import type { CheckReport } from "./lib/checks";
 import type { SetupServices } from "./lib/services";
 
@@ -45,7 +46,25 @@ function cards(wrapper: Awaited<ReturnType<typeof mountApp>>["wrapper"]) {
     return wrapper.findAll(".pw-status");
 }
 
+function runnerCard(wrapper: Awaited<ReturnType<typeof mountApp>>["wrapper"]) {
+    return cards(wrapper)[2]!;
+}
+
+let visibility: DocumentVisibilityState = "visible";
+
+function setVisibility(state: DocumentVisibilityState) {
+    visibility = state;
+    document.dispatchEvent(new Event("visibilitychange"));
+}
+
+beforeEach(() => {
+    visibility = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+});
+
 afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
 });
 
@@ -144,5 +163,102 @@ describe("App", () => {
         notify();
         await flushPromises();
         expect(services.getSettings).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe("App job runner card", () => {
+    function withLeader(leader: LeaderStatus, jobs = { queued: 0, running: 0 }) {
+        return vi.fn(async (): Promise<PlanetStatus> => statusFor(CONFIGURED, { leader, jobs }));
+    }
+
+    it("asks to set up the connections first", async () => {
+        const getStatus = vi.fn(async () => statusFor(settingsFixture(), { leader: ACTIVE_LEADER }));
+        const { wrapper } = await mountApp(settingsFixture(), { getStatus });
+        const card = runnerCard(wrapper);
+        expect(card.find("h3").text()).toBe("Job runner");
+        expect(card.text()).toContain("Not configured");
+        const action = card.find("button");
+        expect(action.text()).toContain("Set up");
+        expect(action.attributes("aria-controls")).toBe("pw-setup-cluster");
+    });
+
+    it("links to Planet while no tab runs jobs", async () => {
+        const { wrapper } = await mountApp(CONFIGURED, { getStatus: withLeader(NO_LEADER, { queued: 2, running: 0 }) });
+        const card = runnerCard(wrapper);
+        expect(card.text()).toContain("Waiting for a Planet tab");
+        expect(card.text()).toContain("2 jobs are unfinished.");
+        const link = card.find("a.pw-status__action");
+        expect(link.text()).toBe("Open Planet");
+        expect(link.attributes("href")).toBe("/");
+        expect(card.find("button").exists()).toBe(false);
+    });
+
+    it("shows a blocked job runner with a way to its settings", async () => {
+        const leader = { ...ACTIVE_LEADER, state: "blocked", blocked_reason: "The gateway refused the token." };
+        const { wrapper } = await mountApp(CONFIGURED, { getStatus: withLeader(leader) });
+        const card = runnerCard(wrapper);
+        expect(card.classes()).toContain("pw-status--danger");
+        expect(card.text()).toContain("Blocked");
+        expect(card.text()).toContain("The gateway refused the token.");
+        await card.find("button").trigger("click");
+        await flushPromises();
+        expect(wrapper.find("#pw-setup-cluster .pw-section__toggle").attributes("aria-expanded")).toBe("true");
+    });
+
+    it("shows the last error with a link to its job", async () => {
+        const last_error = { message: "Could not create the Kubernetes Job.", job_id: "0123456789abcdef", time: null };
+        const { wrapper } = await mountApp(CONFIGURED, { getStatus: withLeader({ ...ACTIVE_LEADER, last_error }) });
+        const card = runnerCard(wrapper);
+        expect(card.text()).toContain("Active, with errors");
+        const error = card.find(".pw-runner-error");
+        expect(error.text()).toContain("Last error: Could not create the Kubernetes Job.");
+        const link = error.find("a");
+        expect(link.text()).toBe("View job");
+        expect(link.attributes("href")).toBe("/jobs/0123456789abcdef/view");
+        expect(link.attributes("target")).toBeUndefined();
+    });
+
+    it("reads the status every 10 seconds while the page is visible", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+        let leader = NO_LEADER;
+        const getStatus = vi.fn(async () => statusFor(CONFIGURED, { leader }));
+        const { wrapper } = await mountApp(CONFIGURED, { getStatus });
+        expect(runnerCard(wrapper).text()).toContain("Waiting for a Planet tab");
+        expect(getStatus).toHaveBeenCalledTimes(1);
+
+        leader = ACTIVE_LEADER;
+        vi.advanceTimersByTime(10_000);
+        await flushPromises();
+        expect(getStatus).toHaveBeenCalledTimes(2);
+        expect(runnerCard(wrapper).text()).toContain("Active in this browser");
+        expect(runnerCard(wrapper).text()).toContain("No jobs are waiting or running.");
+
+        setVisibility("hidden");
+        vi.advanceTimersByTime(30_000);
+        await flushPromises();
+        expect(getStatus).toHaveBeenCalledTimes(2);
+
+        leader = NO_LEADER;
+        setVisibility("visible");
+        await flushPromises();
+        expect(getStatus).toHaveBeenCalledTimes(3);
+        expect(runnerCard(wrapper).text()).toContain("Waiting for a Planet tab");
+
+        wrapper.unmount();
+        vi.advanceTimersByTime(30_000);
+        setVisibility("visible");
+        await flushPromises();
+        expect(getStatus).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps the last status when a poll fails", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+        const getStatus = withLeader(ACTIVE_LEADER);
+        const { wrapper } = await mountApp(CONFIGURED, { getStatus });
+        getStatus.mockRejectedValueOnce(new Error("Planet did not answer."));
+        vi.advanceTimersByTime(10_000);
+        await flushPromises();
+        expect(getStatus).toHaveBeenCalledTimes(2);
+        expect(runnerCard(wrapper).text()).toContain("Active in this browser");
     });
 });

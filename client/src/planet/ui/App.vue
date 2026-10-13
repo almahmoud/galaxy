@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { faDatabase, faExternalLinkAlt, faServer } from "@fortawesome/free-solid-svg-icons";
+import { faCogs, faDatabase, faExternalLinkAlt, faServer } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from "vue";
 
@@ -9,6 +9,7 @@ import type { CheckTarget, PlanetStatus } from "./lib/api";
 import type { ClusterReport, StorageReport } from "./lib/checks";
 import { CLUSTER_GUIDE_URL, REPOSITORY_URL, STORAGE_GUIDE_URL } from "./lib/commands";
 import { type CardState, firstProblem } from "./lib/display";
+import { RUNNER_STATES, runnerView } from "./lib/runner";
 import { useServices } from "./lib/services";
 
 import ClusterSetup from "./components/ClusterSetup.vue";
@@ -42,6 +43,8 @@ const framed = (() => {
 })();
 
 const SECTION_IDS: Record<CheckTarget, string> = { cluster: "pw-setup-cluster", storage: "pw-setup-storage" };
+/** How often the status is read while the page is visible. */
+const STATUS_POLL_MS = 10_000;
 
 function cardState(target: CheckTarget): CardState {
     if (!status.value) {
@@ -103,6 +106,16 @@ const storageDetail = computed(() => {
             return `${where}.`;
     }
 });
+
+const runner = computed(() => runnerView(status.value, { framed, now: Date.now() }));
+const runnerAction = computed(() => runner.value.action);
+
+function onRunnerAction() {
+    const action = runnerAction.value;
+    if (action?.kind === "setup") {
+        void open(action.target);
+    }
+}
 
 function needsPageTest(target: CheckTarget): boolean {
     const problem = firstProblem(reports[target]?.checks ?? []);
@@ -191,14 +204,44 @@ function onTested(target: CheckTarget, report: ClusterReport | StorageReport) {
     }
 }
 
+let polling = false;
+
+/** Reads the status again; the job runner card has no other source of updates. */
+async function pollStatus() {
+    if (polling || !status.value || document.visibilityState !== "visible") {
+        return;
+    }
+    polling = true;
+    try {
+        status.value = await services.getStatus();
+    } catch {
+        // The last status stays on screen until the next poll.
+    } finally {
+        polling = false;
+    }
+}
+
+function onVisibilityChange() {
+    if (document.visibilityState === "visible") {
+        void pollStatus();
+    }
+}
+
 let unsubscribe: (() => void) | undefined;
+let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 onMounted(() => {
     unsubscribe = services.onSettingsChanged(() => void refresh());
+    pollTimer = setInterval(() => void pollStatus(), STATUS_POLL_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     void load();
 });
 
-onBeforeUnmount(() => unsubscribe?.());
+onBeforeUnmount(() => {
+    unsubscribe?.();
+    clearInterval(pollTimer);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+});
 </script>
 
 <template>
@@ -251,6 +294,30 @@ onBeforeUnmount(() => unsubscribe?.());
                     :action-label="actionLabel('storage', storageState)"
                     :controls="SECTION_IDS.storage"
                     @action="open('storage')" />
+                <StatusCard
+                    title="Job runner"
+                    :icon="faCogs"
+                    :pill="RUNNER_STATES[runner.state]"
+                    :detail="runner.detail"
+                    :action-label="runnerAction?.label"
+                    :action-href="runnerAction?.kind === 'link' ? runnerAction.href : undefined"
+                    :action-style="runner.state === 'failing' || runner.state === 'active' ? 'secondary' : 'primary'"
+                    :controls="runnerAction?.kind === 'setup' ? SECTION_IDS[runnerAction.target] : undefined"
+                    @action="onRunnerAction">
+                    <p v-if="runner.error" class="pw-runner-error">
+                        <span class="pw-runner-error__label"
+                            >Last error<template v-if="runner.error.when"> ({{ runner.error.when }})</template>:</span
+                        >
+                        {{ runner.error.message }}
+                        <a
+                            v-if="runner.error.jobHref"
+                            :href="runner.error.jobHref"
+                            :target="framed ? '_top' : undefined"
+                            class="pw-runner-error__link"
+                            >View job</a
+                        >
+                    </p>
+                </StatusCard>
             </div>
             <p v-if="ready" class="pw-ready" role="status">
                 <template v-if="framed"
@@ -274,6 +341,7 @@ onBeforeUnmount(() => unsubscribe?.());
                 <ClusterSetup
                     ref="clusterSetup"
                     :settings="settings"
+                    :runtime="status?.runtime ?? null"
                     @saved="onSaved('cluster', $event)"
                     @tested="onTested('cluster', $event)" />
             </SetupSection>
@@ -355,6 +423,28 @@ onBeforeUnmount(() => unsubscribe?.());
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
     gap: 1rem;
+}
+
+.pw-runner-error {
+    width: 100%;
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.375rem;
+    background: map-get(map-get($pw-tones, "danger"), "background");
+    color: map-get(map-get($pw-tones, "danger"), "text");
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+}
+
+.pw-runner-error__label {
+    font-weight: 600;
+}
+
+.pw-runner-error__link {
+    color: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    white-space: nowrap;
 }
 
 .pw-ready {

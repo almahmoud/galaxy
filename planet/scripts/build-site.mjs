@@ -2,11 +2,16 @@
 /**
  * Builds the deployable Planet site into planet/dist.
  *
- *   node planet/scripts/build-site.mjs [--verbose]
+ *   PLANET_RUNTIME_IMAGE=ghcr.io/<owner>/planet-runtime@sha256:<digest> \
+ *       node planet/scripts/build-site.mjs [--verbose]
  *
  * The build id is the short git SHA plus a hash of the built files. Files are
  * hashed while they still carry a placeholder id, so the id depends only on
  * the sources, and the files that embed it are rebuilt with the final value.
+ *
+ * PLANET_RUNTIME_IMAGE names the planet-runtime image built from the same
+ * commit. It is written to static/planet/data/runtime.json, the default image
+ * of job pods; pin it by digest. Without it, jobs default to a movable tag.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -45,6 +50,12 @@ const SCRIPT_ENTRIES = {
 const REPO_STATIC = ["style/jquery-ui", "favicon.svg", "favicon.ico", "robots.txt"];
 /** Stable-named files a page loads before Galaxy's entries, precached with them. */
 const BOOT_FILES = ["static/planet/boot.js", "static/planet/boot.css", "static/welcome.html"];
+/** Site path of the runtime image data (client/src/planet/ui/lib/runtime.ts). */
+const RUNTIME_DATA = "static/planet/data/runtime.json";
+/** [registry[:port]/]repository[:tag][@sha256:digest], as the setup page validates it. */
+const IMAGE_REFERENCE =
+    /^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?\/)?[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(\/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*(:\w[\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/;
+const IMAGE_DIGEST = /@sha256:[a-f0-9]{64}$/;
 const GENERATED_DATA = {
     datatypes: "datatypes/index.json",
     toolbox: "toolbox/panel.json",
@@ -215,6 +226,22 @@ function isContentHashed(path) {
     return /^\/static\/dist\/(?:chunks|assets)\//.test(path);
 }
 
+/** The runtime image data from PLANET_RUNTIME_IMAGE: `{image}`, null when unset. */
+function runtimeData() {
+    const image = (process.env.PLANET_RUNTIME_IMAGE ?? "").trim();
+    if (!image) {
+        warn("PLANET_RUNTIME_IMAGE is not set; jobs default to the movable planet-runtime tag");
+        return { image: null };
+    }
+    if (image.length > 512 || !IMAGE_REFERENCE.test(image)) {
+        fail(`PLANET_RUNTIME_IMAGE is not an image reference: ${JSON.stringify(image)}`);
+    }
+    if (!IMAGE_DIGEST.test(image)) {
+        warn(`PLANET_RUNTIME_IMAGE ${image} has no digest; pin it as image@sha256:<digest>`);
+    }
+    return { image };
+}
+
 function sha256(file) {
     return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
@@ -381,6 +408,7 @@ function printSummary(files, buildId, description, totalSeconds) {
 function main() {
     const started = performance.now();
     console.log(`Building Planet site into ${relative(process.cwd(), distDir) || "."}`);
+    const runtime = runtimeData();
     rmSync(distDir, { recursive: true, force: true });
     mkdirSync(distDir, { recursive: true });
 
@@ -436,6 +464,9 @@ function main() {
         copyInto(join(siteDir, "index.html"), join(distDir, "index.html"));
         copyInto(join(siteDir, "welcome.html"), join(distDir, "static/welcome.html"));
         copyInto(join(siteDir, "_headers"), join(distDir, "_headers"));
+        mkdirSync(dirname(join(distDir, RUNTIME_DATA)), { recursive: true });
+        writeFileSync(join(distDir, RUNTIME_DATA), `${JSON.stringify(runtime, null, 2)}\n`);
+        return `runtime image: ${runtime.image ?? "not set"}`;
     });
 
     step("tool archives", checkToolArchives);

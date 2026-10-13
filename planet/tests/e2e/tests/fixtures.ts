@@ -1,7 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { type ConsoleMessage, expect, type Page, type Response, test as base, type TestInfo } from "@playwright/test";
+import {
+    type ConsoleMessage,
+    expect,
+    type Locator,
+    type Page,
+    type Response,
+    test as base,
+    type TestInfo,
+} from "@playwright/test";
 
 export { expect };
 
@@ -211,4 +219,16 @@ export async function saveScreenshot(page: Page, testInfo: TestInfo, name: strin
     const path = resolve(directory, `${name}.png`);
     await page.screenshot({ path, fullPage: true, animations: "disabled" });
     await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
+/**
+ * Types a credential into a field without Playwright recording it: `fill()` puts the value into the step titles of
+ * the HTML report. Traces record it either way; planet/scripts/e2e.sh turns them off in cluster mode.
+ */
+export async function fillSecret(field: Locator, value: string): Promise<void> {
+    await field.evaluate((element, text) => {
+        const input = element as HTMLInputElement;
+        input.value = text;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
 }
