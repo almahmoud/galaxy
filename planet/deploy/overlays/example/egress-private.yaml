@@ -1,0 +1,22 @@
+# Admits job pods to endpoints on private addresses, which planet-jobs-egress blocks, such as an
+# S3 endpoint or HTTP proxy on the local network. Replace the example address and port. With
+# NodeLocal DNSCache, add a rule for 169.254.20.10 and the kube-dns Service address, port 53.
+# Image pulls come from the node, not the pod, and need no rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: planet-jobs-egress-private
+  namespace: planet
+spec:
+  podSelector:
+    matchExpressions:
+      - key: batch.kubernetes.io/job-name
+        operator: Exists
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.15/32
+      ports:
+        - protocol: TCP
+          port: 443

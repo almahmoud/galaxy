@@ -5,3 +5,18 @@ kind: Component
 
 resources:
   - cloudflared.yaml
+
+patches:
+  - target:
+      kind: NetworkPolicy
+      name: planet-gateway-ingress
+    patch: |-
+      - op: add
+        path: /spec/ingress/0/from/-
+        value:
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: planet-edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared

@@ -58,6 +58,10 @@ spec:
     - expression: has(object.spec.ttlSecondsAfterFinished)
       message: spec.ttlSecondsAfterFinished must be set.
       reason: Invalid
+    # The tool container must not see the stager processes, which hold presigned requests.
+    - expression: "!has(variables.pod.shareProcessNamespace) || variables.pod.shareProcessNamespace == false"
+      message: spec.template.spec.shareProcessNamespace must not be true.
+      reason: Forbidden
     # Pods keep the batch.kubernetes.io/job-name label that the NetworkPolicies select on.
     - expression: "!has(object.spec.manualSelector) || object.spec.manualSelector == false"
       message: spec.manualSelector must not be true.

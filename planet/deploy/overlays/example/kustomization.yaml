@@ -1,11 +1,12 @@
 # Production example: one HTTPS origin, storage in R2 or S3, base quotas.
-# Exposure over HTTPS (Cloudflare Tunnel or a Gateway API implementation): see
-# planet/docs/cluster-setup.md.
+# Exposure over HTTPS (Cloudflare Tunnel or a Gateway API implementation) and job pod egress:
+# see planet/docs/cluster-setup.md.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - ../../base
+  # - egress-private.yaml
 
 # components:
 #   - ../../components/cloudflare-tunnel
@@ -16,3 +17,9 @@ configMapGenerator:
     behavior: merge
     files:
       - allowed-origins.map
+
+# patches:
+#   - path: cluster-ranges.yaml
+#     target:
+#       kind: NetworkPolicy
+#       name: planet-jobs-egress

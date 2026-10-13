@@ -7,8 +7,10 @@ spec:
   podSelector: {}
   policyTypes: ["Ingress"]
 ---
-# Job pods carry batch.kubernetes.io/job-name, so they cannot reach the gateway, which
-# forwards to the Kubernetes API.
+# The gateway forwards to the Kubernetes API. Only namespaces labelled
+# planet.galaxyproject.org/gateway-access=true (an ingress or Gateway API controller) reach it, and
+# components/cloudflare-tunnel adds planet-edge. Job pods, which carry
+# batch.kubernetes.io/job-name, never do. kubectl port-forward is not subject to this policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -21,7 +23,9 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     - from:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              planet.galaxyproject.org/gateway-access: "true"
           podSelector:
             matchExpressions:
               - key: batch.kubernetes.io/job-name
@@ -30,7 +34,11 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# Tool pods may reach DNS and any address except the cloud instance-metadata endpoints.
+# Job pods may query the cluster DNS and connect to public addresses. Private, shared (CGNAT),
+# link-local and unique-local ranges are blocked, which covers the cluster's Pod, Service and node
+# addresses on most clusters and the instance-metadata endpoints (169.254.169.254, fd00:ec2::254,
+# 100.100.100.200). 168.63.129.16 is the Azure host endpoint. overlays/example shows how to block
+# further ranges and how to admit private endpoints.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -43,7 +51,14 @@ spec:
         operator: Exists
   policyTypes: ["Egress"]
   egress:
-    - ports:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
@@ -51,7 +66,15 @@ spec:
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: ["169.254.169.254/32"]
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 168.63.129.16/32
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
         - ipBlock:
             cidr: ::/0
-            except: ["fd00:ec2::254/128"]
+            except:
+              - fc00::/7
+              - fe80::/10

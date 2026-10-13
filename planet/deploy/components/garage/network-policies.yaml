@@ -32,8 +32,8 @@ spec:
         - protocol: TCP
           port: 3900
 ---
-# Cilium does not match in-cluster pods with ipBlock rules, so planet-jobs-egress alone does
-# not admit Garage there.
+# planet-jobs-egress blocks cluster addresses, and Cilium does not match in-cluster pods with
+# ipBlock rules at all: job pods reach Garage through this rule.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

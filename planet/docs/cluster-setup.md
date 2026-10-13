@@ -22,9 +22,10 @@ only the requests Planet makes. The manifests are kustomize directories under `p
 | `components/garage` | Garage S3 server in namespace `planet-storage`, and an S3 listener on gateway port 8081. See [Storage setup](storage-setup.md#garage-local-clusters). |
 | `components/cloudflare-tunnel` | cloudflared in namespace `planet-edge`, publishing the gateway over HTTPS. |
 | `overlays/local` | kind cluster: origins `http://localhost:8787` and `http://127.0.0.1:8787`, Garage, small quotas. |
-| `overlays/example` | Starting point for other clusters: one HTTPS origin, base quotas. |
+| `overlays/example` | Starting point for other clusters: one HTTPS origin, base quotas, optional egress rules. |
 | `kind/cluster.yaml` | Single-node kind cluster, Kubernetes 1.37. |
 | `tests/gateway-test.sh` | Runs the gateway configuration in Docker and checks its behaviour. |
+| `tests/network-policy-test.py` | Renders the overlays and checks which connections their NetworkPolicies admit. |
 
 ## Install
 
@@ -75,7 +76,8 @@ kubectl -n planet port-forward --address 127.0.0.1 service/planet-gateway 8001:8
 The gateway URL is then `http://127.0.0.1:8001`. Chrome and Firefox let an HTTPS page call
 loopback addresses once the user accepts the browser's local network access prompt. The forward
 ends when the gateway pod restarts; `dev-cluster.sh port-forward` reconnects. Safari blocks
-`http://` loopback addresses from HTTPS pages: use HTTPS.
+`http://` loopback addresses from HTTPS pages: use HTTPS. A port-forward connects inside the
+gateway pod's network namespace, so NetworkPolicies do not apply to it.
 
 ### HTTPS (Safari, remote access)
 
@@ -84,8 +86,20 @@ certificate. Disable response buffering in that layer so that watches and logs s
 put an authentication proxy such as Cloudflare Access in front of the gateway: browsers send
 CORS preflight requests without credentials, and the proxy would refuse them.
 
-The NetworkPolicy `planet-gateway-ingress` admits pods from every namespace except Job pods. A
-proxy that runs on the host network needs its own rule in an overlay.
+The NetworkPolicy `planet-gateway-ingress` admits pods, except Job pods, from namespaces labelled
+`planet.galaxyproject.org/gateway-access=true`, and the cloudflared pods of the Cloudflare Tunnel
+component. The S3 listener of `components/garage` admits the same pods. For an ingress or Gateway
+API controller, label the namespace of its proxy pods:
+
+```sh
+kubectl label namespace <namespace> planet.galaxyproject.org/gateway-access=true
+```
+
+Anyone allowed to label namespaces can admit their own. Where tenants can, an overlay patch should
+replace `/spec/ingress/0/from/0/namespaceSelector` with
+`matchLabels: {kubernetes.io/metadata.name: <namespace>}`. A proxy that is not a pod (on the host
+network, inside the network plugin, or a load balancer that sends traffic straight to pods) needs a
+rule for its addresses, or a policy specific to the network plugin, in an overlay.
 
 **Cloudflare Tunnel**
 
@@ -186,10 +200,23 @@ API server with the cluster CA, and allows 20 requests per second per client (bu
 **Pod Security.** The namespace enforces the `restricted` Pod Security Standard. The `warn` mode
 returns violations as warnings when a Job is created, before any pod exists.
 
-**Network.** Ingress to the namespace is denied except to the gateway, which Job pods cannot
-reach. Job pods may resolve DNS and connect to any address except the cloud instance-metadata
-endpoints `169.254.169.254` and `fd00:ec2::254`. They can reach other services in the cluster
-unless those services restrict their ingress.
+**Network.** Ingress to the namespace is denied except to the gateway, from the pods described in
+[HTTPS](#https-safari-remote-access); Job pods cannot reach it. Job pods may query the cluster DNS
+(pods labelled `k8s-app: kube-dns` in `kube-system`) and connect to public addresses. The policy
+`planet-jobs-egress` blocks `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+`169.254.0.0/16`, `fc00::/7`, `fe80::/10` and the Azure host address `168.63.129.16`. These
+include the instance-metadata endpoints and, on most clusters, the Pod, Service and node addresses.
+With `components/garage`, `planet-jobs-egress-storage` admits Garage. Image pulls come from the
+node and are not affected. Adjust the rules in an overlay, as `overlays/example` shows:
+
+- `cluster-ranges.yaml` blocks Pod, Service or node ranges outside these, such as public node
+  addresses.
+- `egress-private.yaml` admits an endpoint on a private address, such as an S3 endpoint or HTTP
+  proxy on the local network. Add a rule there for NodeLocal DNSCache (`169.254.20.10` and the
+  kube-dns Service address, port 53), or for cluster DNS pods with other labels.
+
+Cilium does not match cluster pods or nodes with `ipBlock` rules by default, so on Cilium Job pods
+reach cluster addresses only through the selector rules.
 
 ## Quotas and limits
 
@@ -215,3 +242,7 @@ reason. Override the values with a patch in your overlay, as `overlays/local` do
 against a stub API server and a Garage container, and checks CORS, the allow-list, header
 handling, DELETE handling, rate limiting and the S3 listener. It needs Docker, openssl, python3
 and curl 7.75 or later.
+
+`planet/deploy/tests/network-policy-test.py` renders `overlays/local` and `overlays/example`, alone
+and with the Cloudflare Tunnel component and the example egress files, and checks which
+connections their NetworkPolicies admit. It needs python3 3.10 or later and kubectl, not a cluster.

@@ -1,0 +1,9 @@
+# Blocks job pod egress to cluster ranges outside those planet-jobs-egress already blocks, for
+# example nodes with public addresses. Replace the documentation ranges with your Pod, Service
+# and node ranges.
+- op: add
+  path: /spec/egress/1/to/0/ipBlock/except/-
+  value: 203.0.113.0/24
+- op: add
+  path: /spec/egress/1/to/1/ipBlock/except/-
+  value: 2001:db8::/32

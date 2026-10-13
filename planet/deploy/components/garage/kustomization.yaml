@@ -42,6 +42,7 @@ patches:
           name: s3
           port: 8081
           targetPort: s3
+  # The S3 listener admits the same sources as the API listener.
   - target:
       kind: NetworkPolicy
       name: planet-gateway-ingress
