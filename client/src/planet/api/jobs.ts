@@ -20,6 +20,7 @@ import {
     withTransaction,
 } from "@/planet/db";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
+import { buildRerunForm, collectReferences, readSnapshot, summarizeJob } from "@/planet/tools";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { parseSearch, sqlLike } from "@/planet/util/filters";
 import { queryBool, queryInt } from "@/planet/util/query";
@@ -28,6 +29,8 @@ import { parseGalaxyTime } from "@/planet/util/time";
 
 import { GALAXY_VERSION_MAJOR } from "./configuration";
 import { markJobDeleted } from "./contents";
+import { currentHistory } from "./legacyHistory";
+import { getToolBundle, loadStaticToolData, toolRequestContext, toolVersions } from "./tools";
 import { PLANET_USER_ID } from "./users";
 
 type JobSummary = components["schemas"]["JobSummary"];
@@ -37,8 +40,6 @@ type JobDisplayParametersSummary = components["schemas"]["JobDisplayParametersSu
 type JobParameter = components["schemas"]["JobParameter"];
 type JobOutput = components["schemas"]["JobOutput"];
 type EncodedJobParameterHistoryItem = components["schemas"]["EncodedJobParameterHistoryItem"];
-
-const NOT_YET = "Rerunning jobs arrives in a later Planet release.";
 
 // ---------------------------------------------------------------------------------------------------------
 // Serialization (`Job.to_dict` validated through Galaxy's response models)
@@ -136,10 +137,10 @@ function displayValue(value: unknown): JobParameter["value"] {
 }
 
 /**
- * Galaxy's `summarize_job_parameters` without the tool's parameter definitions: one row per submitted
+ * The summary of a job whose tool has no bundle (Planet's internal upload and set-metadata tools): one row per stored
  * parameter (nesting from the `a|b` keys), data inputs listed with their hid and name, and the job outputs.
  */
-export async function summarizeJobParameters(job: JobRecord, tx: ReadTx): Promise<JobDisplayParametersSummary> {
+async function storedParameterSummary(job: JobRecord, tx: ReadTx): Promise<JobDisplayParametersSummary> {
     const parameters: JobParameter[] = [];
     const dataInputs = new Map<string, EncodedJobParameterHistoryItem[]>();
     for (const input of job.inputs) {
@@ -176,6 +177,10 @@ export async function summarizeJobParameters(job: JobRecord, tx: ReadTx): Promis
     for (const [name, value] of dataInputs) {
         parameters.push({ text: name.split("|").pop()!, depth: name.split("|").length, value });
     }
+    return { parameters, has_parameter_errors: false, outputs: jobOutputsWithoutLabels(job) };
+}
+
+function jobOutputsWithoutLabels(job: JobRecord): Record<string, JobOutput[]> {
     const outputs: Record<string, JobOutput[]> = {};
     for (const output of job.outputs) {
         (outputs[output.name] ??= []).push({ label: null, value: { src: "hda", id: output.id } });
@@ -185,7 +190,42 @@ export async function summarizeJobParameters(job: JobRecord, tx: ReadTx): Promis
             (outputs[output.name] ??= []).push({ label: null, value: { src: "hdca", id: output.id } });
         }
     }
-    return { parameters, has_parameter_errors: false, outputs };
+    return outputs;
+}
+
+/**
+ * Galaxy's `summarize_job_parameters`: the job's parameters as its tool defines them, from the tool bundle. Jobs of
+ * Planet's internal tools (ids starting with `__`) list their stored parameters; jobs of tools Planet no longer has
+ * report parameter errors, as Galaxy does.
+ *
+ * `tx` is only read before the tool bundle loads, so the read-only transaction may commit while it does.
+ */
+export async function summarizeJobParameters(job: JobRecord, tx: ReadTx): Promise<JobDisplayParametersSummary> {
+    if (job.tool_id.startsWith("__")) {
+        return storedParameterSummary(job, tx);
+    }
+    const snapshot = await readSnapshot(tx, null, collectReferences(job.params));
+    const tool = await getToolBundle(job.tool_id, job.tool_version);
+    if (!tool) {
+        return { parameters: [], has_parameter_errors: true, outputs: jobOutputsWithoutLabels(job) };
+    }
+    const summary = summarizeJob({ ...(await loadStaticToolData()), tool, snapshot, origin: "" }, job);
+    return summary as unknown as JobDisplayParametersSummary;
+}
+
+/** `GET /api/jobs/{job_id}/build_for_rerun`: the tool form with the job's parameters, in the current history. */
+async function buildForRerun({ params, query, url }: PlanetRequest): Promise<Record<string, unknown>> {
+    const job = await jobs.getOrThrow(params.job_id!);
+    const tool = await getToolBundle(job.tool_id, query.get("tool_version") || job.tool_version);
+    if (!tool) {
+        throw ApiError.notFound("Requested tool not found");
+    }
+    if (tool.is_workflow_compatible === false) {
+        throw new ApiError(403, `Tool '${job.tool_id}' cannot be rerun.`, ErrorCodes.CONFIG_DOES_NOT_ALLOW);
+    }
+    const history = await currentHistory();
+    const rc = await toolRequestContext(tool, history, collectReferences(job.params), url.origin);
+    return buildRerunForm(rc, job, await toolVersions(tool));
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -365,8 +405,8 @@ export function register(router: Router): void {
         readJob(params.job_id, async (job) => job.metrics),
     );
 
-    router.route("/api/jobs/{job_id}/console_output", "get", ({ params, query }) =>
-        readJob(params.job_id, async (job) => {
+    router.route("/api/jobs/{job_id}/console_output", "get", async ({ params, query }) => {
+        const output = await readJob(params.job_id, async (job) => {
             if (job.state !== "running") {
                 return { state: job.state, stdout: job.tool_stdout, stderr: job.tool_stderr };
             }
@@ -383,8 +423,13 @@ export function register(router: Router): void {
                     queryInt(query, "stderr_length", 0),
                 ),
             };
-        }),
-    );
+        });
+        if (output.state === "running") {
+            // The leader keeps `tool_stdout` current while a client reads it (jobs/console.ts).
+            await jobs.requestConsole(params.job_id);
+        }
+        return output;
+    });
 
     router.route("/api/jobs/{job_id}/common_problems", "get", ({ params }) =>
         readJob(params.job_id, async (job, tx) => {
@@ -415,9 +460,5 @@ export function register(router: Router): void {
         throw new ApiError(403, "You must be an administrator to access this feature.", ErrorCodes.ADMIN_REQUIRED);
     });
 
-    router.untyped("/api/jobs/{job_id}/build_for_rerun", "get", ({ params }) =>
-        readJob(params.job_id!, async () => {
-            throw new ApiError(501, NOT_YET, ErrorCodes.NOT_IMPLEMENTED);
-        }),
-    );
+    router.untyped("/api/jobs/{job_id}/build_for_rerun", "get", buildForRerun);
 }

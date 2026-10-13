@@ -116,7 +116,14 @@ const TOOLBOX_FILES: Record<string, unknown> = {
     [`/static/planet/data/toolbox/panel_views/${encodeURIComponent("ontology:edam_topics")}.json`]: TOPIC_PANEL,
     "/static/planet/data/toolbox/tools.json": [UPLOAD, COLUMN, DATAMASH_ENTRY],
     "/static/planet/data/toolbox/tool_tags.json": { [DATAMASH]: ["Statistics"] },
-    [`/static/planet/data/${bundlePath(DATAMASH, "1.8+galaxy0")}`]: { id: DATAMASH, citations: CITATIONS },
+    [`/static/planet/data/${bundlePath(DATAMASH, "1.8+galaxy0")}`]: {
+        id: DATAMASH,
+        version: "1.8+galaxy0",
+        name: "Datamash",
+        inputs: [],
+        outputs: [],
+        citations: CITATIONS,
+    },
 };
 
 function doiService(url: URL): Response | undefined {
@@ -249,18 +256,23 @@ describe("GET /api/tools/{tool_id}", () => {
         ]);
     });
 
-    it("answers 501 for tool forms, runs and uploads", async () => {
+    it("answers 404 for forms and runs of tools without a bundle", async () => {
         const router = makeRouter();
-        for (const [method, path] of [
-            ["GET", `/api/tools/${COLUMN_MAKER}/build`],
-            ["POST", `/api/tools/${encodeURIComponent(COLUMN_MAKER)}/build`],
-            ["POST", "/api/tools"],
-            ["POST", "/api/tools/fetch"],
+        for (const [method, path, body] of [
+            ["GET", `/api/tools/${COLUMN_MAKER}/build`, undefined],
+            ["POST", `/api/tools/${encodeURIComponent(COLUMN_MAKER)}/build`, {}],
+            ["POST", "/api/tools", { tool_id: COLUMN_MAKER, inputs: {} }],
         ] as const) {
-            const response = await send(router, method, path, method === "POST" ? {} : undefined);
-            expect(response.status).toBe(501);
-            expect((await response.json()).err_code).toBe(501001);
+            const response = await send(router, method, path, body);
+            expect(response.status).toBe(404);
+            expect((await response.json()).err_msg).toBe(`Could not find tool with id '${COLUMN_MAKER}'.`);
         }
+    });
+
+    it("leaves uploads to the uploads module", async () => {
+        const response = await send(makeRouter(), "POST", "/api/tools/fetch", {});
+        expect(response.status).toBe(404);
+        expect((await response.json()).err_msg).toBe("No route for /api/tools/fetch");
     });
 
     it("serves the curated tool tags", async () => {

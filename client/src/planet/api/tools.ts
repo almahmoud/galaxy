@@ -2,19 +2,38 @@
  * The toolbox: GET /api/tool_panels, /api/tool_panels/{view}, /api/tools (flat list, panel structure, version
  * lookup and search), /api/tools/{tool_id}, /api/tools/{tool_id}/citations and /api/tags/tool_tags, answered from
  * the build's `toolbox/` data plus tools installed into IndexedDB. Missing toolbox data gives an empty panel with
- * only the upload tool, never an error.
+ * only the upload tool, never an error. DOI citations are resolved to BibTeX through doi.org, as Galaxy does.
  *
- * Tool forms (/api/tools/{tool_id}/build), tool runs (POST /api/tools) and uploads (POST /api/tools/fetch) answer
- * 501 until the tool layer lands. DOI citations are resolved to BibTeX through doi.org, as Galaxy does.
+ * Tool forms (GET and POST /api/tools/{tool_id}/build) and tool runs (POST /api/tools) use the tool engine in
+ * `@/planet/tools`. Uploads (POST /api/tools/fetch) are handled by `./uploads`.
  */
 
 import * as db from "@/planet/db";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
+import {
+    buildToolForm,
+    bundlePath,
+    collectReferences,
+    type ItemReference,
+    readBundle,
+    readSnapshot,
+    type RequestContext,
+    runTool,
+    type StaticToolData,
+    type ToolBundle,
+} from "@/planet/tools";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { stringAsBool } from "@/planet/util/query";
 import { loadOptionalStaticData } from "@/planet/util/staticData";
 
+import { GALAXY_VERSION_MAJOR } from "./configuration";
+import { ContentLoader, hdaElementObject, loadDatatypeInfo, normalizeTags, serializeHdcaInstance } from "./contents";
+import type { DatatypeShow } from "./datatypes";
+import { genomeBuilds } from "./genomes";
+import { currentHistory } from "./legacyHistory";
 import { normalizeFavorites, readPreferences } from "./users";
+
+export { bundlePath };
 
 /** A `ToolPanelEntry` payload (`/api/tools/{tool_id}` and the entries of `/api/tools`). */
 export interface ToolEntry {
@@ -55,11 +74,6 @@ const DEFAULT_PANEL_VIEW = "default";
 const UPLOAD_TOOL_ID = "upload1";
 const UPLOAD_SECTION = { id: "getext", name: "Get Data" };
 const FAVORITES_TERMS = new Set(["#favs", "#favorites", "#favourites"]);
-const NOT_YET = {
-    form: "Tool forms arrive in a later Planet release.",
-    run: "Running tools arrives in a later Planet release.",
-    upload: "Uploading data arrives in a later Planet release.",
-} as const;
 
 /** Galaxy's upload tool, offered even when the deployment has no generated toolbox. */
 const UPLOAD_ENTRY: ToolEntry = {
@@ -148,27 +162,33 @@ export async function getToolEntry(toolId: string): Promise<ToolEntry | undefine
     return (await listToolEntries()).find((entry) => entry.id === toolId);
 }
 
-/** Path of a bundle below the static data root: each `/`-separated segment percent-encoded. */
-export function bundlePath(toolId: string, version: string): string {
-    const segments = [...toolId.split("/"), ...version.split("/")].map(encodeURIComponent);
-    return `toolbox/bundles/${segments.join("/")}.json`;
+/**
+ * Returns the tool bundle of a tool version, from IndexedDB for installed tools or the build's static data for
+ * built-in ones. Without `version`, or when that version is not available, the latest listed version is used, as
+ * Galaxy's toolbox does.
+ */
+export async function getToolBundle(toolId: string, version?: string | null): Promise<ToolBundle | undefined> {
+    if (version) {
+        // A Tool Shed GUID ends with its version, so other versions of the lineage have other ids.
+        const lineageId = toolId.includes("/repos/")
+            ? `${toolId.slice(0, toolId.lastIndexOf("/"))}/${version}`
+            : toolId;
+        const exact =
+            (await readBundle(toolId, version)) ??
+            (lineageId !== toolId ? await readBundle(lineageId, version) : undefined);
+        if (exact) {
+            return exact;
+        }
+    }
+    const latest = (await getToolEntry(toolId))?.version;
+    return latest && latest !== version ? readBundle(toolId, latest) : undefined;
 }
 
-/**
- * Returns the Planet tool bundle of a tool version (the latest listed version when `version` is omitted), from
- * IndexedDB for installed tools or the build's static data for built-in ones.
- */
-export async function getToolBundle(toolId: string, version?: string): Promise<Record<string, unknown> | undefined> {
-    const resolved = version ?? (await getToolEntry(toolId))?.version;
-    if (!resolved) {
-        return undefined;
-    }
-    const record = await db.tools.get(toolId, resolved).catch(() => undefined);
-    if (record && isRecord(record.bundle)) {
-        return record.bundle;
-    }
-    const bundle = await loadOptionalStaticData<unknown>(bundlePath(toolId, resolved));
-    return isRecord(bundle) ? bundle : undefined;
+/** The versions of a tool lineage, as the tool form lists them. */
+export async function toolVersions(bundle: ToolBundle): Promise<string[]> {
+    const entry = await getToolEntry(bundle.id);
+    const versions = entry && Array.isArray(entry.versions) ? (entry.versions as string[]) : bundle.versions;
+    return versions?.length ? versions : [bundle.version];
 }
 
 async function panelViews(): Promise<PanelViews> {
@@ -600,11 +620,209 @@ async function toolCitations(toolId: string): Promise<CitationItem[]> {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Handlers
+// Tool forms and runs
 
-function notYetAvailable(feature: keyof typeof NOT_YET): never {
-    throw new ApiError(501, NOT_YET[feature], ErrorCodes.NOT_IMPLEMENTED);
+/** Planet runs uploads through `POST /api/tools/fetch`, not through the upload tool's form. */
+const UPLOAD_THROUGH_FETCH =
+    "Upload data with the upload dialog (POST /api/tools/fetch); the upload tool's form is not run by Planet.";
+
+/** The build's datatype, genome and upload format data the tool engine reads. */
+export async function loadStaticToolData(): Promise<StaticToolData> {
+    const [datatypes, details, edamFormats, edamData, genomes, uploadFormats] = await Promise.all([
+        loadDatatypeInfo(),
+        loadOptionalStaticData<Record<string, DatatypeShow>>("datatypes/details.json"),
+        loadOptionalStaticData<Record<string, string>>("datatypes/edam_formats.json"),
+        loadOptionalStaticData<Record<string, string>>("datatypes/edam_data.json"),
+        genomeBuilds(),
+        loadOptionalStaticData<string[]>("datatypes/extensions.json"),
+    ]);
+    return {
+        datatypes,
+        datatypeDetails: isRecord(details) ? details : {},
+        edamFormats: isRecord(edamFormats) ? (edamFormats as Record<string, string>) : {},
+        edamData: isRecord(edamData) ? (edamData as Record<string, string>) : {},
+        genomes,
+        uploadFormats: Array.isArray(uploadFormats) ? uploadFormats : [],
+    };
 }
+
+/** The history a tool request names (it must exist), or the current history. */
+async function requestHistory(historyId: unknown): Promise<db.HistoryRecord> {
+    if (typeof historyId === "string" && historyId) {
+        return db.histories.getOrThrow(historyId);
+    }
+    return currentHistory();
+}
+
+/**
+ * The tool engine's request context: the tool, the build's static data and the items of `history` plus the items
+ * `references` name, read in one transaction.
+ */
+export async function toolRequestContext(
+    tool: ToolBundle,
+    history: db.HistoryRecord | null,
+    references: readonly ItemReference[],
+    origin: string,
+): Promise<RequestContext> {
+    const statics = await loadStaticToolData();
+    const snapshot = await db.readTx(db.CONTENT_STORES, (tx) => readSnapshot(tx, history, references));
+    return { ...statics, tool, snapshot, origin };
+}
+
+async function requireBundle(toolId: string, version: unknown): Promise<ToolBundle> {
+    const bundle = await getToolBundle(toolId, typeof version === "string" ? version : null);
+    if (!bundle) {
+        throw ApiError.notFound(`Could not find tool with id '${toolId}'.`);
+    }
+    return bundle;
+}
+
+/** Query parameters as Galaxy's keyword arguments: repeated keys become lists. */
+function queryKeywords(query: URLSearchParams): Record<string, unknown> {
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of new Set(query.keys())) {
+        const values = query.getAll(key);
+        out[key] = values.length > 1 ? values : values[0];
+    }
+    return out;
+}
+
+/** `_parse_options_pagination`: an object, or its JSON. */
+function optionsPagination(value: unknown): Record<string, Record<string, unknown>> {
+    if (value === undefined || value === null || value === "") {
+        return {};
+    }
+    let parsed = value;
+    if (typeof value === "string") {
+        try {
+            parsed = JSON.parse(value);
+        } catch (error) {
+            throw ApiError.badRequest(`options_pagination must be a JSON object: ${String(error)}`);
+        }
+    }
+    if (!isRecord(parsed)) {
+        throw ApiError.badRequest("options_pagination must be a JSON object.");
+    }
+    return parsed as Record<string, Record<string, unknown>>;
+}
+
+/** `GET` and `POST /api/tools/{tool_id}/build`: the tool form for the given parameters. */
+async function buildForm(request: PlanetRequest, toolId: string): Promise<Record<string, unknown>> {
+    const keywords = request.method === "POST" ? await request.json() : queryKeywords(request.query);
+    if (!isRecord(keywords)) {
+        throw ApiError.badRequest("The request body must be a JSON object.");
+    }
+    const { history_id: historyId, options_pagination: pagination, ...rest } = keywords;
+    const incoming = isRecord(rest.inputs) ? rest.inputs : rest;
+    const bundle = await requireBundle(toolId, rest.tool_version);
+    const history = await requestHistory(historyId);
+    const rc = await toolRequestContext(bundle, history, collectReferences(incoming), request.url.origin);
+    return buildToolForm(rc, incoming, {
+        pagination: optionsPagination(pagination),
+        versions: await toolVersions(bundle),
+    });
+}
+
+/** `Job.to_dict(view="collection")`. */
+function jobCollectionView(job: db.JobRecord): Record<string, unknown> {
+    return {
+        model_class: "Job",
+        id: job.id,
+        state: job.state,
+        exit_code: job.exit_code,
+        update_time: job.update_time,
+        create_time: job.create_time,
+        galaxy_version: GALAXY_VERSION_MAJOR,
+        tool_id: job.tool_id,
+        tool_version: job.tool_version,
+        history_id: job.history_id,
+    };
+}
+
+/** `POST /api/tools`: runs a tool with the legacy form payload and answers Galaxy's `JobCreateResponse`. */
+async function runToolRequest(request: PlanetRequest): Promise<Record<string, unknown>> {
+    const payload = await request.json();
+    if (!isRecord(payload)) {
+        throw ApiError.badRequest("The request body must be a JSON object.");
+    }
+    if (payload.action === "rerun") {
+        throw ApiError.badRequest("'rerun' action has been deprecated");
+    }
+    if (typeof payload.tool_id !== "string" || !payload.tool_id) {
+        throw ApiError.missingParameter("Must specify a valid tool_id to use this endpoint.");
+    }
+    const bundle = await requireBundle(payload.tool_id, payload.tool_version);
+    if (bundle.id === UPLOAD_TOOL_ID) {
+        throw ApiError.badRequest(UPLOAD_THROUGH_FETCH);
+    }
+    const inputs = payload.inputs ?? {};
+    if (!isRecord(inputs)) {
+        throw ApiError.badRequest(`inputs invalid ${JSON.stringify(inputs)}`);
+    }
+    const inputFormat = payload.input_format ?? "legacy";
+    if (inputFormat !== "legacy") {
+        throw ApiError.badRequest(
+            inputFormat === "21.01"
+                ? "Planet accepts tool parameters in the legacy input format only."
+                : `input_format invalid ${String(inputFormat)}`,
+        );
+    }
+    if (inputs.rerun_remap_job_id !== undefined && inputs.rerun_remap_job_id !== null) {
+        throw ApiError.badRequest("Resuming the dependent jobs of a rerun job is not supported by Planet yet.");
+    }
+    const history = await requestHistory(payload.history_id);
+    if (history.purged || history.archived) {
+        throw ApiError.forbidden("History is immutable", ErrorCodes.ITEM_IS_IMMUTABLE);
+    }
+    const tags = Array.isArray(payload.__tags)
+        ? normalizeTags(payload.__tags.filter((tag): tag is string => typeof tag === "string"))
+        : [];
+    const rc = await toolRequestContext(bundle, history, collectReferences(inputs), request.url.origin);
+    const result = await runTool(rc, inputs, {
+        tags,
+        request: {
+            tool_id: bundle.id,
+            tool_version: bundle.version,
+            history_id: history.id,
+            use_cached_job: Boolean(payload.use_cached_job),
+            preferred_object_store_id: payload.preferred_object_store_id ?? null,
+            __tags: tags,
+        },
+    });
+    return db.readTx([...db.CONTENT_STORES, "jobs"], async (tx) => {
+        const loader = new ContentLoader(tx);
+        const outputs: Record<string, unknown>[] = [];
+        const outputCollections: Record<string, unknown>[] = [];
+        for (const created of result.jobs) {
+            for (const { name, hda, dataset } of created.datasets) {
+                outputs.push({
+                    ...hdaElementObject({ hda, dataset, job: created.job }, rc.datatypes),
+                    output_name: name,
+                });
+            }
+            for (const { name, hdca } of created.collections) {
+                outputCollections.push({
+                    ...(await serializeHdcaInstance(hdca, "element", loader, rc.datatypes)),
+                    output_name: name,
+                });
+            }
+        }
+        const response: Record<string, unknown> = {
+            outputs,
+            output_collections: outputCollections,
+            jobs: result.jobs.map(({ job }) => jobCollectionView(job)),
+            implicit_collections: [],
+            produces_entry_points: false,
+        };
+        if (result.errors.length) {
+            response.errors = result.errors.map((error) => error.toEnvelope());
+        }
+        return response;
+    });
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Handlers
 
 async function showTool(toolId: string): Promise<ToolEntry> {
     const entry = await getToolEntry(toolId);
@@ -645,22 +863,21 @@ export function register(router: Router): void {
     router.untyped("/api/tool_panels/{view}", "get", ({ params }) => panelView(params.view!));
 
     router.untyped("/api/tools", "get", toolsIndex);
-    router.untyped("/api/tools", "post", () => notYetAvailable("run"));
-    router.route("/api/tools/fetch", "post", () => notYetAvailable("upload"));
+    router.untyped("/api/tools", "post", runToolRequest);
 
-    router.untyped("/api/tools/{tool_path:path}", "get", ({ params }) => {
-        const { toolId, action } = toolAction(params.tool_path!);
+    router.untyped("/api/tools/{tool_path:path}", "get", (request) => {
+        const { toolId, action } = toolAction(request.params.tool_path!);
         if (action === "build") {
-            notYetAvailable("form");
+            return buildForm(request, toolId);
         }
         return action === "citations" ? toolCitations(toolId) : showTool(toolId);
     });
-    router.untyped("/api/tools/{tool_path:path}", "post", ({ params }) => {
-        const { action } = toolAction(params.tool_path!);
+    router.untyped("/api/tools/{tool_path:path}", "post", (request) => {
+        const { toolId, action } = toolAction(request.params.tool_path!);
         if (action === "build") {
-            notYetAvailable("form");
+            return buildForm(request, toolId);
         }
-        throw ApiError.notFound(`No route for /api/tools/${params.tool_path}`);
+        throw ApiError.notFound(`No route for /api/tools/${request.params.tool_path}`);
     });
 
     router.route("/api/tags/tool_tags", "get", toolTags);

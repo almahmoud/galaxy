@@ -106,7 +106,21 @@ describe("GET /api/jobs/{job_id}", () => {
             { name: "list_out", dataset_collection_instance: { src: "hdca", id: list.id } },
         ]);
         expect(await fetchJson(router, "GET", `/api/jobs/${job.id}/metrics`)).toEqual(job.metrics);
-        const parameters = await fetchJson(router, "GET", `/api/jobs/${job.id}/parameters_display`);
+        // The job's tool is not in the toolbox: Galaxy lists no parameters and reports parameter errors.
+        expect(await fetchJson(router, "GET", `/api/jobs/${job.id}/parameters_display`)).toEqual({
+            parameters: [],
+            has_parameter_errors: true,
+            outputs: {
+                out_file1: [{ label: null, value: { src: "hda", id: output.hda.id } }],
+                list_out: [{ label: null, value: { src: "hdca", id: list.id } }],
+            },
+        });
+    });
+
+    it("lists the stored parameters of Planet's internal tools", async () => {
+        const { job, input, output } = await jobWithData();
+        await jobs.update(job.id, { tool_id: "__SET_METADATA__" });
+        const parameters = await fetchJson(makeRouter(), "GET", `/api/jobs/${job.id}/parameters_display`);
         expect(parameters).toEqual({
             parameters: [
                 { text: "cond", depth: 1 },
@@ -124,10 +138,7 @@ describe("GET /api/jobs/{job_id}", () => {
                 },
             ],
             has_parameter_errors: false,
-            outputs: {
-                out_file1: [{ label: null, value: { src: "hda", id: output.hda.id } }],
-                list_out: [{ label: null, value: { src: "hdca", id: list.id } }],
-            },
+            outputs: { out_file1: [{ label: null, value: { src: "hda", id: output.hda.id } }] },
         });
     });
 
@@ -143,23 +154,27 @@ describe("GET /api/jobs/{job_id}", () => {
         const { job } = await jobWithData();
         const router = makeRouter();
         const path = `/api/jobs/${job.id}/console_output?stdout_position=5&stdout_length=3&stderr_position=0&stderr_length=100`;
+        expect(await jobs.consoleRequestedAt(job.id)).toBeNull();
         expect(await fetchJson(router, "GET", path)).toEqual({ state: "running", stdout: "one", stderr: "warning\n" });
+        expect(await jobs.consoleRequestedAt(job.id)).toEqual(expect.any(Number));
+        await jobs.clearConsoleRequest(job.id);
         await jobs.update(job.id, { state: "ok" });
         expect(await fetchJson(router, "GET", path)).toEqual({
             state: "ok",
             stdout: "line one\nline two\n",
             stderr: "warning\n",
         });
+        expect(await jobs.consoleRequestedAt(job.id)).toBeNull();
     });
 
-    it("refuses admin-only and not yet available views", async () => {
+    it("refuses admin-only views and reruns of unknown tools", async () => {
         const { job } = await jobWithData();
         const router = makeRouter();
         expect(
             (await fetchJson(router, "GET", `/api/jobs/${job.id}/destination_params`, undefined, 403)).err_code,
         ).toBe(403006);
-        expect((await fetchJson(router, "GET", `/api/jobs/${job.id}/build_for_rerun`, undefined, 501)).err_code).toBe(
-            501001,
+        expect((await fetchJson(router, "GET", `/api/jobs/${job.id}/build_for_rerun`, undefined, 404)).err_msg).toBe(
+            "Requested tool not found",
         );
         expect((await fetchJson(router, "GET", "/api/jobs/missing/build_for_rerun", undefined, 404)).err_code).toBe(
             404001,
