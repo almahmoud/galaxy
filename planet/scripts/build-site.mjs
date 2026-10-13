@@ -33,6 +33,11 @@ const PLACEHOLDER_ID = "planet-build-id-placeholder";
 const HTML_TOKEN = "__PLANET_BUILD_ID__";
 
 const CLIENT_ENTRIES = ["libs.bundled.js", "analysis.bundled.js", "base.css"];
+/** Planet's own page entries; neither may load Galaxy's analysis entry, which mounts the Galaxy app. */
+const PLANET_ENTRIES = {
+    "planet-welcome.bundled.js": "client/src/planet/ui/main.ts",
+    "planet-leader.bundled.js": "client/src/planet/leader/main.ts",
+};
 const SCRIPT_ENTRIES = {
     sw: "client/src/planet/sw/index.ts",
     boot: "client/src/planet/boot/boot.ts",
@@ -143,12 +148,18 @@ function buildClient(buildId) {
             fail(`client build did not produce static/dist/${entry}`);
         }
     }
-    const welcome = join(distDir, "static/dist/planet-welcome.bundled.js");
-    if (!existsSync(welcome)) {
-        warn("client/src/planet/ui/main.ts is missing; built without planet-welcome.bundled.js");
-    } else if (staticImportGraph(welcome).has(join(distDir, "static/dist/analysis.bundled.js"))) {
-        // The analysis entry mounts Galaxy on window load, which would replace the welcome app.
-        fail("planet-welcome.bundled.js statically imports analysis.bundled.js");
+    for (const [entry, source] of Object.entries(PLANET_ENTRIES)) {
+        const file = join(distDir, "static/dist", entry);
+        if (!existsSync(file)) {
+            if (existsSync(join(root, source))) {
+                fail(`client build did not produce static/dist/${entry}`);
+            }
+            warn(`${source} is missing; built without ${entry}`);
+        } else if (staticImportGraph(file).has(join(distDir, "static/dist/analysis.bundled.js"))) {
+            // The analysis entry mounts Galaxy on window load: in the welcome page it would replace the welcome
+            // app, and loaded again by the leader it would mount a second Galaxy.
+            fail(`${entry} statically imports analysis.bundled.js`);
+        }
     }
 }
 
@@ -224,7 +235,7 @@ function buildDescription(buildId) {
         ...walk(join(distDir, "static/style")),
         ...walk(join(distDir, "static/planet/data")),
     ];
-    const entries = [...CLIENT_ENTRIES, "planet-welcome.bundled.js"]
+    const entries = [...CLIENT_ENTRIES, ...Object.keys(PLANET_ENTRIES)]
         .filter((entry) => entry.endsWith(".js"))
         .map((entry) => join(distDir, "static/dist", entry))
         .filter((file) => existsSync(file));

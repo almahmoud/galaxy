@@ -6,6 +6,7 @@ import {
     boot,
     type BootContext,
     BUILD_ID_ENDPOINT,
+    LEADER_SCRIPT,
     RELOAD_GUARD_KEY,
     requestWorkerBuildId,
     takeReloadGuard,
@@ -113,6 +114,10 @@ function injectedScripts(doc: Document): HTMLScriptElement[] {
     return Array.from(doc.querySelectorAll<HTMLScriptElement>('script[type="module"]'));
 }
 
+function appScript(doc: Document, name: string): HTMLScriptElement | undefined {
+    return injectedScripts(doc).find((script) => script.getAttribute("src") === `/static/dist/${name}.bundled.js`);
+}
+
 function failureReason(doc: Document): string | undefined {
     return doc.querySelector<HTMLElement>(".planet-boot-message")?.dataset.reason;
 }
@@ -158,7 +163,7 @@ describe("boot gate", () => {
             "/static/style/jquery-ui/smoothness/jquery-ui.css",
         ]);
         const scripts = injectedScripts(doc);
-        expect(scripts.map((script) => script.getAttribute("src"))).toEqual(APP_SCRIPTS);
+        expect(scripts.map((script) => script.getAttribute("src"))).toEqual([...APP_SCRIPTS, LEADER_SCRIPT]);
         expect(scripts.every((script) => script.async === false)).toBe(true);
         expect(container.register).toHaveBeenCalledWith("/sw.js", { scope: "/", updateViaCache: "none" });
         expect(storage.getItem(RELOAD_GUARD_KEY)).toBeNull();
@@ -182,7 +187,7 @@ describe("boot gate", () => {
 
         await expect(result).resolves.toBe("started");
         expect(context.document.querySelector(".planet-boot-status")).toBeNull();
-        expect(injectedScripts(context.document)).toHaveLength(2);
+        expect(injectedScripts(context.document)).toHaveLength(APP_SCRIPTS.length + 1);
     });
 
     it("reloads once after a forced reload, then reports the page as uncontrolled", async () => {
@@ -275,8 +280,7 @@ describe("boot gate", () => {
         container.claim(container.registration.active);
         await expect(result).resolves.toBe("started");
 
-        const scripts = injectedScripts(context.document);
-        scripts.at(-1)?.dispatchEvent(new Event("load"));
+        appScript(context.document, "analysis")?.dispatchEvent(new Event("load"));
         await settle();
         expect(onLoad).toHaveBeenCalled();
     });
@@ -289,9 +293,29 @@ describe("boot gate", () => {
         context.document.defaultView?.addEventListener("load", onLoad);
 
         await boot(context);
-        injectedScripts(context.document).at(-1)?.dispatchEvent(new Event("load"));
+        appScript(context.document, "analysis")?.dispatchEvent(new Event("load"));
 
         expect(onLoad).not.toHaveBeenCalled();
+    });
+
+    it("loads the job leader after Galaxy in top-level pages only, and survives its failure", async () => {
+        const container = new FakeContainer();
+        container.controller = new FakeWorker("activated");
+        const { context } = createContext({ container });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+        await boot(context);
+        const leader = appScript(context.document, "planet-leader");
+        expect(injectedScripts(context.document).at(-1)).toBe(leader);
+        leader?.dispatchEvent(new Event("error"));
+        expect(failureReason(context.document)).toBeUndefined();
+        expect(warn).toHaveBeenCalled();
+
+        const framed = createContext({ container });
+        Object.defineProperty(framed.context.document.defaultView!, "top", { configurable: true, value: {} });
+        await boot(framed.context);
+        expect(appScript(framed.context.document, "planet-leader")).toBeUndefined();
+        expect(appScript(framed.context.document, "analysis")).toBeDefined();
     });
 
     it("shows a failure page when an application script fails to load", async () => {

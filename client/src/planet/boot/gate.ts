@@ -13,6 +13,8 @@ export const APP_STYLESHEET = "/static/dist/base.css";
  * their plain URL, and a different URL would evaluate a second module instance.
  */
 export const APP_SCRIPTS = ["/static/dist/libs.bundled.js", "/static/dist/analysis.bundled.js"];
+/** Job leader election and job processing; loaded after Galaxy, in top-level pages only. */
+export const LEADER_SCRIPT = "/static/dist/planet-leader.bundled.js";
 export const BUILD_ID_ENDPOINT = "/api/planet/build";
 
 export interface BootTimeouts {
@@ -210,9 +212,10 @@ async function workerBuildId(
 }
 
 /**
- * Injects Galaxy's stylesheet and module entries. Galaxy mounts from a window
- * `load` listener; when the document already finished loading before the
- * entries were inserted, `load` is dispatched again after they have run.
+ * Injects Galaxy's stylesheet and module entries, then the job leader entry.
+ * Galaxy mounts from a window `load` listener; when the document already
+ * finished loading before the entries were inserted, `load` is dispatched
+ * again after they have run.
  */
 function startApplication(runtime: Runtime): void {
     const doc = runtime.document;
@@ -242,6 +245,17 @@ function startApplication(runtime: Runtime): void {
     }
     if (loadFired && view && last) {
         last.addEventListener("load", () => view.dispatchEvent(new Event("load")), { once: true });
+    }
+    // A Planet page framed by another one (for example a dataset preview) leaves jobs to its top-level page.
+    if (view && view.top === view) {
+        const leader = doc.createElement("script");
+        leader.type = "module";
+        leader.src = LEADER_SCRIPT;
+        leader.async = false;
+        leader.addEventListener("error", () =>
+            console.warn("Planet: the job leader script failed to load; this tab will not run jobs."),
+        );
+        doc.body.append(leader);
     }
 }
 

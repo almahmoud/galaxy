@@ -2,7 +2,8 @@
  * Planet build of the Galaxy client: static bundles for planet/dist/static/dist.
  *
  * Derived from vite.config.mjs. Differences: no Galaxy server integration (build
- * metadata, dev proxy), the Planet welcome entry instead of `generic`, Vue's
+ * metadata, dev proxy), the Planet welcome and job leader entries instead of
+ * `generic`, Planet's upload module in place of Galaxy's tus upload, Vue's
  * runtime-only build (no template compiler, so no `new Function` under CSP),
  * hashed files in chunks/ and assets/ for immutable caching, and a deterministic
  * build timestamp.
@@ -24,6 +25,9 @@ const PLANET_BUILD_ID = process.env.PLANET_BUILD_ID || "dev";
 
 const OUT_DIR = resolve(PLANET_DIST, "static/dist");
 const WELCOME_ENTRY = resolve(__dirname, "src/planet/ui/main.ts");
+const LEADER_ENTRY = resolve(__dirname, "src/planet/leader/main.ts");
+const TUS_UPLOAD_MODULE = resolve(__dirname, "src/utils/tusUpload.ts");
+const PLANET_UPLOAD_MODULE = resolve(__dirname, "src/planet/upload/tusUpload.ts");
 const DROPPED_PLUGINS = new Set(["vite-plugin-build-metadata", "galaxy-dev-server"]);
 
 const VUE_RUNTIME = "@vue/compat/dist/vue.runtime.esm-bundler.js";
@@ -150,12 +154,56 @@ function vueRuntimeOnlyPlugin() {
     };
 }
 
+/**
+ * Replaces Galaxy's tus upload module with Planet's page-to-S3 upload module, which exports the same API. Imports
+ * are matched by resolved path, so relative and `@/` specifiers are both covered; the Planet module itself may
+ * still import the original. The build fails at its end if Planet's module does not exist.
+ */
+function planetUploadPlugin() {
+    let replaced = false;
+    return {
+        name: "planet-upload-module",
+        enforce: "pre",
+        buildStart() {
+            replaced = false;
+        },
+        resolveId: {
+            filter: { id: /tusUpload/ },
+            async handler(source, importer, options) {
+                if (!importer || stripQuery(importer) === PLANET_UPLOAD_MODULE) {
+                    return null;
+                }
+                const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+                if (!resolved || stripQuery(resolved.id) !== TUS_UPLOAD_MODULE) {
+                    return null;
+                }
+                replaced = true;
+                return existsSync(PLANET_UPLOAD_MODULE) ? PLANET_UPLOAD_MODULE : null;
+            },
+        },
+        buildEnd(error) {
+            if (!error && replaced && !existsSync(PLANET_UPLOAD_MODULE)) {
+                this.error(
+                    `${PLANET_UPLOAD_MODULE} does not exist; Planet replaces ${TUS_UPLOAD_MODULE} with it and cannot ` +
+                        "upload through Galaxy's tus endpoint.",
+                );
+            }
+        },
+    };
+}
+
+function stripQuery(id) {
+    const query = id.indexOf("?");
+    return query === -1 ? id : id.slice(0, query);
+}
+
 export default defineConfig(async (env) => {
     const config = await galaxyConfig(env);
 
     config.plugins = [
         ...config.plugins.flat(Infinity).filter((plugin) => plugin && !DROPPED_PLUGINS.has(plugin.name)),
         vueRuntimeOnlyPlugin(),
+        planetUploadPlugin(),
     ];
 
     const aliases = { ...config.resolve.alias };
@@ -179,6 +227,11 @@ export default defineConfig(async (env) => {
         input["planet-welcome"] = WELCOME_ENTRY;
     } else {
         console.warn(`[planet] ${WELCOME_ENTRY} does not exist; building without planet-welcome.bundled.js`);
+    }
+    if (existsSync(LEADER_ENTRY)) {
+        input["planet-leader"] = LEADER_ENTRY;
+    } else {
+        console.warn(`[planet] ${LEADER_ENTRY} does not exist; building without planet-leader.bundled.js`);
     }
 
     const output = config.build.rolldownOptions.output;
