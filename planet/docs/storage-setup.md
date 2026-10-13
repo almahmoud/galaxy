@@ -65,8 +65,8 @@ both with your own.
            ]
          },
          "exposeHeaders": [
-           "ETag", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition",
-           "Date", "x-amz-request-id", "x-amz-bucket-region", "x-amz-version-id"
+           "ETag", "Content-Length", "Content-Range", "Accept-Ranges", "Date",
+           "x-amz-request-id", "x-amz-version-id", "x-amz-bucket-region"
          ],
          "maxAgeSeconds": 7200
        }
@@ -156,8 +156,8 @@ both with your own.
            "x-amz-user-agent"
          ],
          "ExposeHeaders": [
-           "ETag", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition",
-           "Date", "x-amz-request-id", "x-amz-bucket-region", "x-amz-version-id"
+           "ETag", "Content-Length", "Content-Range", "Accept-Ranges", "Date",
+           "x-amz-request-id", "x-amz-version-id", "x-amz-bucket-region"
          ],
          "MaxAgeSeconds": 7200
        }

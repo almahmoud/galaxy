@@ -10,6 +10,9 @@ NGINX_IMAGE="$(sed -n 's|^ *image: \(nginxinc/nginx-unprivileged:.*\)$|\1|p' "$D
 GARAGE_IMAGE="$(sed -n 's|^ *image: \(dxflrs/garage:.*\)$|\1|p' "$DEPLOY_DIR/components/garage/garage.yaml")"
 ORIGIN="http://localhost:8787"
 TOKEN="Bearer test-token"
+# The bucket CORS policy of planet/docs/storage-setup.md.
+S3_ALLOW_HEADERS="authorization, content-type, content-md5, content-disposition, range, if-match, if-none-match, x-amz-date, x-amz-content-sha256, x-amz-security-token, x-amz-copy-source, x-amz-copy-source-range, x-amz-user-agent"
+S3_EXPOSE_HEADERS="ETag, Content-Length, Content-Range, Accept-Ranges, Date, x-amz-request-id, x-amz-version-id, x-amz-bucket-region"
 
 run_id="planet-gw-test-$$"
 work="$(mktemp -d)"
@@ -242,7 +245,8 @@ echo "-- S3 listener"
 check "S3 preflight" 204 "$(request -X OPTIONS -H "Origin: $ORIGIN" -H "Access-Control-Request-Method: PUT" \
     -H "Access-Control-Request-Headers: authorization,x-amz-date,x-amz-content-sha256" "$s3/planet/a")"
 check "S3 preflight Allow-Methods" "GET, PUT, POST, DELETE, HEAD" "$(header Access-Control-Allow-Methods)"
-check_contains "S3 preflight Allow-Headers" "X-Amz-Content-Sha256" "$(header Access-Control-Allow-Headers)"
+check "S3 preflight Allow-Headers" "$S3_ALLOW_HEADERS" "$(header Access-Control-Allow-Headers)"
+check "S3 preflight Max-Age" 7200 "$(header Access-Control-Max-Age)"
 check "S3 preflight from another origin" 403 "$(request -X OPTIONS -H "Origin: https://evil.example" \
     -H "Access-Control-Request-Method: PUT" "$s3/planet/a")"
 
@@ -258,7 +262,7 @@ sigv4=(--aws-sigv4 "aws:amz:garage:s3" --user "$garage_key:$garage_secret" -H "x
 head -c 6291456 /dev/urandom >"$work/object"
 check "signed PUT through the gateway, Origin signed (6 MiB)" 200 "$(request "${sigv4[@]}" -H "Origin: $ORIGIN" \
     -X PUT --data-binary @"$work/object" "$s3/planet/test/object")"
-check_contains "ETag exposed" ETag "$(header Access-Control-Expose-Headers)"
+check "S3 Expose-Headers" "$S3_EXPOSE_HEADERS" "$(header Access-Control-Expose-Headers)"
 etag="$(header ETag)"
 check_contains "PUT returned an ETag" '"' "$etag"
 check "signed GET returns the object" "$(shasum -a 256 <"$work/object")" \
@@ -267,6 +271,13 @@ check "signed ranged GET" 206 "$(request "${sigv4[@]}" -H "Range: bytes=0-9" "$s
 check "Content-Range" "bytes 0-9/6291456" "$(header Content-Range)"
 check "signed HEAD ETag" "$etag" "$(request "${sigv4[@]}" -I "$s3/planet/test/object" >/dev/null
     header ETag)"
+check "signed HEAD bucket" 200 "$(request "${sigv4[@]}" -H "Origin: $ORIGIN" -I "$s3/planet")"
+# Garage sends no x-amz-bucket-region; the client reads the region from GetBucketLocation.
+check "signed GetBucketLocation" 200 "$(request "${sigv4[@]}" -H "Origin: $ORIGIN" "$s3/planet?location")"
+check_contains "GetBucketLocation region" ">garage</LocationConstraint>" "$(cat "$work/body")"
+check "wrong signing region" 400 "$(request --aws-sigv4 "aws:amz:us-east-1:s3" --user "$garage_key:$garage_secret" \
+    -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -H "Origin: $ORIGIN" "$s3/planet?location")"
+check_contains "wrong signing region names the region" "<Region>garage</Region>" "$(cat "$work/body")"
 check "signed DELETE" 204 "$(request "${sigv4[@]}" -X DELETE "$s3/planet/test/object")"
 
 logs="$(docker logs "$run_id-gateway" 2>&1)"

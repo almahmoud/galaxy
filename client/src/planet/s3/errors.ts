@@ -7,12 +7,14 @@ export class S3Error extends Error {
     readonly requestId: string | null;
     /** Server time reported by RequestTimeTooSkewed errors, in epoch milliseconds. */
     readonly serverTime: number | null;
+    /** The bucket's region, from the x-amz-bucket-region header or the error document's Region. */
+    readonly region: string | null;
 
     constructor(
         status: number,
         code: string,
         message: string,
-        extra: { requestId?: string | null; serverTime?: number | null; cause?: unknown } = {},
+        extra: { requestId?: string | null; serverTime?: number | null; region?: string | null; cause?: unknown } = {},
     ) {
         super(message, extra.cause === undefined ? undefined : { cause: extra.cause });
         this.name = "S3Error";
@@ -20,6 +22,7 @@ export class S3Error extends Error {
         this.code = code;
         this.requestId = extra.requestId ?? null;
         this.serverTime = extra.serverTime ?? null;
+        this.region = extra.region ?? null;
     }
 }
 
@@ -52,9 +55,13 @@ const STATUS_CODES: Record<number, string> = {
 const MAX_MESSAGE_LENGTH = 500;
 
 /** Parses an S3 `<Error>` document. Returns null when the text is not one. */
-export function parseErrorXml(
-    text: string,
-): { code: string; message: string; requestId: string | null; serverTime: number | null } | null {
+export function parseErrorXml(text: string): {
+    code: string;
+    message: string;
+    requestId: string | null;
+    serverTime: number | null;
+    region: string | null;
+} | null {
     const trimmed = text.trimStart();
     if (!trimmed.startsWith("<")) {
         return null;
@@ -75,6 +82,7 @@ export function parseErrorXml(
             message: (xmlChildText(root, "Message") ?? "").trim().slice(0, MAX_MESSAGE_LENGTH),
             requestId: xmlChildText(root, "RequestId")?.trim() || null,
             serverTime: Number.isFinite(serverTime) ? serverTime : null,
+            region: xmlChildText(root, "Region")?.trim() || null,
         };
     } catch {
         return null;
@@ -90,16 +98,21 @@ export async function errorFromResponse(response: Response, notFoundCode = "NotF
         // A body that cannot be read leaves the status as the only information.
     }
     const headerRequestId = response.headers.get("x-amz-request-id");
+    const headerRegion = response.headers.get("x-amz-bucket-region");
     const parsed = parseErrorXml(text);
     if (parsed) {
         return new S3Error(response.status, parsed.code, parsed.message || `${parsed.code} (HTTP ${response.status})`, {
             requestId: parsed.requestId ?? headerRequestId,
             serverTime: parsed.serverTime,
+            region: headerRegion ?? parsed.region,
         });
     }
     const code = response.status === 404 ? notFoundCode : (STATUS_CODES[response.status] ?? `HTTP${response.status}`);
     const statusText = response.statusText ? ` ${response.statusText}` : "";
-    return new S3Error(response.status, code, `HTTP ${response.status}${statusText}`, { requestId: headerRequestId });
+    return new S3Error(response.status, code, `HTTP ${response.status}${statusText}`, {
+        requestId: headerRequestId,
+        region: headerRegion,
+    });
 }
 
 function currentOrigin(): string | null {

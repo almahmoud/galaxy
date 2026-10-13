@@ -1,4 +1,14 @@
-/** Storage providers offered by the setup page and the settings each one implies. */
+/**
+ * Default cluster settings and the storage providers offered by the setup page, with the settings each one
+ * implies. The values follow planet/docs/cluster-setup.md, planet/docs/storage-setup.md and planet/deploy.
+ */
+
+/** Cluster settings for planet/deploy with the gateway port-forwarded to 127.0.0.1:8001. */
+export const CLUSTER = {
+    gatewayUrl: "http://127.0.0.1:8001",
+    namespace: "planet",
+    jobServiceAccount: "planet-job",
+} as const;
 
 export type StorageProvider = "r2" | "aws" | "garage" | "custom";
 export type R2Jurisdiction = "default" | "eu" | "fedramp";
@@ -22,11 +32,13 @@ export const R2_JURISDICTIONS: readonly { id: R2Jurisdiction; label: string }[] 
     { id: "fedramp", label: "FedRAMP" },
 ];
 
+/** Garage from planet/deploy/components/garage, with the gateway's S3 listener port-forwarded to 127.0.0.1:8002. */
 export const GARAGE = {
     endpoint: "http://127.0.0.1:8002",
     clusterEndpoint: "http://garage.planet-storage.svc:3900",
     region: "garage",
     bucket: "planet",
+    pathStyle: true,
 } as const;
 
 export const DEFAULT_PREFIX = "planet";

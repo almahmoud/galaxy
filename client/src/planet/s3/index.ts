@@ -33,6 +33,7 @@ export {
     CORS_ALLOWED_HEADERS,
     CORS_ALLOWED_METHODS,
     CORS_EXPOSE_HEADERS,
+    CORS_MAX_AGE_SECONDS,
     type S3CorsPolicy,
     type S3SetupCheck,
     type S3SetupCheckId,

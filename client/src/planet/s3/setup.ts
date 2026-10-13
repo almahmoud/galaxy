@@ -2,7 +2,11 @@ import type { S3Client, S3RequestSpec } from "./client";
 import { isS3Error, S3Error } from "./errors";
 import { fullKey, isIpHost, isLoopbackHost, type ResolvedS3Config } from "./url";
 
-export const CORS_ALLOWED_METHODS = ["GET", "HEAD", "PUT", "POST", "DELETE"];
+/**
+ * The bucket CORS policy. planet/docs/storage-setup.md and the gateway's S3 listener
+ * (planet/deploy/components/garage/s3.conf.template) use the same lists.
+ */
+export const CORS_ALLOWED_METHODS = ["GET", "PUT", "POST", "DELETE", "HEAD"];
 
 export const CORS_ALLOWED_HEADERS = [
     "authorization",
@@ -10,6 +14,8 @@ export const CORS_ALLOWED_HEADERS = [
     "content-md5",
     "content-disposition",
     "range",
+    "if-match",
+    "if-none-match",
     "x-amz-date",
     "x-amz-content-sha256",
     "x-amz-security-token",
@@ -26,9 +32,10 @@ export const CORS_EXPOSE_HEADERS = [
     "Date",
     "x-amz-request-id",
     "x-amz-version-id",
+    "x-amz-bucket-region",
 ];
 
-export const CORS_MAX_AGE_SECONDS = 3600;
+export const CORS_MAX_AGE_SECONDS = 7200;
 
 const ORIGIN_PLACEHOLDER = "https://planet.example.org";
 const PROBE_PREFIX = ".planet-probe/";
@@ -75,7 +82,7 @@ export interface S3SetupCheck {
     id: S3SetupCheckId;
     status: S3SetupStatus;
     message: string;
-    /** S3 error code or a Planet code such as network_blocked, cors_expose_etag or cors_expose_date. */
+    /** S3 error code or a Planet code such as network_blocked, wrong_region, cors_expose_etag or cors_expose_date. */
     code?: string;
 }
 
@@ -101,6 +108,7 @@ export interface SetupContext {
     config: ResolvedS3Config | null;
     configError: S3Error | null;
     send: (spec: S3RequestSpec) => Promise<Response>;
+    headBucket: (signal?: AbortSignal, onResponse?: (response: Response) => void) => Promise<{ region: string | null }>;
     client: S3Client;
     clockOffsetMs: () => number;
     now: () => number;
@@ -278,9 +286,18 @@ export async function runSetupCheck(context: SetupContext, options: S3SetupOptio
     }
 
     try {
-        await context.send({ method: "HEAD", notFoundCode: "NoSuchBucket", signal, onResponse: observe });
-        record("bucket", "ok", `Bucket ${config.bucket} is reachable.`);
+        const { region } = await context.headBucket(signal, observe);
+        record("bucket", "ok", `Bucket ${config.bucket} is reachable${region ? ` (region ${region})` : ""}.`);
     } catch (error) {
+        if (!signal?.aborted && isS3Error(error) && error.region && error.region !== config.region) {
+            record(
+                "bucket",
+                "error",
+                `The bucket is in region ${error.region}, not ${config.region || "(empty)"}. Set the region to ${error.region}.`,
+                "wrong_region",
+            );
+            return finish();
+        }
         if (signal?.aborted || !isS3Error(error) || error.status !== 403) {
             fail("bucket", error, isS3Error(error, "NoSuchBucket") ? "The bucket does not exist." : "");
             return finish();

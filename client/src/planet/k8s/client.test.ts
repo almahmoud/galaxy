@@ -16,6 +16,7 @@ const GATEWAY = "http://localhost:8080";
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.token-value";
 
 interface Call {
+    raw: string;
     url: URL;
     method: string;
     headers: Headers;
@@ -42,6 +43,7 @@ function setup(responders: Responder | Responder[], options: KubeClientOptions =
             throw init.signal.reason;
         }
         const call: Call = {
+            raw: input,
             url: new URL(input),
             method: init.method ?? "GET",
             headers: new Headers(init.headers),
@@ -112,24 +114,31 @@ describe("requests", () => {
         expect(fetch).toHaveBeenCalledTimes(2);
     });
 
-    it("deletes Jobs with Background propagation and a UID precondition", async () => {
+    it("deletes Jobs with Background propagation in the query and no body", async () => {
         const { client, calls } = setup([
             () => json({ kind: "Status", status: "Success" }),
             () => status(404, "NotFound", 'jobs.batch "j2" not found'),
-            () => status(409, "Conflict", "Precondition failed: UID in precondition: u1, UID in object meta: u2"),
+            () => status(400, "BadRequest", "GET and DELETE requests must not have a body"),
         ]);
-        expect(await client.deleteJob("j1", { uid: "u1" })).toBe(true);
+        expect(await client.deleteJob("j1-a2")).toBe(true);
         expect(calls[0]!.method).toBe("DELETE");
-        expect(calls[0]!.url.pathname).toBe("/apis/batch/v1/namespaces/planet/jobs/j1");
-        expect(calls[0]!.body).toEqual({
-            apiVersion: "v1",
-            kind: "DeleteOptions",
-            propagationPolicy: "Background",
-            preconditions: { uid: "u1" },
-        });
+        expect(calls[0]!.raw).toBe(
+            `${GATEWAY}/apis/batch/v1/namespaces/planet/jobs/j1-a2?propagationPolicy=Background`,
+        );
+        expect(calls[0]!.body).toBeUndefined();
+        expect(calls[0]!.headers.has("content-type")).toBe(false);
         expect(await client.deleteJob("j2")).toBe(false);
-        expect(calls[1]!.body).toEqual({ apiVersion: "v1", kind: "DeleteOptions", propagationPolicy: "Background" });
-        await expect(client.deleteJob("j3", { uid: "u1" })).rejects.toMatchObject({ status: 409, reason: "Conflict" });
+        await expect(client.deleteJob("j3")).rejects.toMatchObject({ status: 400, reason: "BadRequest" });
+    });
+
+    it("percent-encodes query values but never parameter names", async () => {
+        const { client, calls } = setup(() => json({ metadata: {}, items: [] }));
+        await client.listEvents({ fieldSelector: "involvedObject.name=j1", labelSelector: "app in (a b),x!=y/z" });
+        expect(calls[0]!.raw).toBe(
+            `${GATEWAY}/api/v1/namespaces/planet/events?fieldSelector=involvedObject.name%3Dj1` +
+                "&labelSelector=app%20in%20(a%20b)%2Cx!%3Dy%2Fz&limit=500",
+        );
+        expect(calls[0]!.url.searchParams.get("labelSelector")).toBe("app in (a b),x!=y/z");
     });
 
     it("lists all pages and keeps the first page's resourceVersion", async () => {

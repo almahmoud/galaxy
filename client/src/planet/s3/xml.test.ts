@@ -103,7 +103,7 @@ describe("parseListObjectsV2", () => {
 });
 
 describe("parseErrorXml", () => {
-    it("reads Code, Message, RequestId and ServerTime", () => {
+    it("reads Code, Message, RequestId, ServerTime and Region", () => {
         const parsed = parseErrorXml(
             "<Error><Code>RequestTimeTooSkewed</Code><Message>The difference between the request time and " +
                 "the server's time is too large.</Message><RequestTime>20260101T000000Z</RequestTime>" +
@@ -114,7 +114,14 @@ describe("parseErrorXml", () => {
             message: "The difference between the request time and the server's time is too large.",
             requestId: "R1",
             serverTime: Date.UTC(2026, 0, 1, 1),
+            region: null,
         });
+        expect(
+            parseErrorXml(
+                "<Error><Code>AuthorizationHeaderMalformed</Code><Message>wrong region</Message>" +
+                    "<Region>eu-west-1</Region></Error>",
+            )?.region,
+        ).toBe("eu-west-1");
     });
 
     it("returns null for non-error documents and non-XML text", () => {

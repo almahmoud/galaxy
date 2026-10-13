@@ -297,14 +297,6 @@ export interface Status {
     details?: StatusDetails;
 }
 
-export interface DeleteOptions {
-    apiVersion: "v1";
-    kind: "DeleteOptions";
-    propagationPolicy?: "Background" | "Foreground" | "Orphan";
-    gracePeriodSeconds?: number;
-    preconditions?: { uid?: string; resourceVersion?: string };
-}
-
 export interface ResourceRule {
     verbs: string[];
     apiGroups?: string[];

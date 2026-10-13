@@ -27,17 +27,18 @@ describe("presets", () => {
 describe("commands", () => {
     it("uses the namespace and origin", () => {
         const commands = clusterCommands({ namespace: "jobs", origin: "https://planet.example.org" });
-        expect(commands.map((command) => command.id)).toEqual(["origin", "apply", "port-forward", "token"]);
+        expect(commands.map((command) => command.id)).toEqual(["origin", "apply", "rollout", "port-forward", "token"]);
         expect(commands[0]?.command).toBe('"https://planet.example.org" 1;');
-        expect(commands[2]?.command).toBe(
+        expect(commands[2]?.command).toBe("kubectl -n jobs rollout status deployment/planet-gateway");
+        expect(commands[3]?.command).toBe(
             "kubectl -n jobs port-forward --address 127.0.0.1 service/planet-gateway 8001:8080",
         );
-        expect(commands[3]?.command).toContain("kubectl -n jobs get secret planet-client-token");
+        expect(commands[4]?.command).toContain("kubectl -n jobs get secret planet-client-token");
     });
 
     it("defaults to the planet namespace and lists the kind workflow", () => {
-        expect(clusterCommands().map((command) => command.id)).toEqual(["apply", "port-forward", "token"]);
-        expect(clusterCommands()[1]?.command).toContain("-n planet ");
+        expect(clusterCommands().map((command) => command.id)).toEqual(["apply", "rollout", "port-forward", "token"]);
+        expect(clusterCommands()[2]?.command).toContain("-n planet ");
         expect(
             localClusterCommands().every((command) => command.command.startsWith("planet/scripts/dev-cluster.sh ")),
         ).toBe(true);

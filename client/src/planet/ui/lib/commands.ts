@@ -1,4 +1,6 @@
-/** Commands shown on the setup page. They follow planet/docs/cluster-setup.md; keep the two in step. */
+/** Commands shown on the setup page. Each one appears in planet/docs/cluster-setup.md (see commands.test.ts). */
+
+import { CLUSTER } from "./presets";
 
 export interface SetupCommand {
     id: string;
@@ -11,7 +13,7 @@ export const REPOSITORY_URL = "https://github.com/almahmoud/galaxy/tree/planet";
 export const CLUSTER_GUIDE_URL = "https://github.com/almahmoud/galaxy/blob/planet/planet/docs/cluster-setup.md";
 export const STORAGE_GUIDE_URL = "https://github.com/almahmoud/galaxy/blob/planet/planet/docs/storage-setup.md";
 
-export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8001";
+export const DEFAULT_GATEWAY_URL = CLUSTER.gatewayUrl;
 
 export interface CommandContext {
     namespace?: string;
@@ -23,7 +25,7 @@ export interface CommandContext {
 
 /** Steps to deploy Planet's manifests to an existing cluster and connect to its gateway. */
 export function clusterCommands(context: CommandContext = {}): SetupCommand[] {
-    const namespace = context.namespace || "planet";
+    const namespace = context.namespace || CLUSTER.namespace;
     const overlay = context.overlay || "mylab";
     const commands: SetupCommand[] = [];
     if (context.origin) {
@@ -40,6 +42,12 @@ export function clusterCommands(context: CommandContext = {}): SetupCommand[] {
             title: "Deploy Planet's manifests",
             description: "Run from a checkout of the Planet repository, with cluster-admin rights.",
             command: `kubectl apply -k planet/deploy/overlays/${overlay}`,
+        },
+        {
+            id: "rollout",
+            title: "Wait for the gateway",
+            description: "Waits until the gateway pod is ready.",
+            command: `kubectl -n ${namespace} rollout status deployment/planet-gateway`,
         },
         {
             id: "port-forward",

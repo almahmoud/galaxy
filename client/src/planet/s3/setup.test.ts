@@ -1,8 +1,20 @@
 // @vitest-environment node
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { describe, expect, it } from "vitest";
 
-import { buildCorsPolicy, createS3Client, type S3SetupReport } from ".";
+import {
+    buildCorsPolicy,
+    CORS_ALLOWED_HEADERS,
+    CORS_ALLOWED_METHODS,
+    CORS_EXPOSE_HEADERS,
+    CORS_MAX_AGE_SECONDS,
+    createS3Client,
+    type S3SetupReport,
+} from ".";
 import type { S3Config } from "./url";
+
+const REPOSITORY = resolve(__dirname, "../../../..");
 
 const CONFIG: S3Config = {
     endpoint: "https://acct.r2.cloudflarestorage.com",
@@ -21,6 +33,10 @@ interface FakeServerOptions {
     blockedMethods?: string[];
     ignoreRange?: boolean;
     headBucketStatus?: number;
+    /** Region the server accepts in signatures, reported by GetBucketLocation and in errors. */
+    serverRegion?: string;
+    /** Sends x-amz-bucket-region on bucket responses, as AWS does. */
+    regionHeader?: boolean;
     serverSkewMs?: number;
 }
 
@@ -52,13 +68,24 @@ function fakeServer(options: FakeServerOptions = {}) {
         }
         const [, bucket, ...rest] = url.pathname.split("/");
         const key = decodeURIComponent(rest.join("/"));
+        const headers = new Headers(init.headers);
         if (bucket !== "planet-data") {
             return respond("<Error><Code>NoSuchBucket</Code><Message>no</Message></Error>", 404);
         }
-        if (!key) {
-            return respond(null, options.headBucketStatus ?? 200);
+        const region = options.serverRegion ?? "";
+        const regionHeaders: Record<string, string> =
+            options.regionHeader && region ? { "x-amz-bucket-region": region } : {};
+        const signedRegion = /Credential=[^/]+\/\d{8}\/([^/]*)\//.exec(headers.get("authorization") ?? "")?.[1];
+        if (region && signedRegion !== region) {
+            const error = `<Error><Code>AuthorizationHeaderMalformed</Code><Message>wrong region</Message><Region>${region}</Region></Error>`;
+            return respond(method === "HEAD" ? null : error, 400, regionHeaders);
         }
-        const headers = new Headers(init.headers);
+        if (!key && url.searchParams.has("location")) {
+            return respond(`<LocationConstraint>${region}</LocationConstraint>`, 200);
+        }
+        if (!key) {
+            return respond(null, options.headBucketStatus ?? 200, regionHeaders);
+        }
         if (method === "PUT") {
             objects.set(key, String(init.body));
             return respond(null, 200, { etag: '"etag-1"' });
@@ -175,6 +202,29 @@ describe("checkSetup", () => {
         });
     });
 
+    it.each([
+        ["x-amz-bucket-region", true, "eu-west-1", ["HEAD /planet-data"]],
+        ["GetBucketLocation", false, "garage", ["HEAD /planet-data", "GET /planet-data?location"]],
+    ])("reports the bucket region from %s", async (_source, regionHeader, region, requests) => {
+        const exposed = ["etag", "date", "content-range", "x-amz-bucket-region"];
+        const server = fakeServer({ exposed, serverRegion: region, regionHeader });
+        const report = await run(server, { region });
+        expect(report.checks.find((check) => check.id === "bucket")).toMatchObject({
+            status: "ok",
+            message: `Bucket planet-data is reachable (region ${region}).`,
+        });
+        expect(server.log.slice(0, requests.length)).toEqual(requests);
+
+        const wrong = await run(fakeServer({ exposed, serverRegion: region, regionHeader }), { region: "us-east-1" });
+        expect(wrong.ok).toBe(false);
+        expect(wrong.checks.find((check) => check.id === "bucket")).toMatchObject({
+            status: "error",
+            code: "wrong_region",
+            message: `The bucket is in region ${region}, not us-east-1. Set the region to ${region}.`,
+        });
+        expect(statuses(wrong)).toMatchObject({ write: "skipped" });
+    });
+
     it("continues when HeadBucket is denied to object-scoped credentials", async () => {
         const report = await run(fakeServer({ headBucketStatus: 403 }));
         expect(report.ok).toBe(true);
@@ -216,13 +266,15 @@ describe("buildCorsPolicy", () => {
                 {
                     allowed: {
                         origins: [ORIGIN],
-                        methods: ["GET", "HEAD", "PUT", "POST", "DELETE"],
+                        methods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
                         headers: [
                             "authorization",
                             "content-type",
                             "content-md5",
                             "content-disposition",
                             "range",
+                            "if-match",
+                            "if-none-match",
                             "x-amz-date",
                             "x-amz-content-sha256",
                             "x-amz-security-token",
@@ -239,8 +291,9 @@ describe("buildCorsPolicy", () => {
                         "Date",
                         "x-amz-request-id",
                         "x-amz-version-id",
+                        "x-amz-bucket-region",
                     ],
-                    maxAgeSeconds: 3600,
+                    maxAgeSeconds: 7200,
                 },
             ],
         });
@@ -256,5 +309,28 @@ describe("buildCorsPolicy", () => {
         expect(buildCorsPolicy(ORIGIN, "b", new URL("https://s3.us-east-1.amazonaws.com")).awsCommand).not.toContain(
             "--endpoint-url",
         );
+    });
+});
+
+describe("CORS policy in the documentation and the gateway", () => {
+    it("matches storage-setup.md", () => {
+        const doc = readFileSync(resolve(REPOSITORY, "planet/docs/storage-setup.md"), "utf-8");
+        const blocks = [...doc.matchAll(/```json\n([\s\S]*?)```/g)].map((match) => JSON.parse(match[1]!));
+        const policy = buildCorsPolicy("https://planet.mylab.org");
+        expect(blocks).toContainEqual(policy.r2Wrangler);
+        expect(blocks).toContainEqual(policy.awsPutBucketCors);
+        expect(doc).toContain(policy.r2WranglerCommand);
+        expect(doc).toContain(policy.awsCommand);
+    });
+
+    it("matches the gateway's S3 listener", () => {
+        const deploy = resolve(REPOSITORY, "planet/deploy");
+        const listener = readFileSync(resolve(deploy, "components/garage/s3.conf.template"), "utf-8");
+        const value = (name: string) => new RegExp(`set \\$${name} "([^"]*)";`).exec(listener)?.[1];
+        expect(value("planet_cors_methods")).toBe(CORS_ALLOWED_METHODS.join(", "));
+        expect(value("planet_cors_headers")).toBe(CORS_ALLOWED_HEADERS.join(", "));
+        expect(value("planet_cors_expose")).toBe(CORS_EXPOSE_HEADERS.join(", "));
+        const nginx = readFileSync(resolve(deploy, "base/gateway/nginx.conf"), "utf-8");
+        expect(nginx).toMatch(new RegExp(`\\$cors_max_age \\{[^}]*\\b1 ${CORS_MAX_AGE_SECONDS};`));
     });
 });

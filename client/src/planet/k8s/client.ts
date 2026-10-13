@@ -1,6 +1,5 @@
 import { errorFromResponse, errorFromStatus, KubeError, networkBlockedError } from "./errors";
 import type {
-    DeleteOptions,
     EventList,
     Job,
     JobList,
@@ -38,11 +37,6 @@ export interface KubeRequestOptions {
     signal?: AbortSignal;
 }
 
-export interface DeleteJobOptions extends KubeRequestOptions {
-    /** Deletes only if the Job still has this UID; otherwise the call fails with 409 Conflict. */
-    uid?: string;
-}
-
 export interface PodLogOptions extends KubeRequestOptions {
     container: string;
     limitBytes?: number;
@@ -60,7 +54,11 @@ export interface EventListOptions extends KubeRequestOptions {
 }
 
 export interface WatchOptions {
-    /** Server-side watch duration. Defaults to 55 seconds, below common proxy idle timeouts. */
+    /**
+     * Server-side watch duration in seconds. Defaults to 55. The gateway allows streams of up to 3700 s,
+     * but through Cloudflare Tunnel a watch response is buffered until it ends and Cloudflare fails a
+     * request with HTTP 524 after 125 s without a response, so keep it well below 125.
+     */
     timeoutSeconds?: number;
 }
 
@@ -89,8 +87,12 @@ export interface KubeClient {
     getJob(name: string, options?: KubeRequestOptions): Promise<Job>;
     /** Lists all pages; the result's resourceVersion is the one to start a watch from. */
     listJobs(labelSelector: string, options?: KubeRequestOptions): Promise<JobList>;
-    /** Deletes with propagationPolicy Background. Resolves false when the Job does not exist. */
-    deleteJob(name: string, options?: DeleteJobOptions): Promise<boolean>;
+    /**
+     * Deletes the Job and, with propagationPolicy=Background, its pods. Sends no body: the gateway refuses
+     * DELETE bodies, because the API server ignores the query string when one is present. Resolves false
+     * when the Job does not exist.
+     */
+    deleteJob(name: string, options?: KubeRequestOptions): Promise<boolean>;
     getPod(name: string, options?: KubeRequestOptions): Promise<Pod>;
     listPods(labelSelector: string, options?: KubeRequestOptions): Promise<PodList>;
     getPodLog(name: string, options: PodLogOptions): Promise<string>;
@@ -128,6 +130,7 @@ export const REQUIRED_PERMISSIONS: { group: string; resource: string; verbs: str
 const NAMESPACE_PATTERN = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const NAME_PATTERN = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
 const TOKEN_PATTERN = /^[\x21-\x7e]*$/;
+const QUERY_NAME_PATTERN = /^[A-Za-z]+$/;
 const DEFAULT_PAGE_SIZE = 500;
 const DEFAULT_WATCH_TIMEOUT_SECONDS = 55;
 const MAX_PAGES = 1000;
@@ -150,6 +153,21 @@ function parseGatewayUrl(value: string): URL {
         throw configError("The gateway URL must not contain credentials, a query or a fragment.");
     }
     return url;
+}
+
+/** Encodes values only: the gateway refuses percent-encoded parameter names. */
+function queryString(query: Record<string, string | undefined>): string {
+    const parts: string[] = [];
+    for (const [name, value] of Object.entries(query)) {
+        if (value === undefined || value === "") {
+            continue;
+        }
+        if (!QUERY_NAME_PATTERN.test(name)) {
+            throw new RangeError(`Invalid query parameter name '${name}'.`);
+        }
+        parts.push(`${name}=${encodeURIComponent(value)}`);
+    }
+    return parts.join("&");
 }
 
 function checkName(name: string, kind: string): string {
@@ -276,13 +294,7 @@ class KubeClientImpl implements KubeClient {
             throw this.configError ?? configError("The cluster settings are invalid.");
         }
         options.signal?.throwIfAborted();
-        const params = new URLSearchParams();
-        for (const [name, value] of Object.entries(options.query ?? {})) {
-            if (value !== undefined && value !== "") {
-                params.set(name, value);
-            }
-        }
-        const search = params.toString();
+        const search = queryString(options.query ?? {});
         const base = `${this.gateway.origin}${this.gateway.pathname.replace(/\/+$/, "")}`;
         const url = `${base}${path}${search ? `?${search}` : ""}`;
         const headers: Record<string, string> = { Accept: options.accept ?? "application/json" };
@@ -500,14 +512,10 @@ class KubeClientImpl implements KubeClient {
         return this.list<JobList>(this.jobsBase, { labelSelector }, options.signal);
     }
 
-    async deleteJob(name: string, options: DeleteJobOptions = {}): Promise<boolean> {
-        const body: DeleteOptions = { apiVersion: "v1", kind: "DeleteOptions", propagationPolicy: "Background" };
-        if (options.uid) {
-            body.preconditions = { uid: options.uid };
-        }
+    async deleteJob(name: string, options: KubeRequestOptions = {}): Promise<boolean> {
         try {
             const response = await this.request("DELETE", `${this.jobsBase}/${checkName(name, "Job")}`, {
-                body,
+                query: { propagationPolicy: "Background" },
                 signal: options.signal,
             });
             await response.body?.cancel();

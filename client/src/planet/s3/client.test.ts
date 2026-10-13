@@ -278,7 +278,7 @@ describe("clock skew", () => {
     it("retries a bodiless 403 when the Date header shows a large skew", async () => {
         const { client, calls } = setup([
             () => new Response(null, { status: 403, headers: { date: serverDate } }),
-            () => new Response(null, { status: 200, headers: { date: serverDate } }),
+            () => new Response(null, { status: 200, headers: { date: serverDate, "x-amz-bucket-region": "auto" } }),
         ]);
         await client.headBucket();
         expect(calls).toHaveLength(2);
@@ -355,6 +355,38 @@ describe("retries and errors", () => {
             message: "The specified key does not exist.",
             requestId: "REQ1",
         });
+    });
+
+    it("reads the bucket region from HeadBucket, GetBucketLocation and errors", async () => {
+        const { client, calls } = setup([
+            () => new Response(null, { status: 200, headers: { "x-amz-bucket-region": "eu-central-1" } }),
+            () => new Response(null, { status: 200 }),
+            () => xml("<LocationConstraint>garage</LocationConstraint>"),
+            () => new Response(null, { status: 200 }),
+            () => errorXml("AccessDenied", "Access Denied", 403),
+            () => new Response(null, { status: 400, headers: { "x-amz-bucket-region": "eu-west-1" } }),
+            () => new Response(null, { status: 400 }),
+            () => errorXml("AuthorizationHeaderMalformed", "unexpected scope", 400, "<Region>garage</Region>"),
+        ]);
+        expect(await client.headBucket()).toEqual({ region: "eu-central-1" });
+        expect(calls.map((call) => call.method)).toEqual(["HEAD"]);
+        expect(await client.headBucket()).toEqual({ region: "garage" });
+        expect(calls[2]).toMatchObject({
+            method: "GET",
+            url: "https://acct.r2.cloudflarestorage.com/planet-data?location",
+        });
+        expect(await client.headBucket()).toEqual({ region: null });
+        await expect(client.headBucket()).rejects.toMatchObject({
+            status: 400,
+            code: "BadRequest",
+            region: "eu-west-1",
+        });
+        await expect(client.headBucket()).rejects.toMatchObject({
+            status: 400,
+            code: "AuthorizationHeaderMalformed",
+            region: "garage",
+        });
+        expect(calls).toHaveLength(8);
     });
 
     it("falls back to the HTTP status for non-XML errors", async () => {

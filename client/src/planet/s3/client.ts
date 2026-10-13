@@ -1,4 +1,4 @@
-import { errorFromResponse, networkBlockedError, S3Error } from "./errors";
+import { errorFromResponse, isS3Error, networkBlockedError, S3Error } from "./errors";
 import { runSetupCheck, type S3SetupOptions, type S3SetupReport } from "./setup";
 import { S3Signer, sha256Hex, SKEW_RETRY_THRESHOLD_MS } from "./signer";
 import {
@@ -106,6 +106,11 @@ export interface S3PresignGetOptions extends S3PresignOptions {
 }
 
 export interface S3Client {
+    /**
+     * Resolves with the bucket's region: the x-amz-bucket-region header, else GetBucketLocation (Garage sends no
+     * header), else null. A failure caused by a wrong region rejects with an S3Error whose `region` names the
+     * bucket's region when the server reports it.
+     */
     headBucket(options?: S3RequestOptions): Promise<{ region: string | null }>;
     /** Resolves with the 200 or 206 response; the caller consumes the body. */
     getObject(key: string, options?: S3GetOptions): Promise<Response>;
@@ -472,8 +477,53 @@ class S3ClientImpl implements S3Client {
     }
 
     async headBucket(options: S3RequestOptions = {}): Promise<{ region: string | null }> {
-        const response = await this.send({ method: "HEAD", notFoundCode: "NoSuchBucket", signal: options.signal });
-        return { region: response.headers.get("x-amz-bucket-region") };
+        return this.bucketRegion(options.signal);
+    }
+
+    private async bucketRegion(
+        signal?: AbortSignal,
+        onResponse?: (response: Response) => void,
+    ): Promise<{ region: string | null }> {
+        let response: Response;
+        try {
+            response = await this.send({ method: "HEAD", notFoundCode: "NoSuchBucket", signal, onResponse });
+        } catch (error) {
+            if (signal?.aborted || !isS3Error(error) || error.status !== 400 || error.region) {
+                throw error;
+            }
+            // A HEAD error has no body; on Garage the GetBucketLocation error document names the region.
+            try {
+                await this.bucketLocation(signal, onResponse);
+            } catch (detail) {
+                if (signal?.aborted) {
+                    throw signal.reason ?? detail;
+                }
+                if (isS3Error(detail) && detail.region) {
+                    throw detail;
+                }
+            }
+            throw error;
+        }
+        const region = response.headers.get("x-amz-bucket-region");
+        if (region) {
+            return { region };
+        }
+        try {
+            return { region: await this.bucketLocation(signal, onResponse) };
+        } catch (error) {
+            if (signal?.aborted) {
+                throw signal.reason ?? error;
+            }
+            return { region: null };
+        }
+    }
+
+    private async bucketLocation(
+        signal?: AbortSignal,
+        onResponse?: (response: Response) => void,
+    ): Promise<string | null> {
+        const response = await this.send({ method: "GET", query: [["location", ""]], signal, onResponse });
+        return (await readXml(response, "LocationConstraint")).text.trim() || null;
     }
 
     async getObject(key: string, options: S3GetOptions = {}): Promise<Response> {
@@ -726,6 +776,7 @@ class S3ClientImpl implements S3Client {
                 config: this.config,
                 configError: this.configError,
                 send: (spec) => this.send(spec),
+                headBucket: (signal, onResponse) => this.bucketRegion(signal, onResponse),
                 client: this,
                 clockOffsetMs: () => this.signer.clockOffsetMs,
                 now: () => this.signer.now(),

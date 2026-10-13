@@ -6,7 +6,6 @@
  */
 export {
     createKubeClient,
-    type DeleteJobOptions,
     type EventListOptions,
     type FetchFunction,
     type KubeClient,
