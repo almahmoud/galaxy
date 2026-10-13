@@ -1,7 +1,11 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CHUNK_UPLOAD_SIZE, GALAXY_VERSION_MAJOR, GALAXY_VERSION_MINOR, loadStaticData } from "../configuration";
+import { loadStaticData } from "@/planet/util/staticData";
+
+import { CHUNK_UPLOAD_SIZE, GALAXY_VERSION_MAJOR, GALAXY_VERSION_MINOR } from "../configuration";
 import { PLANET_USER_ID } from "../users";
 import { CONFIG, fetchJson, makeRouter, resetPlanet, send, stubStaticData, teardownPlanet } from "./contents.fixtures";
 
@@ -78,6 +82,12 @@ describe("GET /api/version and /api/whoami", () => {
             version_minor: GALAXY_VERSION_MINOR,
             extra: { planet_build: "dev" },
         });
+    });
+
+    it("matches the version of this Galaxy checkout", () => {
+        const source = readFileSync(new URL("../../../../../lib/galaxy/version/__init__.py", import.meta.url), "utf8");
+        expect(source.match(/^VERSION_MAJOR = "([^"]*)"$/m)?.[1]).toBe(GALAXY_VERSION_MAJOR);
+        expect(source.match(/^VERSION_MINOR = "([^"]*)"$/m)?.[1]).toBe(GALAXY_VERSION_MINOR);
     });
 
     it("describes the Planet user", async () => {

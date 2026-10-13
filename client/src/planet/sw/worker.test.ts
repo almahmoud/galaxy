@@ -19,8 +19,14 @@ const BUILD = "b2";
 class FakeCache {
     readonly entries = new Map<string, Response>();
 
-    async match(request: RequestInfo | URL): Promise<Response | undefined> {
-        return this.entries.get(keyOf(request))?.clone();
+    async match(request: RequestInfo | URL, options: CacheQueryOptions = {}): Promise<Response | undefined> {
+        const key = keyOf(request, options.ignoreSearch);
+        for (const [stored, response] of this.entries) {
+            if (keyOf(stored, options.ignoreSearch) === key) {
+                return response.clone();
+            }
+        }
+        return undefined;
     }
 
     async put(request: RequestInfo | URL, response: Response): Promise<void> {
@@ -28,9 +34,15 @@ class FakeCache {
     }
 }
 
-function keyOf(request: RequestInfo | URL): string {
-    const url = typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
-    return new URL(url, ORIGIN).href;
+function keyOf(request: RequestInfo | URL, ignoreSearch = false): string {
+    const url = new URL(
+        typeof request === "string" ? request : request instanceof URL ? request.href : request.url,
+        ORIGIN,
+    );
+    if (ignoreSearch) {
+        url.search = "";
+    }
+    return url.href;
 }
 
 class FakeCacheStorage {
@@ -55,12 +67,12 @@ class FakeCacheStorage {
         return this.caches.has(name);
     }
 
-    async match(request: RequestInfo | URL, options: { cacheName?: string } = {}): Promise<Response | undefined> {
+    async match(request: RequestInfo | URL, options: MultiCacheQueryOptions = {}): Promise<Response | undefined> {
         if (options.cacheName) {
-            return this.caches.get(options.cacheName)?.match(request);
+            return this.caches.get(options.cacheName)?.match(request, options);
         }
         for (const cache of this.caches.values()) {
-            const found = await cache.match(request);
+            const found = await cache.match(request, options);
             if (found) {
                 return found;
             }
@@ -185,7 +197,10 @@ describe("install", () => {
         const fetched = env.fetch.mock.calls.map(([input]) => String(input));
         expect(fetched).not.toContain("/static/dist/a.1.js");
         expect(fetched.some((url) => url.includes("cdn.example"))).toBe(false);
-        expect(rules).toMatchObject({ source: "cache" });
+        expect(rules).toMatchObject([
+            { condition: { urlPattern: "/static/dist/:file" }, source: { cacheName: staticCacheName(BUILD) } },
+            { condition: { urlPattern: "/static/*" }, source: "cache" },
+        ]);
     });
 
     it("fails when build.json describes another build", async () => {
@@ -299,6 +314,18 @@ describe("fetch routing", () => {
         expect(await (await env.fetchEvent("/static/welcome.html"))!.text()).toBe("welcome");
         expect(env.fetch).toHaveBeenCalledTimes(1);
         expect(await env.fetchEvent(new Request(`${ORIGIN}/static/x`, { method: "POST" }))).toBeUndefined();
+    });
+
+    it("serves entry files from this build's cache, ignoring the build query, and older chunks from any cache", async () => {
+        const env = setup();
+        const old = await env.caches.open(staticCacheName("b1"));
+        await old.put("/static/dist/base.css", new Response("old css"));
+        await old.put("/static/dist/chunks/old.1.js", new Response("old chunk"));
+        await (await env.caches.open(staticCacheName(BUILD))).put("/static/dist/base.css", new Response("new css"));
+        env.fetch.mockClear();
+        expect(await (await env.fetchEvent(`/static/dist/base.css?v=${BUILD}`))!.text()).toBe("new css");
+        expect(await (await env.fetchEvent("/static/dist/chunks/old.1.js"))!.text()).toBe("old chunk");
+        expect(env.fetch).not.toHaveBeenCalled();
     });
 
     it("routes Galaxy paths and answers unknown API paths with a Galaxy 404", async () => {

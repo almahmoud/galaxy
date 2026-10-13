@@ -84,6 +84,7 @@ describe("first-run bootstrap", () => {
         expect(value.cluster.has_token).toBe(false);
         expect(value.storage.has_secret).toBe(false);
         expect(value.cluster).not.toHaveProperty("token");
+        expect(value.cluster.scratch_default).toBe("20Gi");
     });
 
     it("runs once: reopening keeps the same instance and history", async () => {

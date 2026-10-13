@@ -4,7 +4,7 @@
  */
 
 import type { components } from "@/api/schema";
-import { CONTENT_STORES, type ReadTx, readTx, settings, type WriteTx, writeTx } from "@/planet/db";
+import { CONTENT_STORES, kv, type ReadTx, readTx, settings, type WriteTx, writeTx } from "@/planet/db";
 import { noContent } from "@/planet/sw/responses";
 import type { Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
@@ -17,9 +17,6 @@ type FavoriteObjectsSummary = components["schemas"]["FavoriteObjectsSummary"];
 
 /** Encoded id of the Planet user. There is one user per Planet instance, so the id is fixed. */
 export const PLANET_USER_ID = "f9cad7b01a472135";
-
-/** `kv` key of the user's preferences (Galaxy's `User.preferences`, string values). */
-const PREFERENCES_KEY = "preferences";
 
 export const FAVORITE_OBJECT_TYPES = ["tools", "tags", "edam_operations", "edam_topics"] as const;
 
@@ -64,9 +61,9 @@ export function resolveUserId(userId: string): string {
     return PLANET_USER_ID;
 }
 
-/** Reads the preferences map stored in `kv`. */
+/** Reads the preferences map stored in `kv`, keeping only string values. */
 export async function readPreferences(tx: ReadTx): Promise<Record<string, string>> {
-    const stored = await tx.store("kv").get(PREFERENCES_KEY);
+    const stored: unknown = await kv.get("preferences", tx);
     if (typeof stored !== "object" || stored === null || Array.isArray(stored)) {
         return {};
     }
@@ -79,8 +76,8 @@ export async function readPreferences(tx: ReadTx): Promise<Record<string, string
     return preferences;
 }
 
-async function writePreferences(preferences: Record<string, string>, tx: WriteTx): Promise<void> {
-    await tx.store("kv").put(preferences, PREFERENCES_KEY);
+function writePreferences(preferences: Record<string, string>, tx: WriteTx): Promise<void> {
+    return kv.set("preferences", preferences, tx);
 }
 
 /**

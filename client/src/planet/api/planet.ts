@@ -26,12 +26,12 @@ function invalid(message: string, errData?: Record<string, string>): ApiError {
 }
 
 /**
- * Reads the JSON body of a request from Planet's own pages. Another site can submit a form to these URLs
- * as a top-level navigation, which this worker also receives; such a request has no JSON content type.
+ * Reads the JSON body of a request from Planet's own pages. The router refuses navigations and foreign
+ * origins; requiring a JSON content type also keeps out bodies an HTML form can produce.
  */
 async function pageJson(request: PlanetRequest): Promise<unknown> {
     const contentType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-    if (request.isNavigation || contentType !== "application/json") {
+    if (contentType !== "application/json") {
         throw ApiError.badRequest("Send this request with fetch and Content-Type: application/json.");
     }
     return request.json();

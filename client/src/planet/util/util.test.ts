@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError, defaultErrorCode } from "./errors";
 import { escapeHtml } from "./html";
 import { isId, newId, newInstanceId, newRequestId, newUuid } from "./ids";
+import { queryBool, queryInt, stringAsBool } from "./query";
 import { niceSize } from "./sizes";
 import { formatGalaxyTime, galaxyNow, nextMicros, parseGalaxyTime } from "./time";
 
@@ -58,6 +59,27 @@ describe("time", () => {
         for (const value of ["", "yesterday", "2026-10-09T12:34:56+02:00", "2026-13-01", "2026-02-30T00:00:00"]) {
             expect(() => parseGalaxyTime(value)).toThrow(RangeError);
         }
+    });
+});
+
+describe("query parameters", () => {
+    it("parses booleans and integers with FastAPI's rules", () => {
+        const query = new URLSearchParams("a=YES&b=off&c=12&d=-1&e=x&f=t&g=&h=maybe");
+        expect(queryBool(query, "a", false)).toBe(true);
+        expect(queryBool(query, "b", true)).toBe(false);
+        expect(queryBool(query, "f", false)).toBe(true);
+        expect(queryBool(query, "missing", null)).toBeNull();
+        expect(queryBool(query, "g", true)).toBe(true);
+        expect(() => queryBool(query, "h", false)).toThrow("Input should be a valid boolean");
+        expect(queryInt(query, "c", 0)).toBe(12);
+        expect(queryInt(query, "g", null)).toBeNull();
+        expect(() => queryInt(query, "d", 0, 0)).toThrow("greater than or equal to 0");
+        expect(() => queryInt(query, "e", 0)).toThrow("valid integer");
+    });
+
+    it("reads legacy controller flags like Galaxy's string_as_bool", () => {
+        expect(["True", "yes", "ON", "1"].map(stringAsBool)).toEqual([true, true, true, true]);
+        expect(["t", "0", "", null, undefined].map(stringAsBool)).toEqual([false, false, false, false, false]);
     });
 });
 

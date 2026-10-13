@@ -6,12 +6,12 @@
 
 import type { Router } from "@/planet/sw/router";
 import { ApiError } from "@/planet/util/errors";
-
-import { loadStaticJson, queryBool } from "./datatypes";
+import { queryBool } from "@/planet/util/query";
+import { loadOptionalStaticData } from "@/planet/util/staticData";
 
 /** The `[name, dbkey]` pairs of `GET /api/genomes`; the first is Galaxy's "unspecified (?)". */
 export async function genomeBuilds(): Promise<string[][]> {
-    return (await loadStaticJson<string[][]>("genomes.json")) ?? [["unspecified (?)", "?"]];
+    return (await loadOptionalStaticData<string[][]>("genomes.json")) ?? [["unspecified (?)", "?"]];
 }
 
 function noReferenceData(id: string): ApiError {

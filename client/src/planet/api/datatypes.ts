@@ -4,15 +4,14 @@
  * /api/datatypes/{datatype}/visualizations.
  *
  * Every payload comes from the JSON the build generates from Galaxy's datatype registry
- * (`/static/planet/data/datatypes/`). This module also holds the query parameter helpers the other data handlers
- * share, and answers datatype class questions (`isA`) for dataset display.
+ * (`/static/planet/data/datatypes/`). This module also answers datatype class questions (`isA`) for dataset display.
  */
 
 import type { components } from "@/api/schema";
 import type { Router } from "@/planet/sw/router";
 import { ApiError } from "@/planet/util/errors";
-
-import { loadStaticData } from "./configuration";
+import { queryBool } from "@/planet/util/query";
+import { loadOptionalStaticData, loadStaticData } from "@/planet/util/staticData";
 
 type DatatypeDetails = components["schemas"]["DatatypeDetails"];
 type DatatypesMap = components["schemas"]["DatatypesMap"];
@@ -33,83 +32,6 @@ export interface DatatypeShow {
     edam_data?: string;
     converters?: string[];
     preferred_visualization?: { visualization: string };
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Static data
-
-/**
- * Loads `/static/planet/data/<path>` through the shared static data loader, resolving to `undefined` when the
- * deployment does not provide the file (or it cannot be read).
- */
-export async function loadStaticJson<T>(path: string): Promise<T | undefined> {
-    try {
-        return await loadStaticData<T>(path);
-    } catch {
-        return undefined;
-    }
-}
-
-/** Loads a file every deployment must have; a missing file is the loader's 500 Galaxy error. */
-export function requireStaticJson<T>(path: string): Promise<T> {
-    return loadStaticData<T>(path);
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Query parameters (FastAPI semantics)
-
-const TRUE_VALUES = new Set(["1", "on", "t", "true", "y", "yes"]);
-const FALSE_VALUES = new Set(["0", "off", "f", "false", "n", "no"]);
-
-/**
- * Reads a boolean query parameter the way FastAPI does.
- *
- * @throws ApiError 400 for values pydantic would reject
- */
-export function queryBool(query: URLSearchParams, name: string, fallback: boolean): boolean;
-export function queryBool(query: URLSearchParams, name: string, fallback: boolean | null): boolean | null;
-export function queryBool(query: URLSearchParams, name: string, fallback: boolean | null): boolean | null {
-    const raw = query.get(name);
-    if (raw === null) {
-        return fallback;
-    }
-    const value = raw.trim().toLowerCase();
-    if (TRUE_VALUES.has(value)) {
-        return true;
-    }
-    if (FALSE_VALUES.has(value)) {
-        return false;
-    }
-    throw ApiError.badRequest(`Input should be a valid boolean, unable to interpret input in ('query', '${name}')`);
-}
-
-/** Galaxy's `util.string_as_bool`, used by legacy controllers: anything but these values is false. */
-export function stringAsBool(value: string | null | undefined): boolean {
-    return ["true", "yes", "on", "1"].includes(String(value ?? "").toLowerCase());
-}
-
-/**
- * Reads an integer query parameter the way FastAPI does.
- *
- * @throws ApiError 400 when the value is not an integer or is below `min`
- */
-export function queryInt(query: URLSearchParams, name: string, fallback: number, min?: number): number;
-export function queryInt(query: URLSearchParams, name: string, fallback: number | null, min?: number): number | null;
-export function queryInt(query: URLSearchParams, name: string, fallback: number | null, min?: number): number | null {
-    const raw = query.get(name);
-    if (raw === null || raw === "") {
-        return fallback;
-    }
-    if (!/^\s*[+-]?\d+\s*$/.test(raw)) {
-        throw ApiError.badRequest(
-            `Input should be a valid integer, unable to parse string as an integer in ('query', '${name}')`,
-        );
-    }
-    const value = Number.parseInt(raw, 10);
-    if (min !== undefined && value < min) {
-        throw ApiError.badRequest(`Input should be greater than or equal to ${min} in ('query', '${name}')`);
-    }
-    return value;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -142,8 +64,8 @@ export interface DatatypeInfo {
 /** Returns the registry's view of `extension` (Galaxy falls back to `Data` for unknown extensions). */
 export async function getDatatype(extension: string): Promise<DatatypeInfo> {
     const [mapping, details] = await Promise.all([
-        requireStaticJson<DatatypesMap>("datatypes/mapping.json"),
-        requireStaticJson<Record<string, DatatypeShow>>("datatypes/details.json"),
+        loadStaticData<DatatypesMap>("datatypes/mapping.json"),
+        loadStaticData<Record<string, DatatypeShow>>("datatypes/details.json"),
     ]);
     const known = Object.hasOwn(mapping.ext_to_class_name, extension);
     const className = known ? mapping.ext_to_class_name[extension]! : DatatypeClass.DATA;
@@ -159,7 +81,7 @@ export async function getDatatype(extension: string): Promise<DatatypeInfo> {
 
 /** Every registered extension with its `/api/datatypes/{datatype}` payload, in registry order. */
 export function getAllDatatypeDetails(): Promise<Record<string, DatatypeShow>> {
-    return requireStaticJson<Record<string, DatatypeShow>>("datatypes/details.json");
+    return loadStaticData<Record<string, DatatypeShow>>("datatypes/details.json");
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -168,26 +90,28 @@ export function getAllDatatypeDetails(): Promise<Record<string, DatatypeShow>> {
 async function datatypeIndex(extensionOnly: boolean, uploadOnly: boolean): Promise<DatatypeDetails[] | string[]> {
     if (extensionOnly) {
         if (uploadOnly) {
-            return requireStaticJson<string[]>("datatypes/extensions.json");
+            return loadStaticData<string[]>("datatypes/extensions.json");
         }
-        const all = await loadStaticJson<string[]>("datatypes/extensions_all.json");
+        const all = await loadOptionalStaticData<string[]>("datatypes/extensions_all.json");
         return all ?? Object.keys(await getAllDatatypeDetails());
     }
     if (uploadOnly) {
         return (
-            (await loadStaticJson<DatatypeDetails[]>("datatypes/index.json")) ??
-            requireStaticJson<DatatypeDetails[]>("datatypes/upload.json")
+            (await loadOptionalStaticData<DatatypeDetails[]>("datatypes/index.json")) ??
+            loadStaticData<DatatypeDetails[]>("datatypes/upload.json")
         );
     }
     return (
-        (await loadStaticJson<DatatypeDetails[]>("datatypes/index_all.json")) ??
-        requireStaticJson<DatatypeDetails[]>("datatypes/index.json")
+        (await loadOptionalStaticData<DatatypeDetails[]>("datatypes/index_all.json")) ??
+        loadStaticData<DatatypeDetails[]>("datatypes/index.json")
     );
 }
 
 async function visualizationMappings(): Promise<Record<string, DatatypeVisualizationMappingsList>> {
     return (
-        (await loadStaticJson<Record<string, DatatypeVisualizationMappingsList>>("datatypes/visualizations.json")) ?? {}
+        (await loadOptionalStaticData<Record<string, DatatypeVisualizationMappingsList>>(
+            "datatypes/visualizations.json",
+        )) ?? {}
     );
 }
 
@@ -199,33 +123,33 @@ export function register(router: Router): void {
     router.route("/api/datatypes/types_and_mapping", "get", async ({ query }) => {
         const [datatypes, mapping] = await Promise.all([
             datatypeIndex(queryBool(query, "extension_only", true), queryBool(query, "upload_only", true)),
-            requireStaticJson<DatatypesMap>("datatypes/mapping.json"),
+            loadStaticData<DatatypesMap>("datatypes/mapping.json"),
         ]);
         return { datatypes: datatypes as string[], datatypes_mapping: mapping };
     });
 
-    router.route("/api/datatypes/mapping", "get", () => requireStaticJson<DatatypesMap>("datatypes/mapping.json"));
+    router.route("/api/datatypes/mapping", "get", () => loadStaticData<DatatypesMap>("datatypes/mapping.json"));
 
-    router.route("/api/datatypes/sniffers", "get", () => requireStaticJson<string[]>("datatypes/sniffers.json"));
+    router.route("/api/datatypes/sniffers", "get", () => loadStaticData<string[]>("datatypes/sniffers.json"));
 
     router.route("/api/datatypes/converters", "get", () =>
-        requireStaticJson<DatatypeConverterList>("datatypes/converters.json"),
+        loadStaticData<DatatypeConverterList>("datatypes/converters.json"),
     );
 
     router.route("/api/datatypes/edam_formats", "get", () =>
-        requireStaticJson<Record<string, string>>("datatypes/edam_formats.json"),
+        loadStaticData<Record<string, string>>("datatypes/edam_formats.json"),
     );
 
     router.route("/api/datatypes/edam_formats/detailed", "get", () =>
-        requireStaticJson<DatatypesEDAMDetailsDict>("datatypes/edam_formats_detailed.json"),
+        loadStaticData<DatatypesEDAMDetailsDict>("datatypes/edam_formats_detailed.json"),
     );
 
     router.route("/api/datatypes/edam_data", "get", () =>
-        requireStaticJson<Record<string, string>>("datatypes/edam_data.json"),
+        loadStaticData<Record<string, string>>("datatypes/edam_data.json"),
     );
 
     router.route("/api/datatypes/edam_data/detailed", "get", () =>
-        requireStaticJson<DatatypesEDAMDetailsDict>("datatypes/edam_data_detailed.json"),
+        loadStaticData<DatatypesEDAMDetailsDict>("datatypes/edam_data_detailed.json"),
     );
 
     // Galaxy has no such route (the request falls through to `show` and 404s); the client calls it for the

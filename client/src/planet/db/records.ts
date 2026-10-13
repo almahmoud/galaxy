@@ -252,7 +252,7 @@ export function defaultSettings(instanceId: string): StoredSettings {
             default_cpu: "1",
             default_memory: "4Gi",
             default_walltime_seconds: 86400,
-            scratch_default: "10Gi",
+            scratch_default: "20Gi",
             arch_policy: "amd64-only",
             user_namespaces: false,
         },

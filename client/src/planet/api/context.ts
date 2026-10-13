@@ -15,6 +15,6 @@ export function register(router: Router): void {
         return { config, user, session_csrf_token: "" };
     });
 
-    // Planet fixes welcome_url, so the redirect does not wait for the configuration.
-    router.untyped("/welcome", "get", () => redirect(WELCOME_URL));
+    // Planet fixes welcome_url, so the redirect does not wait for the configuration. The client loads it in a frame.
+    router.untyped("/welcome", "get", () => redirect(WELCOME_URL), { navigable: true });
 }

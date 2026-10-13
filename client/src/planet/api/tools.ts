@@ -11,8 +11,9 @@
 import * as db from "@/planet/db";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
+import { stringAsBool } from "@/planet/util/query";
+import { loadOptionalStaticData } from "@/planet/util/staticData";
 
-import { loadStaticJson, stringAsBool } from "./datatypes";
 import { normalizeFavorites, readPreferences } from "./users";
 
 /** A `ToolPanelEntry` payload (`/api/tools/{tool_id}` and the entries of `/api/tools`). */
@@ -124,7 +125,7 @@ async function installedEntries(): Promise<ToolEntry[]> {
 /** Every tool listed by `/api/tools?in_panel=false`: the built-in toolbox, the upload tool and installed tools. */
 export async function listToolEntries(): Promise<ToolEntry[]> {
     const [curated, installed] = await Promise.all([
-        loadStaticJson<unknown[]>("toolbox/tools.json"),
+        loadOptionalStaticData<unknown[]>("toolbox/tools.json"),
         installedEntries(),
     ]);
     const entries = (Array.isArray(curated) ? curated : []).filter(isToolEntry);
@@ -166,12 +167,12 @@ export async function getToolBundle(toolId: string, version?: string): Promise<R
     if (record && isRecord(record.bundle)) {
         return record.bundle;
     }
-    const bundle = await loadStaticJson<unknown>(bundlePath(toolId, resolved));
+    const bundle = await loadOptionalStaticData<unknown>(bundlePath(toolId, resolved));
     return isRecord(bundle) ? bundle : undefined;
 }
 
 async function panelViews(): Promise<PanelViews> {
-    const views = await loadStaticJson<PanelViews>("toolbox/panels.json");
+    const views = await loadOptionalStaticData<PanelViews>("toolbox/panels.json");
     if (isRecord(views) && isRecord(views.views) && typeof views.default_panel_view === "string") {
         return views;
     }
@@ -193,11 +194,11 @@ async function panelView(view: string): Promise<Record<string, PanelElement>> {
         throw ApiError.badRequest(`No panel view ${viewId} found.`);
     }
     const stored =
-        (await loadStaticJson<Record<string, PanelElement>>(
+        (await loadOptionalStaticData<Record<string, PanelElement>>(
             `toolbox/panel_views/${encodeURIComponent(viewId)}.json`,
         )) ??
         (viewId === DEFAULT_PANEL_VIEW
-            ? await loadStaticJson<Record<string, PanelElement>>("toolbox/panel.json")
+            ? await loadOptionalStaticData<Record<string, PanelElement>>("toolbox/panel.json")
             : undefined);
     const panel: Record<string, PanelElement> = isRecord(stored) ? { ...(stored as Record<string, PanelElement>) } : {};
     if (viewId === DEFAULT_PANEL_VIEW && !containsTool(panel, UPLOAD_TOOL_ID)) {
@@ -225,7 +226,7 @@ async function panelView(view: string): Promise<Record<string, PanelElement>> {
 /** `/api/tools?in_panel=true`: the panel view with each section's tool ids replaced by their entries. */
 async function toolsInPanel(view: string | null): Promise<unknown[]> {
     if (!view || view === DEFAULT_PANEL_VIEW) {
-        const stored = await loadStaticJson<unknown[]>("toolbox/tools_in_panel.json");
+        const stored = await loadOptionalStaticData<unknown[]>("toolbox/tools_in_panel.json");
         if (Array.isArray(stored) && stored.length) {
             return stored;
         }
@@ -502,7 +503,7 @@ export async function searchTools(query: string): Promise<string[]> {
 }
 
 async function toolTags(): Promise<Record<string, string[]>> {
-    const tags = await loadStaticJson<Record<string, string[]>>("toolbox/tool_tags.json");
+    const tags = await loadOptionalStaticData<Record<string, string[]>>("toolbox/tool_tags.json");
     return isRecord(tags) ? (tags as Record<string, string[]>) : {};
 }
 

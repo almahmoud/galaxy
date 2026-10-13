@@ -343,6 +343,8 @@ export interface KvValues {
     current_history_id: string;
     /** Incremented by each tab that becomes job leader. */
     leader_epoch: number;
+    /** The user's preferences (Galaxy's `User.preferences`): string values, JSON-encoded where Galaxy encodes them. */
+    preferences: Record<string, string>;
     [counter: `counter:${string}`]: number;
 }
 

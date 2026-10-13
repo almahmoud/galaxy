@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/planet/util/errors";
 
+import { DOCUMENT_CSP } from "./csp";
 import { error, finalize, html, json, noContent, redirect } from "./responses";
 import { Router } from "./router";
 
@@ -10,6 +11,20 @@ const ORIGIN = "https://planet.test";
 
 function request(path: string, init: RequestInit = {}): Request {
     return new Request(`${ORIGIN}${path}`, init);
+}
+
+/** A request as the worker sees it for a link, frame, typed address or form submission. */
+function navigation(path: string, init: RequestInit = {}): Request {
+    const navigate = request(path, init);
+    Object.defineProperty(navigate, "mode", { value: "navigate" });
+    return navigate;
+}
+
+/** A request as the worker sees it for an `<img>`, `<script>` or other subresource. */
+function subresource(path: string, destination: RequestDestination): Request {
+    const fetched = request(path);
+    Object.defineProperty(fetched, "destination", { value: destination });
+    return fetched;
 }
 
 describe("Router matching", () => {
@@ -204,6 +219,130 @@ describe("Router responses", () => {
         const response = await router.handle(request("/api/who"), { clientId: "c1", waitUntil });
         expect(await response.json()).toBe("c1");
         expect(waitUntil).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("Router request guards", () => {
+    function guardedRouter() {
+        const router = new Router();
+        const calls: string[] = [];
+        router.untyped(
+            "/datasets/{id}/display",
+            "get",
+            () => {
+                calls.push("display");
+                return "display";
+            },
+            { navigable: true },
+        );
+        router.untyped("/api/histories", ["get", "post", "delete"], ({ method }) => {
+            calls.push(method);
+            return method;
+        });
+        router.untyped(
+            "/history/create_new_current",
+            ["get", "post"],
+            () => {
+                calls.push("create");
+                return "created";
+            },
+            { changesState: true },
+        );
+        return { router, calls };
+    }
+
+    it("lets navigations reach only navigable routes", async () => {
+        const { router, calls } = guardedRouter();
+        expect((await router.handle(navigation("/datasets/d1/display?preview=True"))).status).toBe(200);
+        for (const path of ["/api/histories", "/history/create_new_current", "/history/create_new_current/"]) {
+            const refused = await router.handle(navigation(path));
+            expect(refused.status, path).toBe(403);
+            expect(await refused.json()).toEqual({
+                err_msg: "This Planet address cannot be opened as a page, link or frame.",
+                err_code: 403002,
+            });
+            expect(refused.headers.get("X-Request-ID")).toMatch(/^[0-9a-f]{32}$/);
+        }
+        expect((await router.handle(navigation("/api/unknown"))).status).toBe(404);
+        expect(calls).toEqual(["display"]);
+    });
+
+    it("refuses every navigation that is not GET, such as a cross-site form post", async () => {
+        const { router, calls } = guardedRouter();
+        for (const path of ["/api/histories", "/datasets/d1/display", "/history/create_new_current", "/api/unknown"]) {
+            const form = navigation(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: "name=x",
+            });
+            const refused = await router.handle(form);
+            expect(refused.status, path).toBe(403);
+            expect((await refused.json()).err_msg).toBe("Planet does not accept form submissions.");
+        }
+        expect(calls).toEqual([]);
+    });
+
+    it("refuses state-changing requests that carry another origin", async () => {
+        const { router, calls } = guardedRouter();
+        const foreign: Record<string, string>[] = [
+            { Origin: "https://attacker.example" },
+            { Origin: "null" },
+            { "Sec-Fetch-Site": "cross-site" },
+            { "Sec-Fetch-Site": "same-site" },
+        ];
+        for (const headers of foreign) {
+            for (const method of ["POST", "DELETE"]) {
+                const refused = await router.handle(request("/api/histories", { method, headers, body: "{}" }));
+                expect(refused.status, `${method} ${JSON.stringify(headers)}`).toBe(403);
+                expect((await refused.json()).err_msg).toBe("Requests from other sites cannot change Planet data.");
+            }
+        }
+        expect(calls).toEqual([]);
+        const own = { Origin: ORIGIN, "Sec-Fetch-Site": "same-origin" };
+        expect((await router.handle(request("/api/histories", { method: "POST", headers: own }))).status).toBe(200);
+        expect((await router.handle(request("/api/histories", { method: "POST" }))).status).toBe(200);
+        const read = request("/api/histories", { headers: { Origin: "https://attacker.example" } });
+        expect((await router.handle(read)).status).toBe(200);
+        expect(calls).toEqual(["POST", "POST", "GET"]);
+    });
+
+    it("answers state-changing GET routes only to same-origin script requests", async () => {
+        const { router, calls } = guardedRouter();
+        for (const destination of ["image", "script", "style", "iframe"] as const) {
+            const refused = await router.handle(subresource("/history/create_new_current", destination));
+            expect(refused.status, destination).toBe(403);
+        }
+        const foreign = request("/history/create_new_current", { headers: { "Sec-Fetch-Site": "cross-site" } });
+        expect((await router.handle(foreign)).status).toBe(403);
+        expect(calls).toEqual([]);
+        expect(await (await router.handle(request("/history/create_new_current"))).json()).toBe("created");
+        expect((await router.handle(subresource("/datasets/d1/display", "image"))).status).toBe(200);
+    });
+
+    it("accepts navigable only on read-only GET routes and reports the options", () => {
+        const router = new Router();
+        expect(() => router.untyped("/a", "post", () => null, { navigable: true })).toThrow(/read-only GET/);
+        expect(() => router.untyped("/b", ["get", "post"], () => null, { navigable: true })).toThrow(/read-only GET/);
+        expect(() => router.untyped("/c", "get", () => null, { navigable: true, changesState: true })).toThrow(
+            /read-only GET/,
+        );
+        router.untyped("/d", "get", () => null, { navigable: true });
+        router.untyped("/e", ["get", "post"], () => null, { changesState: true });
+        expect(router.routes()).toEqual(
+            expect.arrayContaining([
+                { method: "GET", pattern: "/d", navigable: true, changesState: false },
+                { method: "GET", pattern: "/e", navigable: false, changesState: true },
+                { method: "POST", pattern: "/e", navigable: false, changesState: true },
+            ]),
+        );
+    });
+});
+
+describe("document CSP", () => {
+    it("allows plain http only to the loopback sources browsers accept", () => {
+        expect(DOCUMENT_CSP).toContain("connect-src 'self' https: http://localhost:* http://127.0.0.1:*;");
+        expect(DOCUMENT_CSP).toContain("font-src 'self' data:");
+        expect(DOCUMENT_CSP).not.toContain("[");
     });
 });
 

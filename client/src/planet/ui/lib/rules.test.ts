@@ -23,11 +23,12 @@ describe("browserUrlError", () => {
         "https://k8s.example.org/prefix",
         "http://localhost:8001",
         "http://127.0.0.1:8001",
-        "http://[::1]:8001",
     ])("accepts %s", (url: string) => expect(browserUrlError(url, "The URL")).toBeNull());
 
     it.each([
         ["http://k8s.example.org", /https/],
+        ["http://[::1]:8001", /localhost and 127\.0\.0\.1/],
+        ["http://app.localhost:8001", /https/],
         ["http://192.168.1.5:8001", /https/],
         ["127.0.0.1:8001", /starting with/],
         ["k8s.example.org", /starting with/],

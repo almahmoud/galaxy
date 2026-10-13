@@ -1,11 +1,9 @@
-/**
- * GET /api/configuration, GET /api/version and GET /api/whoami, plus the loader for the static data files the build
- * publishes under /static/planet/data/.
- */
+/** GET /api/configuration, GET /api/version and GET /api/whoami. */
 
 import type { Router } from "@/planet/sw/router";
-import { staticCacheName } from "@/planet/sw/worker";
+import { BUILD_ID } from "@/planet/util/build";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
+import { loadStaticData } from "@/planet/util/staticData";
 
 import { userSummary } from "./users";
 
@@ -13,82 +11,16 @@ import { userSummary } from "./users";
 export const GALAXY_VERSION_MAJOR = "26.2";
 export const GALAXY_VERSION_MINOR = "dev0";
 
-/** Where the build publishes generated Galaxy data (configuration, datatypes, genomes, toolbox). */
-export const STATIC_DATA_ROOT = "/static/planet/data/";
-
 /** Galaxy's default `welcome_url`, where the build publishes Planet's welcome and setup page. */
 export const WELCOME_URL = "/static/welcome.html";
 
 /** Upload part size Planet's page-side multipart uploads use. */
 export const CHUNK_UPLOAD_SIZE = 32 * 1024 * 1024;
 
-const BUILD_ID = typeof __PLANET_BUILD_ID__ === "string" ? __PLANET_BUILD_ID__ : "dev";
-
 /** Seconds since the epoch when this worker started (Galaxy's `server_starttime`). */
 const STARTED_AT = Math.floor(Date.now() / 1000);
 
 export type GalaxyConfig = Record<string, unknown>;
-
-const loaded = new Map<string, Promise<unknown>>();
-
-async function openCache(): Promise<Cache | undefined> {
-    if (typeof caches === "undefined") {
-        return undefined;
-    }
-    try {
-        return await caches.open(staticCacheName(BUILD_ID));
-    } catch {
-        return undefined;
-    }
-}
-
-async function fetchStaticJson(url: string): Promise<unknown> {
-    const cache = await openCache();
-    let response = cache ? await cache.match(url) : undefined;
-    if (!response) {
-        const fetched = await fetch(url, { cache: "no-cache", credentials: "same-origin" });
-        if (!fetched.ok) {
-            throw new ApiError(
-                500,
-                `Planet data file ${url} is unavailable (HTTP ${fetched.status})`,
-                ErrorCodes.CONFIG_ERROR,
-            );
-        }
-        if (cache) {
-            await cache.put(url, fetched.clone()).catch(() => undefined);
-        }
-        response = fetched;
-    }
-    try {
-        return await response.json();
-    } catch {
-        throw new ApiError(500, `Planet data file ${url} is not valid JSON`, ErrorCodes.CONFIG_ERROR);
-    }
-}
-
-/**
- * Returns the parsed JSON file at `/static/planet/data/<path>`. Each file is fetched once per worker lifetime and kept
- * in this build's static cache; a failed load is retried on the next call.
- */
-export function loadStaticData<T>(path: string): Promise<T> {
-    let pending = loaded.get(path);
-    if (!pending) {
-        const request = fetchStaticJson(STATIC_DATA_ROOT + path);
-        loaded.set(path, request);
-        request.catch(() => {
-            if (loaded.get(path) === request) {
-                loaded.delete(path);
-            }
-        });
-        pending = request;
-    }
-    return pending as Promise<T>;
-}
-
-/** Forgets loaded static data so the next call fetches it again. */
-export function resetStaticData(): void {
-    loaded.clear();
-}
 
 /**
  * Values Planet enforces whatever the generated configuration says: no accounts, Celery, notifications, quotas,

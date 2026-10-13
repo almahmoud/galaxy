@@ -114,19 +114,16 @@ describe("GET and PUT /api/planet/settings", () => {
         expect(body.storage.prefix).toBe("planet/data");
     });
 
-    it("accepts https anywhere and http only on loopback addresses", async () => {
-        for (const url of [
-            "https://k8s.example.org",
-            "http://127.0.0.1:8001",
-            "http://[::1]:8001",
-            "http://localhost",
-        ]) {
+    it("accepts https anywhere and http only on localhost and 127.0.0.1", async () => {
+        for (const url of ["https://k8s.example.org", "http://127.0.0.1:8001", "http://localhost"]) {
             expect((await put({ cluster: { gateway_url: url } })).status).toBe(200);
         }
-        const { status, body } = await put({ cluster: { gateway_url: "http://192.168.1.10:8001" } });
-        expect(status).toBe(400);
-        expect(body.err_code).toBe(400004);
-        expect(body.err_data["cluster.gateway_url"]).toMatch(/https/);
+        for (const url of ["http://192.168.1.10:8001", "http://[::1]:8001"]) {
+            const { status, body } = await put({ cluster: { gateway_url: url } });
+            expect(status).toBe(400);
+            expect(body.err_code).toBe(400004);
+            expect(body.err_data["cluster.gateway_url"]).toMatch(/https/);
+        }
     });
 
     it("allows in-cluster http addresses for the cluster endpoint only", async () => {
@@ -336,7 +333,7 @@ describe("POST /api/planet/settings/check", () => {
             body: "{}",
         });
         Object.defineProperty(navigation, "mode", { value: "navigate" });
-        expect((await router.handle(navigation)).status).toBe(400);
+        expect((await router.handle(navigation)).status).toBe(403);
         expect(kube.factory).not.toHaveBeenCalled();
     });
 

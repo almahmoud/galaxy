@@ -1,7 +1,8 @@
 /**
  * History contents: GET /api/histories/{history_id}/contents (`v=dev` and legacy, with the stats media type), GET
  * /api/histories/{history_id}/contents/{type}s, GET/PUT/DELETE /api/histories/{history_id}/contents/{type}s/{id} and
- * the legacy /contents/{id} forms, and PUT /api/histories/{history_id}/contents/bulk.
+ * the legacy /contents/{id} forms, PUT /api/histories/{history_id}/contents/bulk, and the aliases PUT/DELETE
+ * /api/datasets/{dataset_id} and PUT /api/dataset_collections/{hdca_id}.
  *
  * Also the dataset and collection serializers shared with other handlers: `HDASerializer` and `HDCASerializer`
  * (`managers/hdas.py`, `managers/hdcas.py`) and the element view of `dictify_dataset_collection_instance`
@@ -34,10 +35,13 @@ import type { PlanetRequest, Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { type ContentsFilter, parseContentsFilters } from "@/planet/util/filters";
 import { escapeHtml } from "@/planet/util/html";
+import { queryBool, queryInt } from "@/planet/util/query";
 import { niceSize } from "@/planet/util/sizes";
 import { type DatasetState, FINISHED_JOB_STATES, TERMINAL_JOB_STATES } from "@/planet/util/states";
+import { loadOptionalStaticData } from "@/planet/util/staticData";
 
-import { loadStaticData, parseKeys } from "./configuration";
+import { parseKeys } from "./configuration";
+import { genomeBuilds } from "./genomes";
 
 type Schemas = components["schemas"];
 type DatasetHash = Schemas["DatasetHash"];
@@ -107,44 +111,9 @@ export function resolveKeys(
     return keys.length ? [...keys] : [...viewKeys(defaultView)];
 }
 
-/**
- * Reads a boolean query parameter the way FastAPI parses one; `fallback` applies when it is absent.
- *
- * @throws ApiError 400 for any other value
- */
-export function queryBool<T extends boolean | null>(query: URLSearchParams, name: string, fallback: T): boolean | T {
-    const value = query.get(name);
-    if (value === null || value === "") {
-        return fallback;
-    }
-    const lowered = value.toLowerCase();
-    if (["true", "1", "yes", "on"].includes(lowered)) {
-        return true;
-    }
-    if (["false", "0", "no", "off"].includes(lowered)) {
-        return false;
-    }
-    throw ApiError.badRequest(`Invalid boolean value for ${name}: ${value}`);
-}
-
-function queryInt(query: URLSearchParams, name: string): number | null {
-    const value = query.get(name);
-    if (value === null || value === "") {
-        return null;
-    }
-    if (!/^[+-]?\d+$/.test(value.trim())) {
-        throw ApiError.badRequest(`Invalid integer value for ${name}: ${value}`);
-    }
-    const parsed = Number.parseInt(value, 10);
-    if (parsed < 0) {
-        throw ApiError.badRequest(`${name} must be greater than or equal to 0`);
-    }
-    return parsed;
-}
-
 /** Reads `offset` and `limit` (non-negative integers). */
 export function pagination(query: URLSearchParams): { offset: number; limit: number | null } {
-    return { offset: queryInt(query, "offset") ?? 0, limit: queryInt(query, "limit") };
+    return { offset: queryInt(query, "offset", 0, 0), limit: queryInt(query, "limit", null, 0) };
 }
 
 /** Checks that a request body is a JSON object. */
@@ -254,12 +223,8 @@ function isMapping(value: unknown): value is DatatypeMapping {
 
 /** Loads the datatype mapping. Serialization degrades to `data` behaviour when it is unavailable. */
 export async function loadDatatypeInfo(): Promise<DatatypeInfo> {
-    try {
-        const mapping = await loadStaticData<unknown>("datatypes/mapping.json");
-        return new DatatypeInfo(isMapping(mapping) ? mapping : null);
-    } catch {
-        return new DatatypeInfo(null);
-    }
+    const mapping = await loadOptionalStaticData<unknown>("datatypes/mapping.json");
+    return new DatatypeInfo(isMapping(mapping) ? mapping : null);
 }
 
 async function requireDatatypeInfo(): Promise<DatatypeInfo> {
@@ -2162,8 +2127,7 @@ async function applyToHdca(
 
 /** Whether `dbkey` is a build listed in the generated `/api/genomes` payload (`is_registered_dbkey`). */
 async function isRegisteredDbkey(dbkey: string): Promise<boolean> {
-    const genomes = await loadStaticData<unknown>("genomes.json");
-    return Array.isArray(genomes) && genomes.some((entry) => Array.isArray(entry) && entry[1] === dbkey);
+    return (await genomeBuilds()).some((entry) => entry[1] === dbkey);
 }
 
 async function validateBulkParams(payload: BulkPayload): Promise<void> {
@@ -2273,5 +2237,16 @@ export function register(router: Router): void {
 
     router.route("/api/histories/{history_id}/contents/bulk", "put", async ({ params, query, json: body }) =>
         bulkOperation(params.history_id, query, await body()),
+    );
+
+    // Galaxy serves these from the history contents service as well; the client deletes and undeletes with them.
+    router.route("/api/datasets/{dataset_id}", "put", (request) =>
+        updateItem(request, "dataset", request.params.dataset_id),
+    );
+    router.route("/api/datasets/{dataset_id}", "delete", (request) =>
+        deleteItem(request, "dataset", request.params.dataset_id),
+    );
+    router.route("/api/dataset_collections/{hdca_id}", "put", (request) =>
+        updateItem(request, "dataset_collection", request.params.hdca_id),
     );
 }

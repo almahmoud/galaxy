@@ -22,12 +22,12 @@ import {
 import type { PlanetRequest, Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { parseSearch, sqlLike } from "@/planet/util/filters";
+import { queryBool, queryInt } from "@/planet/util/query";
 import { FINISHED_JOB_STATES } from "@/planet/util/states";
 import { parseGalaxyTime } from "@/planet/util/time";
 
 import { GALAXY_VERSION_MAJOR } from "./configuration";
 import { markJobDeleted } from "./contents";
-import { queryBool, queryInt } from "./datatypes";
 import { PLANET_USER_ID } from "./users";
 
 type JobSummary = components["schemas"]["JobSummary"];

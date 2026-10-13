@@ -4,6 +4,11 @@
  * A trailing slash on the request path is ignored. Among the routes for the request's method (GET also
  * serves HEAD), the most specific pattern wins: literal segments beat mixed ones, mixed beat single
  * parameters, parameters beat `{name:path}`; ties go to the earlier registration.
+ *
+ * The worker receives navigations into its scope from any site (links, frames, form posts), while other
+ * sites' subresource requests never reach it. Navigations therefore reach only routes registered as
+ * `navigable` (read-only documents and downloads), and requests that change state are refused when they
+ * carry another origin.
  */
 
 import type { GalaxyApiPaths } from "@/api/schema";
@@ -116,9 +121,26 @@ export interface HandleContext {
     waitUntil?: (promise: Promise<unknown>) => void;
 }
 
+/** Registration options of a route. */
+export interface RouteOptions {
+    /**
+     * Lets navigations (links, frames, downloads, typed addresses) reach this GET route. Any site can start
+     * a navigation, so only read-only document and download routes are navigable.
+     */
+    navigable?: boolean;
+    /**
+     * Marks a GET route that changes state (Galaxy's legacy controllers). It gets the origin checks of the
+     * other methods, which always count as changing state, and answers only `fetch` and `XMLHttpRequest`
+     * calls, not images, scripts or styles.
+     */
+    changesState?: boolean;
+}
+
 export interface RouteInfo {
     method: string;
     pattern: string;
+    navigable: boolean;
+    changesState: boolean;
 }
 
 interface CompiledRoute extends RouteInfo {
@@ -141,6 +163,26 @@ const REST = 0;
 
 const NAME = "[A-Za-z_][A-Za-z0-9_]*";
 const PLACEHOLDER = new RegExp(`\\{(${NAME})(?::(path))?\\}`, "g");
+
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+const NAVIGATION_FORM_REFUSED = "Planet does not accept form submissions.";
+const NAVIGATION_REFUSED = "This Planet address cannot be opened as a page, link or frame.";
+const CROSS_ORIGIN_REFUSED = "Requests from other sites cannot change Planet data.";
+const NOT_SCRIPTED_REFUSED = "This address changes Planet data and answers only fetch or XMLHttpRequest calls.";
+
+/**
+ * True when the request carries another origin: an `Origin` header (including `null`, sent by opaque
+ * origins such as sandboxed documents) or a `Sec-Fetch-Site` other than `same-origin`.
+ */
+function isForeign(request: Request, origin: string): boolean {
+    const site = request.headers.get("Sec-Fetch-Site");
+    if (site !== null && site !== "same-origin") {
+        return true;
+    }
+    const sender = request.headers.get("Origin");
+    return sender !== null && sender !== origin;
+}
 
 function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -263,6 +305,30 @@ class RoutedRequest implements PlanetRequest {
     };
 }
 
+/** Why the router refuses a request before running its handler, or null to let it through. */
+function refusalFor(request: Request, url: URL, method: string, found: RouteMatch): string | null {
+    if (request.mode === "navigate") {
+        if (method !== "GET" && method !== "HEAD") {
+            return NAVIGATION_FORM_REFUSED;
+        }
+        if (found.kind === "none" || (found.kind === "route" && found.route.navigable)) {
+            return null;
+        }
+        return NAVIGATION_REFUSED;
+    }
+    const changesState = !READ_METHODS.has(method) || (found.kind === "route" && found.route.changesState);
+    if (!changesState) {
+        return null;
+    }
+    if (isForeign(request, url.origin)) {
+        return CROSS_ORIGIN_REFUSED;
+    }
+    if (READ_METHODS.has(method) && request.destination !== "") {
+        return NOT_SCRIPTED_REFUSED;
+    }
+    return null;
+}
+
 function toResponse(result: unknown): Response {
     if (result instanceof Response) {
         return result;
@@ -289,21 +355,36 @@ export class Router {
      *
      * @example router.route("/api/histories/{history_id}", "get", async ({ params }) => ...)
      */
-    route<P extends SchemaPathFor<M>, M extends HttpMethod>(path: P, method: M, handler: TypedHandler<P, M>): this {
-        return this.add(path, method, handler as (request: PlanetRequest) => MaybePromise<unknown>);
+    route<P extends SchemaPathFor<M>, M extends HttpMethod>(
+        path: P,
+        method: M,
+        handler: TypedHandler<P, M>,
+        options: RouteOptions = {},
+    ): this {
+        return this.add(path, method, handler as (request: PlanetRequest) => MaybePromise<unknown>, options);
     }
 
     /** Registers a handler for a path outside the schema (legacy controllers, `/context`, Planet routes). */
-    untyped(path: string, method: HttpMethod | readonly HttpMethod[], handler: UntypedHandler): this {
+    untyped(
+        path: string,
+        method: HttpMethod | readonly HttpMethod[],
+        handler: UntypedHandler,
+        options: RouteOptions = {},
+    ): this {
         for (const each of typeof method === "string" ? [method] : method) {
-            this.add(path, each, handler);
+            this.add(path, each, handler, options);
         }
         return this;
     }
 
     /** Registered routes in match order. */
     routes(): RouteInfo[] {
-        return this.ordered().map(({ method, pattern }) => ({ method, pattern }));
+        return this.ordered().map(({ method, pattern, navigable, changesState }) => ({
+            method,
+            pattern,
+            navigable,
+            changesState,
+        }));
     }
 
     /** Finds the route for a method and path. HEAD falls back to GET. */
@@ -325,9 +406,10 @@ export class Router {
             pick.route.paramNames.forEach((name, index) => {
                 params[name] = decode(pick.match[index + 1] ?? "");
             });
+            const { method: routeMethod, pattern, navigable, changesState } = pick.route;
             return {
                 kind: "route",
-                route: { method: pick.route.method, pattern: pick.route.pattern },
+                route: { method: routeMethod, pattern, navigable, changesState },
                 params,
                 handler: pick.route.handler,
             };
@@ -344,7 +426,8 @@ export class Router {
 
     /**
      * Answers a request. Unknown paths get a Galaxy 404, known paths with another method a 405, handler
-     * errors a Galaxy error envelope (500 for anything but {@link ApiError}, without details). Every
+     * errors a Galaxy error envelope (500 for anything but {@link ApiError}, without details). Navigations
+     * to routes that are not navigable, and state-changing requests from another origin, get a 403. Every
      * response carries `X-Request-ID` and `Cache-Control: no-store`; HEAD responses have no body.
      */
     async handle(request: Request, context: HandleContext = {}): Promise<Response> {
@@ -353,7 +436,10 @@ export class Router {
         let response: Response;
         try {
             const found = this.match(method, url.pathname);
-            if (found.kind === "none") {
+            const refusal = refusalFor(request, url, method, found);
+            if (refusal) {
+                response = error(403, refusal, ErrorCodes.USER_CANNOT_ACCESS_ITEM);
+            } else if (found.kind === "none") {
                 response = error(404, `No route for ${url.pathname}`, ErrorCodes.USER_OBJECT_NOT_FOUND);
             } else if (found.kind === "method-not-allowed") {
                 response = error(405, "Method Not Allowed", ErrorCodes.UNKNOWN, {}, { Allow: found.allow.join(", ") });
@@ -379,13 +465,23 @@ export class Router {
         return finalize(response);
     }
 
-    private add(path: string, method: HttpMethod, handler: (request: PlanetRequest) => MaybePromise<unknown>): this {
+    private add(
+        path: string,
+        method: HttpMethod,
+        handler: (request: PlanetRequest) => MaybePromise<unknown>,
+        options: RouteOptions,
+    ): this {
         const compiled = compile(path);
         const upper = method.toUpperCase();
         if (this.table.some((route) => route.pattern === compiled.pattern && route.method === upper)) {
             throw new Error(`Route already registered: ${upper} ${compiled.pattern}`);
         }
-        this.table.push({ ...compiled, method: upper, order: this.table.length, handler });
+        const navigable = options.navigable === true;
+        const changesState = options.changesState === true;
+        if (navigable && (upper !== "GET" || changesState)) {
+            throw new Error(`Only read-only GET routes can be navigable: ${upper} ${compiled.pattern}`);
+        }
+        this.table.push({ ...compiled, method: upper, navigable, changesState, order: this.table.length, handler });
         this.sorted = false;
         return this;
     }

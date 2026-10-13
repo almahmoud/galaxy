@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Router } from "@/planet/sw/router";
 
-import { DatatypeClass, getDatatype, queryBool, queryInt, register } from "../datatypes";
+import { DatatypeClass, getDatatype, register } from "../datatypes";
 import { fetchJson, resetPlanet, send, teardownPlanet } from "./contents.fixtures";
 import { FakeBucket, stubNetwork } from "./datasets.fixtures";
 import { DATATYPE_FILES, DETAILS, MAPPING } from "./datatypes.fixtures";
@@ -111,17 +111,5 @@ describe("datatype classes", () => {
         const unknown = await getDatatype("nonsense");
         expect(unknown.className).toBe(DatatypeClass.DATA);
         expect(unknown.details).toBeUndefined();
-    });
-});
-
-describe("query helpers", () => {
-    it("parses booleans and integers with FastAPI's rules", () => {
-        const query = new URLSearchParams("a=YES&b=off&c=12&d=-1&e=x");
-        expect(queryBool(query, "a", false)).toBe(true);
-        expect(queryBool(query, "b", true)).toBe(false);
-        expect(queryBool(query, "missing", null)).toBeNull();
-        expect(queryInt(query, "c", 0)).toBe(12);
-        expect(() => queryInt(query, "d", 0, 0)).toThrow("greater than or equal to 0");
-        expect(() => queryInt(query, "e", 0)).toThrow("valid integer");
     });
 });

@@ -17,14 +17,10 @@ import {
 } from "@/planet/db";
 import type { Router } from "@/planet/sw/router";
 import { ApiError } from "@/planet/util/errors";
+import { stringAsBool } from "@/planet/util/query";
 import { parseGalaxyTime } from "@/planet/util/time";
 
 import { HISTORY_DEV_DETAILED_KEYS, type HistoryDevDetailedView, serializeHistoryView } from "./histories";
-
-/** Galaxy's `string_as_bool`. */
-function stringAsBool(value: string | null): boolean {
-    return value !== null && ["true", "yes", "on", "1"].includes(value.toLowerCase());
-}
 
 /** Returns the current history, creating one when none is set or the stored one was purged. */
 export async function currentHistory(): Promise<HistoryRecord> {
@@ -100,6 +96,9 @@ export function resumePausedJobs(historyId: string): Promise<string[]> {
     });
 }
 
+/** These controllers change state although the client calls them with GET. */
+const CHANGES_STATE = { changesState: true };
+
 export function register(router: Router): void {
     router.untyped("/history/current_history_json", "get", async ({ query }) => {
         const history = await currentHistory();
@@ -110,28 +109,43 @@ export function register(router: Router): void {
         return historyData(history);
     });
 
-    router.untyped("/history/set_as_current", ["get", "post"], async ({ query }) => {
-        const id = query.get("id");
-        if (!id) {
-            throw ApiError.missingParameter("Missing required parameter 'id'");
-        }
-        return historyData(await histories.setCurrent(id));
-    });
+    router.untyped(
+        "/history/set_as_current",
+        ["get", "post"],
+        async ({ query }) => {
+            const id = query.get("id");
+            if (!id) {
+                throw ApiError.missingParameter("Missing required parameter 'id'");
+            }
+            return historyData(await histories.setCurrent(id));
+        },
+        CHANGES_STATE,
+    );
 
-    router.untyped("/history/create_new_current", ["get", "post"], async ({ query }) => {
-        const name = query.get("name");
-        const history = await withTransaction(["histories", "kv"], "readwrite", async (t) => {
-            const created = await histories.create({ name: name || undefined }, t);
-            return histories.setCurrent(created.id, t);
-        });
-        return historyData(history);
-    });
+    router.untyped(
+        "/history/create_new_current",
+        ["get", "post"],
+        async ({ query }) => {
+            const name = query.get("name");
+            const history = await withTransaction(["histories", "kv"], "readwrite", async (t) => {
+                const created = await histories.create({ name: name || undefined }, t);
+                return histories.setCurrent(created.id, t);
+            });
+            return historyData(history);
+        },
+        CHANGES_STATE,
+    );
 
-    router.untyped("/history/resume_paused_jobs", ["get", "post"], async ({ query }) => {
-        if (!query.get("ids") && stringAsBool(query.get("current"))) {
-            await resumePausedJobs((await currentHistory()).id);
-            return { message: "Your jobs have been resumed.", status: "success" };
-        }
-        throw ApiError.badRequest("You can currently only resume all the datasets of the current history.");
-    });
+    router.untyped(
+        "/history/resume_paused_jobs",
+        ["get", "post"],
+        async ({ query }) => {
+            if (!query.get("ids") && stringAsBool(query.get("current"))) {
+                await resumePausedJobs((await currentHistory()).id);
+                return { message: "Your jobs have been resumed.", status: "success" };
+            }
+            throw ApiError.badRequest("You can currently only resume all the datasets of the current history.");
+        },
+        CHANGES_STATE,
+    );
 }

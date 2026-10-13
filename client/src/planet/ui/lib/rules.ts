@@ -12,7 +12,8 @@ export type FieldErrors = Record<string, string>;
 export const MAX_WALLTIME_SECONDS = 7 * 24 * 3600 - 3600;
 export const MIN_WALLTIME_SECONDS = 60;
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// Only these loopback names can be allowed in a Content-Security-Policy; Chrome rejects IPv6 sources.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
 const PRINTABLE = /^[\x21-\x7e]*$/;
@@ -52,8 +53,8 @@ function urlShapeError(url: URL | null, label: string): string | null {
 }
 
 /**
- * Checks a URL the browser connects to: https://, or http:// on this computer (localhost, 127.0.0.1,
- * [::1]), since browsers block other http:// requests from an https:// page.
+ * Checks a URL the browser connects to: https://, or http:// on this computer (localhost or 127.0.0.1),
+ * since browsers block other http:// requests from an https:// page.
  */
 export function browserUrlError(value: string, label: string): string | null {
     const url = parseUrl(value);
@@ -62,7 +63,7 @@ export function browserUrlError(value: string, label: string): string | null {
         return shape;
     }
     if (url!.protocol === "http:" && !isLoopbackHost(url!.hostname)) {
-        return `${label} must use https://. Plain http:// works only for localhost, 127.0.0.1 and [::1].`;
+        return `${label} must use https://. Plain http:// works only for localhost and 127.0.0.1.`;
     }
     return null;
 }

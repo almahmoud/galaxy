@@ -22,8 +22,9 @@ import type { NewJob } from "@/planet/db/jobs";
 import type { NewDataset } from "@/planet/db/records";
 import { Router } from "@/planet/sw/router";
 import { type PlanetEvent, subscribe } from "@/planet/util/events";
+import { resetStaticData } from "@/planet/util/staticData";
 
-import { register as registerConfiguration, resetStaticData } from "../configuration";
+import { register as registerConfiguration } from "../configuration";
 import { register as registerContents } from "../contents";
 import { register as registerContext } from "../context";
 import { register as registerHistories } from "../histories";

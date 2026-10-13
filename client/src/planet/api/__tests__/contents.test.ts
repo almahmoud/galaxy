@@ -624,6 +624,36 @@ describe("DELETE /api/histories/{history_id}/contents/{type}s/{id}", () => {
     });
 });
 
+describe("PUT/DELETE /api/datasets/{dataset_id} and PUT /api/dataset_collections/{hdca_id}", () => {
+    it("deletes, undeletes and purges a dataset as the history contents routes do", async () => {
+        const historyId = await currentHistoryId();
+        const { hda, dataset } = await addDataset(historyId, { name: "a" });
+        const router = makeRouter();
+        expect((await send(router, "DELETE", `/api/datasets/${hda.id}`)).status).toBe(204);
+        expect(await hdas.getOrThrow(hda.id)).toMatchObject({ deleted: true, purged: false });
+        const restored = await fetchJson(router, "PUT", `/api/datasets/${hda.id}`, { deleted: false, name: "b" });
+        expect(restored).toMatchObject({ id: hda.id, name: "b", deleted: false });
+        expect(keysOf(restored)).toEqual(expect.arrayContaining([...DETAILED_FIXED_KEYS]));
+        expect((await send(router, "DELETE", `/api/datasets/${hda.id}?purge=true`)).status).toBe(204);
+        expect(await hdas.getOrThrow(hda.id)).toMatchObject({ deleted: true, purged: true });
+        expect(await datasets.getOrThrow(dataset.id)).toMatchObject({ purged: true });
+        expect((await send(router, "DELETE", "/api/datasets/0123456789abcdef")).status).toBe(404);
+    });
+
+    it("updates a collection", async () => {
+        const historyId = await currentHistoryId();
+        const { hda } = await addDataset(historyId);
+        const list = await addList(historyId, [hda.id]);
+        const router = makeRouter();
+        expect(await fetchJson(router, "PUT", `/api/dataset_collections/${list.id}`, { deleted: true })).toEqual({
+            deleted: true,
+        });
+        expect((await collections.getHdcaOrThrow(list.id)).deleted).toBe(true);
+        await fetchJson(router, "PUT", `/api/dataset_collections/${list.id}`, { deleted: false, visible: false });
+        expect(await collections.getHdcaOrThrow(list.id)).toMatchObject({ deleted: false, visible: false });
+    });
+});
+
 describe("PUT /api/histories/{history_id}/contents/bulk", () => {
     it("applies operations to the items matching the filters", async () => {
         const { historyId, reads, table, hidden, list } = await seed();

@@ -1,16 +1,20 @@
 /**
  * Service Worker lifecycle and fetch routing.
  *
- * - install: precaches the hashed assets listed in `/static/planet/build.json` (and `/` for offline
- *   navigations) into `planet-static-<build id>`; registers a static route sending `/static/*` to Cache
- *   Storage with network fallback where `InstallEvent.addRoutes` exists. Never calls `skipWaiting` itself.
+ * - install: precaches the assets listed in `/static/planet/build.json` (and `/` for offline navigations)
+ *   into `planet-static-<build id>`. Where `InstallEvent.addRoutes` exists, registers static routes that
+ *   send `/static/*` to Cache Storage with network fallback, taking the entry files directly under
+ *   `/static/dist/` (stable names in every build) from this build's cache. Never calls `skipWaiting` itself.
  * - activate: claims clients and deletes asset caches of older builds that no open page uses.
  * - message: `{type: "planet:build-id", build_id?}` is answered on the transferred port (or the sender)
  *   with `{type: "planet:build-id", build_id}`; pages that send their own `build_id` keep its cache alive.
  *   `{type: "planet:skip-waiting"}` activates a waiting worker.
- * - fetch: same-origin only. `/static/*` is cache-first; Galaxy server paths go to the router (unknown
- *   `/api/**` gets a Galaxy 404); other navigations go to the network, falling back to the cached `/`.
+ * - fetch: same-origin only. `/static/*` is cache-first, this build's cache before older ones; Galaxy
+ *   server paths go to the router (unknown `/api/**` gets a Galaxy 404); other navigations go to the
+ *   network, falling back to the cached `/`.
  */
+
+import { STATIC_CACHE_PREFIX, staticCacheName } from "@/planet/util/build";
 
 import type { Router } from "./router";
 import type {
@@ -36,18 +40,13 @@ export interface BuildInfo {
     assets: string[];
 }
 
-export const STATIC_CACHE_PREFIX = "planet-static-";
+export { STATIC_CACHE_PREFIX, staticCacheName };
 export const META_CACHE = "planet-meta";
 export const SHELL_PATH = "/";
 
 const META_KEY = "/__planet/state.json";
 const BUILD_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const PRECACHE_CONCURRENCY = 6;
-
-/** Name of the asset cache for a build. */
-export function staticCacheName(buildId: string): string {
-    return `${STATIC_CACHE_PREFIX}${buildId}`;
-}
 
 /** True for paths the router answers: `/context`, `/welcome`, `/api/**` and Galaxy's legacy controllers. */
 export function isRoutedPath(pathname: string): boolean {
@@ -199,12 +198,16 @@ export function installServiceWorker(scope: ServiceWorkerScopeLike, options: Wor
         }
         const URLPatternClass = (globalThis as { URLPattern?: new (init: Record<string, string>) => unknown })
             .URLPattern;
-        const urlPattern = URLPatternClass
-            ? new URLPatternClass({ pathname: "/static/*", baseURL: origin })
-            : "/static/*";
-        const rule: RouterRule = { condition: { urlPattern }, source: "cache" };
+        const pattern = (pathname: string) =>
+            URLPatternClass ? new URLPatternClass({ pathname, baseURL: origin }) : pathname;
+        const rules: RouterRule[] = [
+            { condition: { urlPattern: pattern("/static/dist/:file") }, source: { cacheName } },
+            { condition: { urlPattern: pattern("/static/*") }, source: "cache" },
+        ];
         try {
-            return event.addRoutes(rule).catch((reason) => console.warn("Planet static routes not registered", reason));
+            return event
+                .addRoutes(rules)
+                .catch((reason) => console.warn("Planet static routes not registered", reason));
         } catch (reason) {
             console.warn("Planet static routes not registered", reason);
             return Promise.resolve();
@@ -272,8 +275,14 @@ export function installServiceWorker(scope: ServiceWorkerScopeLike, options: Wor
             );
     }
 
+    /**
+     * This build's copy first: entry files keep their names across builds, and pages add `?v=<build id>`
+     * to some of them. Then any build's copy, for older pages' hashed chunks, then the network.
+     */
     async function staticResponse(request: Request): Promise<Response> {
-        const cached = await scope.caches.match(request);
+        const cached =
+            (await scope.caches.match(request, { cacheName, ignoreSearch: true })) ??
+            (await scope.caches.match(request));
         return cached ?? scope.fetch(request);
     }
 

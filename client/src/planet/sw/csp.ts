@@ -2,17 +2,22 @@
 
 export type CspDirectives = Readonly<Record<string, readonly string[]>>;
 
-/** Planet's document policy (architecture: Hosting). */
+/**
+ * Planet's document policy (architecture: Hosting). Chrome rejects IPv6 sources such as `http://[::1]:*`,
+ * so plain-http local endpoints are limited to `localhost` and `127.0.0.1`.
+ */
 export const DOCUMENT_CSP_DIRECTIVES: CspDirectives = {
     "default-src": ["'self'"],
     "script-src": ["'self'"],
     "style-src": ["'self'", "'unsafe-inline'"],
     "img-src": ["'self'", "data:", "blob:"],
-    "connect-src": ["'self'", "https:", "http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*"],
+    "font-src": ["'self'", "data:"],
+    "connect-src": ["'self'", "https:", "http://localhost:*", "http://127.0.0.1:*"],
     "frame-src": ["'self'", "blob:"],
     "worker-src": ["'self'"],
     "object-src": ["'none'"],
     "base-uri": ["'self'"],
+    "form-action": ["'self'"],
     "frame-ancestors": ["'self'"],
 };
 

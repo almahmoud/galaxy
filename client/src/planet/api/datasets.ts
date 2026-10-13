@@ -39,6 +39,7 @@ import type { PlanetRequest, Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { parseContentsFilters } from "@/planet/util/filters";
 import { escapeHtml } from "@/planet/util/html";
+import { queryBool, queryInt, stringAsBool } from "@/planet/util/query";
 import { JOB_STATES, TERMINAL_JOB_STATES } from "@/planet/util/states";
 
 import {
@@ -55,15 +56,7 @@ import {
     serializeHda,
     serializeHdca,
 } from "./contents";
-import {
-    DatatypeClass,
-    type DatatypeInfo,
-    getAllDatatypeDetails,
-    getDatatype,
-    queryBool,
-    queryInt,
-    stringAsBool,
-} from "./datatypes";
+import { DatatypeClass, type DatatypeInfo, getAllDatatypeDetails, getDatatype } from "./datatypes";
 import { genomeBuilds } from "./genomes";
 import { summarizeJobParameters } from "./jobs";
 
@@ -2109,6 +2102,9 @@ const EMPTY_PARAMETERS: JobDisplayParametersSummary = { parameters: [], has_para
 // ---------------------------------------------------------------------------------------------------------
 // Handlers
 
+/** Display, download and metadata file routes open as pages, frames and downloads. */
+const NAVIGABLE = { navigable: true };
+
 export function register(router: Router): void {
     router.route("/api/datasets", "get", async ({ query }) => passthrough(await listDatasets(query)));
     router.route("/api/datasets/{dataset_id}", "get", ({ params, query }) => showDataset(params.dataset_id, query));
@@ -2140,21 +2136,31 @@ export function register(router: Router): void {
     router.route("/api/histories/{history_id}/contents/{history_content_id}/extra_files", "get", async ({ params }) =>
         extraFilesListing(await loadDataset(params.history_content_id)),
     );
-    router.untyped("/api/datasets/{dataset_id}/extra_files/raw/{filename:path}", "get", async (request) =>
-        display(request, await loadDataset(request.params.dataset_id!), {
-            ...displayOptions(request.query, false),
-            filename: request.params.filename!,
-            raw: true,
-        }),
+    router.untyped(
+        "/api/datasets/{dataset_id}/extra_files/raw/{filename:path}",
+        "get",
+        async (request) =>
+            display(request, await loadDataset(request.params.dataset_id!), {
+                ...displayOptions(request.query, false),
+                filename: request.params.filename!,
+                raw: true,
+            }),
+        NAVIGABLE,
     );
 
     const apiDisplay = async (request: PlanetRequest, id: string) =>
         passthrough(await display(request, await loadDataset(id), displayOptions(request.query, false)));
-    router.route("/api/datasets/{history_content_id}/display", "get", (request) =>
-        apiDisplay(request, request.params.history_content_id),
+    router.route(
+        "/api/datasets/{history_content_id}/display",
+        "get",
+        (request) => apiDisplay(request, request.params.history_content_id),
+        NAVIGABLE,
     );
-    router.route("/api/histories/{history_id}/contents/{history_content_id}/display", "get", (request) =>
-        apiDisplay(request, request.params.history_content_id),
+    router.route(
+        "/api/histories/{history_id}/contents/{history_content_id}/display",
+        "get",
+        (request) => apiDisplay(request, request.params.history_content_id),
+        NAVIGABLE,
     );
 
     const apiDownload = async (request: PlanetRequest, id: string) =>
@@ -2163,45 +2169,75 @@ export function register(router: Router): void {
         );
     const apiMetadataFile = async (request: PlanetRequest, id: string) =>
         passthrough(await metadataFile(request, await loadDataset(id), request.query.get("metadata_file")));
-    router.route("/api/datasets/{history_content_id}/download", "get", (request) =>
-        apiDownload(request, request.params.history_content_id),
+    router.route(
+        "/api/datasets/{history_content_id}/download",
+        "get",
+        (request) => apiDownload(request, request.params.history_content_id),
+        NAVIGABLE,
     );
-    router.route("/api/histories/{history_id}/contents/{history_content_id}/download", "get", (request) =>
-        apiDownload(request, request.params.history_content_id),
+    router.route(
+        "/api/histories/{history_id}/contents/{history_content_id}/download",
+        "get",
+        (request) => apiDownload(request, request.params.history_content_id),
+        NAVIGABLE,
     );
 
-    router.route("/api/datasets/{history_content_id}/metadata_file", "get", (request) =>
-        apiMetadataFile(request, request.params.history_content_id),
+    router.route(
+        "/api/datasets/{history_content_id}/metadata_file",
+        "get",
+        (request) => apiMetadataFile(request, request.params.history_content_id),
+        NAVIGABLE,
     );
-    router.route("/api/histories/{history_id}/contents/{history_content_id}/metadata_file", "get", (request) =>
-        apiMetadataFile(request, request.params.history_content_id),
+    router.route(
+        "/api/histories/{history_id}/contents/{history_content_id}/metadata_file",
+        "get",
+        (request) => apiMetadataFile(request, request.params.history_content_id),
+        NAVIGABLE,
     );
 
-    router.untyped("/datasets/{dataset_id}/display", "get", async (request) =>
-        display(request, await loadDataset(request.params.dataset_id!), displayOptions(request.query, true)),
+    router.untyped(
+        "/datasets/{dataset_id}/display",
+        "get",
+        async (request) =>
+            display(request, await loadDataset(request.params.dataset_id!), displayOptions(request.query, true)),
+        NAVIGABLE,
     );
-    router.untyped("/datasets/{dataset_id}/display/{filename:path}", "get", async (request) =>
-        display(
-            request,
-            await loadDataset(request.params.dataset_id!),
-            displayOptions(request.query, true, request.params.filename!),
-        ),
+    router.untyped(
+        "/datasets/{dataset_id}/display/{filename:path}",
+        "get",
+        async (request) =>
+            display(
+                request,
+                await loadDataset(request.params.dataset_id!),
+                displayOptions(request.query, true, request.params.filename!),
+            ),
+        NAVIGABLE,
     );
-    router.untyped("/dataset/display", "get", async (request) => {
-        const id = request.query.get("dataset_id");
-        if (!id) {
-            throw ApiError.notFound("Invalid reference dataset id: None.");
-        }
-        return display(request, await loadDataset(id), displayOptions(request.query, true));
-    });
-    router.untyped("/dataset/get_metadata_file", "get", async (request) => {
-        const id = request.query.get("hda_id");
-        const name = request.query.get("metadata_name");
-        if (!id || !name) {
-            throw ApiError.badRequest("Required parameters 'hda_id' and 'metadata_name' are missing.");
-        }
-        return metadataFile(request, await loadDataset(id), name);
-    });
+    router.untyped(
+        "/dataset/display",
+        "get",
+        async (request) => {
+            const id = request.query.get("dataset_id");
+            if (!id) {
+                throw ApiError.notFound("Invalid reference dataset id: None.");
+            }
+            return display(request, await loadDataset(id), displayOptions(request.query, true));
+        },
+        NAVIGABLE,
+    );
+    router.untyped(
+        "/dataset/get_metadata_file",
+        "get",
+        async (request) => {
+            const id = request.query.get("hda_id");
+            const name = request.query.get("metadata_name");
+            if (!id || !name) {
+                throw ApiError.badRequest("Required parameters 'hda_id' and 'metadata_name' are missing.");
+            }
+            return metadataFile(request, await loadDataset(id), name);
+        },
+        NAVIGABLE,
+    );
 
     router.untyped("/dataset/get_edit", "get", async ({ query }) => {
         const id = query.get("dataset_id");

@@ -25,9 +25,9 @@ import {
 import { json, passthrough } from "@/planet/sw/responses";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
+import { queryInt } from "@/planet/util/query";
 
 import { ContentLoader, loadDatatypeInfo, normalizeTags, serializeHdcaInstance } from "./contents";
-import { queryInt } from "./datatypes";
 
 type DCESummary = components["schemas"]["DCESummary"];
 type DatasetCollectionAttributesResult = components["schemas"]["DatasetCollectionAttributesResult"];
