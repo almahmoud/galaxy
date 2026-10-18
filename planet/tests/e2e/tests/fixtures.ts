@@ -154,16 +154,19 @@ export const test = base.extend<{ health: Health }>({
     ],
 });
 
-/** Loads Galaxy and waits until the page is Service Worker controlled and the masthead shows the Planet brand. */
-export async function openGalaxy(page: Page, path = "/"): Promise<void> {
+/**
+ * Loads Galaxy and waits until the page is Service Worker controlled and the masthead shows the Planet brand.
+ * `timeout` overrides the expect timeout for each check, for loads that install the Service Worker on a busy machine.
+ */
+export async function openGalaxy(page: Page, path = "/", timeout?: number): Promise<void> {
     await page.goto(path);
-    await expectGalaxy(page);
+    await expectGalaxy(page, timeout);
 }
 
-export async function expectGalaxy(page: Page): Promise<void> {
-    await expect(page.locator("#masthead .navbar-text", { hasText: /^\s*Planet\s*$/ })).toBeVisible();
+export async function expectGalaxy(page: Page, timeout?: number): Promise<void> {
+    await expect(page.locator("#masthead .navbar-text", { hasText: /^\s*Planet\s*$/ })).toBeVisible({ timeout });
     expect(await isControlled(page)).toBe(true);
-    await expect(page.locator("#current-history-panel")).toBeVisible();
+    await expect(page.locator("#current-history-panel")).toBeVisible({ timeout });
 }
 
 export function isControlled(page: Page): Promise<boolean> {

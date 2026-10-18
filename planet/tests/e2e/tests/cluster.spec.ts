@@ -7,7 +7,7 @@ import { createHash, createHmac } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import type { Browser, FrameLocator, Locator, Page, TestInfo } from "@playwright/test";
+import type { Browser, FrameLocator, Locator, Page, Request, TestInfo } from "@playwright/test";
 
 import {
     api,
@@ -79,7 +79,18 @@ function kubeHeaders(token: string): Record<string, string> {
 async function listPlanetObjects(token: string, resource: "jobs" | "pods"): Promise<string[]> {
     const group = resource === "jobs" ? "apis/batch/v1" : "api/v1";
     const url = `${GATEWAY}/${group}/namespaces/${NAMESPACE}/${resource}?labelSelector=planet.dev%2Finstance`;
-    const response = await fetch(url, { headers: kubeHeaders(token) });
+    // A dropped port-forward connection is retried, as the leader does at its next reconcile.
+    let response: Response | undefined;
+    for (let attempt = 1; !response; attempt++) {
+        try {
+            response = await fetch(url, { headers: kubeHeaders(token) });
+        } catch (error) {
+            if (attempt === 3) {
+                throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+    }
     expect(response.status, `list ${resource}`).toBe(200);
     const body = (await response.json()) as { items: { metadata: { name: string } }[] };
     return body.items.map((item) => item.metadata.name);
@@ -317,8 +328,10 @@ async function uploadFiles(page: Page, testInfo: TestInfo, files: Record<string,
 async function waitForState(page: Page, hid: number, state: string, timeout = JOB_TIMEOUT): Promise<void> {
     const item = historyItem(page, hid);
     const settled = new RegExp(`^(ok|error|paused|failed_metadata|deferred|discarded|${state})$`);
+    // A read that fails (the item re-renders, or a busy page does not answer in time) is polled again.
+    const read = () => item.getAttribute("data-state", { timeout: 5000 }).catch(() => null);
     await expect
-        .poll(async () => ((await item.count()) ? ((await item.getAttribute("data-state")) ?? "") : ""), {
+        .poll(async () => ((await item.count()) ? ((await read()) ?? "") : ""), {
             message: `history item ${hid} settles`,
             timeout,
             intervals: [1000],
@@ -433,14 +446,34 @@ async function timed<T>(name: string, action: () => Promise<T>): Promise<T> {
     }
 }
 
+/** A request's method and URL without the query, which may hold presigned signatures. */
+function requestLabel(request: Request): string {
+    const url = new URL(request.url());
+    return `${request.method()} ${url.origin}${url.pathname}`;
+}
+
+/**
+ * Records the page's console, uncaught errors and failed requests; the returned function writes them, with the
+ * requests still unanswered at that moment, to cluster-console-<test>.log.
+ */
 function saveConsoleLog(page: Page, testInfo: TestInfo, suffix = ""): () => void {
+    const started = Date.now();
+    const stamp = () => `${((Date.now() - started) / 1000).toFixed(1)}s`;
     const lines: string[] = [];
-    page.on("console", (message) => lines.push(`[${message.type()}] ${message.text()}`));
-    page.on("pageerror", (error) => lines.push(`[pageerror] ${error.message}`));
+    const pending = new Map<Request, string>();
+    page.on("console", (message) => lines.push(`${stamp()} [${message.type()}] ${message.text()}`));
+    page.on("pageerror", (error) => lines.push(`${stamp()} [pageerror] ${error.message}`));
+    page.on("request", (request) => pending.set(request, `${stamp()} ${requestLabel(request)}`));
+    page.on("requestfinished", (request) => pending.delete(request));
+    page.on("requestfailed", (request) => {
+        pending.delete(request);
+        lines.push(`${stamp()} [requestfailed] ${requestLabel(request)}: ${request.failure()?.errorText ?? ""}`);
+    });
     return () => {
         const name = `${testInfo.workerIndex}-${testInfo.title.slice(0, 20)}${suffix}`;
         const path = resolve(outDir, `cluster-console-${name}.log`);
-        writeFileSync(path, `${lines.join("\n")}\n`);
+        const unanswered = [...pending.values()].map((label) => `[pending since] ${label}`);
+        writeFileSync(path, `${[...lines, `${stamp()} written`, ...unanswered].join("\n")}\n`);
     };
 }
 
@@ -492,7 +525,8 @@ function allowClusterErrors(health: Health): void {
 async function connect(page: Page, secrets: ClusterSecrets): Promise<void> {
     // Galaxy silences the console in production builds; the leader's warnings help diagnose failures.
     await page.addInitScript(() => window.localStorage.setItem("console-debugging-enabled", "true"));
-    await openGalaxy(page);
+    // The first load of a new browser installs the Service Worker, which competes with the cluster for the CPU.
+    await openGalaxy(page, "/", 60_000);
     await page.goto("/welcome");
 
     const cluster = page.getByRole("form", { name: "Cluster settings" });
@@ -927,9 +961,13 @@ test.describe("cluster", () => {
             }
             await page.locator('[data-description="selected content menu"] button').first().click();
             await page.locator('[data-description="auto build list"]').click();
+            // The automatic wizard skips the choice of builder and opens the list builder with both datasets.
+            const build = page.locator(".wizard-actions").getByRole("button", { name: "Build", exact: true });
+            await expect(build).toBeVisible();
+            await expect(page.getByText("Added to collection", { exact: true })).toHaveCount(2);
             await page.locator("input.collection-name").fill("two tables");
             await saveScreenshot(page, testInfo, "cluster-19-list-builder");
-            await page.locator(".wizard-actions .btn-primary").click();
+            await build.click();
             const list = await hidOf(page, /^two tables$/);
             await waitForState(page, list, "ok", 60_000);
             await expect(historyItem(page, list)).toContainText("a list with 2 tabular datasets");
@@ -1010,7 +1048,10 @@ test.describe("cluster", () => {
             expect(sortedList).toMatchObject({ job_source_type: "Job", populated_state: "ok" });
             expect(sortedList.elements.map((element) => element.element_identifier)).toEqual(["first", "second"]);
             const sortJob = sortedList.job_source_id!;
-            const { body: sortJobDetails } = await api<{ state: string; tool_id: string }>(page, `/api/jobs/${sortJob}`);
+            const { body: sortJobDetails } = await api<{ state: string; tool_id: string }>(
+                page,
+                `/api/jobs/${sortJob}`,
+            );
             expect(sortJobDetails).toMatchObject({ state: "ok", tool_id: SORT_COLLECTION });
             expect(pods.current().map((pod) => pod.pod)).not.toContainEqual(expect.stringContaining(sortJob));
             await expect(historyItem(page, sorted)).toContainText("a list with 2 tabular datasets");
@@ -1043,7 +1084,7 @@ test.describe("cluster", () => {
             await tools.getByRole("button", { name: "Search", exact: true }).click();
             const hit = tools.locator("li.pw-result", {
                 has: overview.locator(".pw-result__title", {
-                    hasText: new RegExp(`${INSTALL_OWNER} /\\s*${INSTALL_REPOSITORY}$`),
+                    hasText: new RegExp(`^\\s*${INSTALL_OWNER} /\\s*${INSTALL_REPOSITORY}\\s*$`),
                 }),
             });
             await expect(hit).toBeVisible({ timeout: 60_000 });
@@ -1126,6 +1167,8 @@ test.describe("cluster", () => {
         allowBackupErrors(health);
         const secrets = readSecrets();
         const writeConsole = saveConsoleLog(page, testInfo);
+        const pods = new PodTimeline(secrets.token);
+        pods.start();
         try {
             await connect(page, secrets);
             await openGalaxy(page);
@@ -1180,6 +1223,7 @@ test.describe("cluster", () => {
             await restoreElsewhere(browser, testInfo, secrets, { instanceId, historyName });
         } finally {
             writeConsole();
+            await saveTimings(testInfo, await pods.stop());
         }
     });
 });
