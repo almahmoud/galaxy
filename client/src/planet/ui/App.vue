@@ -12,11 +12,13 @@ import { type CardState, firstProblem } from "./lib/display";
 import { RUNNER_STATES, runnerView } from "./lib/runner";
 import { useServices } from "./lib/services";
 
+import BackupSection from "./components/BackupSection.vue";
 import ClusterSetup from "./components/ClusterSetup.vue";
 import PlanetMark from "./components/PlanetMark.vue";
 import SetupSection from "./components/SetupSection.vue";
 import StatusCard from "./components/StatusCard.vue";
 import StorageSetup from "./components/StorageSetup.vue";
+import ToolsSection from "./components/ToolsSection.vue";
 
 defineOptions({ compatConfig: { MODE: 3 } });
 
@@ -359,6 +361,10 @@ onBeforeUnmount(() => {
                     @saved="onSaved('storage', $event)"
                     @tested="onTested('storage', $event)" />
             </SetupSection>
+            <BackupSection :step="3" :storage-configured="status?.configured.storage ?? false" />
+            <ToolsSection
+                id="pw-tools"
+                :can-install="Boolean(status?.configured.cluster && status?.configured.storage)" />
         </div>
 
         <footer class="pw-footer">

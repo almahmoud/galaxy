@@ -84,7 +84,8 @@ function fieldErrorsOf(value: unknown): FieldErrors {
     );
 }
 
-async function call<T>(method: "GET" | "PUT" | "POST", path: string, body?: unknown): Promise<T> {
+/** Calls a Planet endpoint and returns its JSON answer; failures become a {@link PlanetApiError}. */
+export async function call<T>(method: "GET" | "PUT" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
     let response: Response;
     try {
         response = await fetch(path, {

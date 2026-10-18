@@ -1,5 +1,6 @@
 import type { Router } from "@/planet/sw/router";
 
+import { register as registerBackup } from "./backup";
 import { register as registerCollections } from "./collections";
 import { register as registerConfiguration } from "./configuration";
 import { register as registerContents } from "./contents";
@@ -13,6 +14,7 @@ import { register as registerLegacyHistory } from "./legacyHistory";
 import { register as registerPlanet } from "./planet";
 import { register as registerStubs } from "./stubs";
 import { register as registerTools } from "./tools";
+import { register as registerToolShed } from "./toolshed";
 import { register as registerUploads } from "./uploads";
 import { register as registerUsers } from "./users";
 
@@ -29,8 +31,10 @@ export function registerAll(router: Router): void {
     registerDatatypes(router);
     registerGenomes(router);
     registerTools(router);
+    registerToolShed(router);
     registerUploads(router);
     registerJobs(router);
     registerStubs(router);
     registerPlanet(router);
+    registerBackup(router);
 }

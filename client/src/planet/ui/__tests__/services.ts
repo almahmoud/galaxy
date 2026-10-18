@@ -6,9 +6,13 @@ import type { SettingsUpdate } from "@/planet/db/settings";
 import type { PlanetSettings } from "@/planet/db/types";
 
 import type { LeaderStatus, PlanetStatus } from "../lib/api";
+import { BACKUP_SERVICES } from "../lib/backup";
 import type { CheckReport } from "../lib/checks";
 import { SERVICES, type SetupServices } from "../lib/services";
+import { TOOL_SERVICES } from "../lib/tools";
+import { fakeBackupServices } from "./backup";
 import { fakeKube, fakeS3, settingsFixture } from "./fakes";
+import { fakeToolServices } from "./tools";
 
 export const PINNED_RUNTIME = `ghcr.io/almahmoud/planet-runtime@sha256:${"ab".repeat(32)}`;
 
@@ -89,5 +93,20 @@ export function testServices(initial: PlanetSettings = settingsFixture(), overri
         s3Client: s3.factory,
         ...overrides,
     };
-    return { services, kube, s3, provide: { [SERVICES as symbol]: services } };
+    const backup = fakeBackupServices({
+        storageConfigured: Boolean(initial.storage.endpoint && initial.storage.has_secret),
+    });
+    const tools = fakeToolServices();
+    return {
+        services,
+        kube,
+        s3,
+        backup,
+        tools,
+        provide: {
+            [SERVICES as symbol]: services,
+            [BACKUP_SERVICES as symbol]: backup.services,
+            [TOOL_SERVICES as symbol]: tools.services,
+        },
+    };
 }
