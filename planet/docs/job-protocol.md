@@ -27,6 +27,7 @@ the pod of an earlier attempt reads or writes.
 | `datasets/<uuid>/meta/<n>` | pod | Metadata files such as `bam_index`. |
 | `datasets/<uuid>/extra.tar`, `extra.json` | pod | Extra files as an uncompressed tar and its index. |
 | `datasets/<uuid>/extra/<n>` | pod | Optional copy of each extra file as its own object. |
+| `tools/installs/<job>-a<n>/<slot>/bundle.json`, `repo.tar` | install pod | Bundle and directory archive of an installed tool. |
 
 Jobs dispatched before attempts had their own prefix kept these objects
 directly under `jobs/<job>/`; the browser still reads them there when it
@@ -61,11 +62,11 @@ without `prepare.json`; the browser then creates a new attempt with a new URL.
 | `tool` | the tool's image | `/bin/sh /planet/bin/run-tool` |
 | `stage-out` | planet-runtime | `planet-stager out` |
 
-Upload and set-metadata jobs use one container running `planet-stager upload`
-or `planet-stager set-metadata`.
+Upload, set-metadata and tool installation jobs use one container running
+`planet-stager upload`, `planet-stager set-metadata` or `planet-stager install`.
 
 `PLANET_MANIFEST_URL` (the presigned GET of the manifest) goes to stage-in
-and to the container of upload and set-metadata jobs only; stage-out and the
+and to the container of upload, set-metadata and tool installation jobs only; stage-out and the
 tool container must not receive it. The URL is part of the Job and Pod specs,
 so until it expires anyone who can get or list pods or jobs in the namespace,
 read etcd or read audit logs at the `RequestResponse` level can read it, and
@@ -262,6 +263,74 @@ targets) take slots.
 overwrite}`: the input is re-typed (`ext`) or sniffed (`detect`), then its
 metadata and peek are set and written to the output's `meta` and
 `metadata_files` targets; data is not re-uploaded.
+
+`install` (kind `tool_install`) is described under Tool installation.
+
+## Tool installation
+
+A `tool_install` job installs the tools of one repository revision. Its pod
+reads the repository, parses every tool with Galaxy's parser and the bundle
+generator, and stores a bundle and an archive per tool it can run. The browser
+never reads the repository or its tool XML.
+
+```json
+"install": {
+  "source": {"type": "toolshed", "tool_shed_url": "https://toolshed.g2.bx.psu.edu", "owner": "iuc", "name": "datamash_ops", "changeset_revision": "aaafc0ac4dd2"},
+  "panel_section": {"id": "planet_installed", "name": "Installed tools"},
+  "slots": [{"bundle": {"key": "tools/installs/<job>-a1/0/bundle.json", "request": {...}}, "repo_tar": {"key": "tools/installs/<job>-a1/0/repo.tar", "request": {...}}}]
+}
+```
+
+`source` is a Tool Shed changeset (`changeset_revision`, 12 to 40 hexadecimal
+digits) or a GitHub commit, `{"type": "github", "repository": "<owner>/<name>",
+"ref": <40-digit commit SHA>, "path": <directory, "" for the root>}`.
+`slots` are used in order, one per installed tool; the key of `repo_tar` is
+written into the bundle as `source.repo_tar.path`. `job_files` only needs
+`results`.
+
+The stager:
+
+1. Fetches the repository. A Tool Shed changeset is cloned with
+   `hg clone --noupdate --rev <changeset> <tool shed>/repos/<owner>/<name>`, with
+   an empty `HGRCPATH`, subrepositories disabled and no manifest URL in the
+   environment; the checked-out changeset must start with the requested one, and
+   `hg archive` writes its files. A GitHub commit is read from
+   `https://codeload.github.com/<repository>/tar.gz/<ref>`, whose pax header
+   must name the commit. Clones are tried three times, downloads retried like
+   other transfers.
+2. Extracts the files with the `data` filter of `tarfile`, without `test-data`,
+   `.hg`, `.git` and `.hg_archival.txt`, special files or links the filter
+   refuses, and refuses more than 1 GiB or 100,000 files.
+3. Runs a child process that gets no presigned request and an environment
+   without `PLANET_MANIFEST_URL`. It finds every tool XML file below the
+   repository root or `path` in path order, expands macros (imports must stay
+   inside the repository) and builds each bundle with the generator. Ids are
+   `<tool shed host>/repos/<owner>/<name>/<tool id>/<version>` or
+   `github.com/repos/<owner>/<repository>/<tool id>/<version>`. A tool's archive
+   is the tar of its directory without `test-data`, with links that lead outside
+   the repository left out.
+4. Refuses tools Planet cannot run: tool types other than ordinary tools (data
+   managers, data sources, interactive tools), tools with `<code>` files or
+   `dynamic_options`, and templates that use `$__app__`. A tool without a
+   container is not refused; its image is resolved from its requirements when
+   it runs.
+5. Uploads each tool's `repo.tar`, then its `bundle.json`, to the next slot, and
+   writes `results.json`.
+
+Besides the common fields, `results.json` holds `install` (`source`,
+`repository_url`, the full `revision` and `warnings`) and `tools`, one entry
+per tool file: `path`, `id`, `old_id`, `version`, `name`, `description`,
+`state` (`installed`, `rejected` or `failed`), `slot`, `bundle` and `repo_tar`
+(`sha256` and `size` of the uploaded objects), `errors` and `warnings`. `state`
+is `ok` when at least one tool was installed. `job_stdout` lists the outcome of
+each tool and `job_messages` the reasons a tool was not installed.
+
+At ingest the browser stores an installed tool only when the bundle in its slot
+matches the reported digest and size, its id starts with the source's prefix,
+its `source.repo_tar` names the slot's archive with the reported digest and the
+archive has that size; other tools are reported as `failed`. Tool jobs of
+installed tools read the archive from that key, and stage-in checks its
+SHA-256. Uninstalling a tool keeps its objects.
 
 ## prepare.json
 

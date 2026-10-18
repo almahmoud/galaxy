@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:planet:job-protocol:1:manifest",
   "title": "Planet job manifest",
-  "description": "Everything a job pod needs, written by the browser. Stage-in, or the single stager container of upload and set_metadata jobs, reads it once through PLANET_MANIFEST_URL, a presigned GET whose expiry covers scheduling (default 24 h, at most activeDeadlineSeconds); stage-out reads the copy stage-in keeps on the stager volume. Presigned requests appear only at the places of #/$defs/request below. See planet/docs/job-protocol.md.",
+  "description": "Everything a job pod needs, written by the browser. Stage-in, or the single stager container of upload, set_metadata and tool_install jobs, reads it once through PLANET_MANIFEST_URL, a presigned GET whose expiry covers scheduling (default 24 h, at most activeDeadlineSeconds); stage-out reads the copy stage-in keeps on the stager volume. Presigned requests appear only at the places of #/$defs/request below. See planet/docs/job-protocol.md.",
   "type": "object",
   "required": [
     "protocol",
@@ -211,6 +211,113 @@
           }
         }
       }
+    },
+    "install": {
+      "type": "object",
+      "description": "kind tool_install: the repository to install tools from and where their files go.",
+      "required": [
+        "source",
+        "slots"
+      ],
+      "properties": {
+        "source": {
+          "description": "A Tool Shed changeset (cloned with hg) or a GitHub commit (its codeload tarball).",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "tool_shed_url",
+                "owner",
+                "name",
+                "changeset_revision"
+              ],
+              "properties": {
+                "type": {
+                  "const": "toolshed"
+                },
+                "tool_shed_url": {
+                  "type": "string",
+                  "pattern": "^https://[^/?#@:]+/?$"
+                },
+                "owner": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+                },
+                "changeset_revision": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{12,40}$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "repository",
+                "ref"
+              ],
+              "properties": {
+                "type": {
+                  "const": "github"
+                },
+                "repository": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+                },
+                "ref": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$",
+                  "description": "Commit SHA."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Directory inside the repository to look for tools in; the root when empty."
+                }
+              }
+            }
+          ]
+        },
+        "panel_section": {
+          "type": "object",
+          "description": "Tool panel section of the installed tools' panel entries.",
+          "required": [
+            "id",
+            "name"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "slots": {
+          "type": "array",
+          "description": "Destinations of installed tools, used in order: each tool's bundle.json and repo.tar. The key of repo_tar becomes the bundle's source.repo_tar.path.",
+          "items": {
+            "type": "object",
+            "required": [
+              "bundle",
+              "repo_tar"
+            ],
+            "properties": {
+              "bundle": {
+                "$ref": "#/$defs/keyed_request"
+              },
+              "repo_tar": {
+                "$ref": "#/$defs/keyed_request"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "allOf": [
@@ -262,6 +369,21 @@
           "job_files"
         ]
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "tool_install"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "install",
+          "job_files"
+        ]
+      }
     }
   ],
   "$defs": {
@@ -291,6 +413,23 @@
           "additionalProperties": false
         }
       ]
+    },
+    "keyed_request": {
+      "type": "object",
+      "description": "A presigned request and the object key it writes, relative to the bucket prefix.",
+      "required": [
+        "key",
+        "request"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        }
+      }
     },
     "job": {
       "type": "object",

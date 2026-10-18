@@ -1,0 +1,10 @@
+<tool id="app_demo" name="Uses the app" version="1.0" profile="23.0">
+    <requirements>
+        <requirement type="package" version="9.5">coreutils</requirement>
+    </requirements>
+    <command>cat '$__app__.config.tool_data_path/x' > '$output'</command>
+    <inputs/>
+    <outputs>
+        <data name="output" format="txt"/>
+    </outputs>
+</tool>

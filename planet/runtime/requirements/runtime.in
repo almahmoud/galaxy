@@ -11,3 +11,5 @@ galaxy-data @ file:///galaxy/packages/data
 galaxy-job-execution @ file:///galaxy/packages/job_execution
 # Galaxy's pin (lib/galaxy/dependencies/pinned-requirements.txt).
 edam-ontology==1.25.3
+# planet-stager install clones Tool Shed repositories with hg.
+mercurial==7.2.4

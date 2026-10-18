@@ -27,8 +27,9 @@ COMMANDS = {
     "out": ("planet_runtime.stage_out", "Wait for the tool, finish the job and upload results."),
     "upload": ("planet_runtime.upload", "Fetch uploaded data with Galaxy's data fetch and finish it."),
     "set-metadata": ("planet_runtime.set_metadata", "Set metadata of existing datasets."),
+    "install": ("planet_runtime.install", "Install the tools of a Tool Shed or GitHub repository."),
 }
-RETRY_SECONDS = {"in": 600.0, "out": 1800.0, "upload": 1800.0, "set-metadata": 1800.0}
+RETRY_SECONDS = {"in": 600.0, "out": 1800.0, "upload": 1800.0, "set-metadata": 1800.0, "install": 600.0}
 
 
 def configure_logging(level: str) -> None:

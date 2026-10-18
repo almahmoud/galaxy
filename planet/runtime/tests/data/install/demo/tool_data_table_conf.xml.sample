@@ -1,0 +1,6 @@
+<tables>
+    <table name="demo_genomes" comment_char="#">
+        <columns>value, name, path</columns>
+        <file path="tool-data/demo_genomes.loc"/>
+    </table>
+</tables>

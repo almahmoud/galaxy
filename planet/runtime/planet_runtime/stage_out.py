@@ -20,13 +20,16 @@ from datetime import (
 from pathlib import Path
 from typing import Any
 
-from galaxy.tool_util.parser.stdio import StdioErrorLevel
 from galaxy.util import shrink_and_unicodify
 
 from planet_runtime import (
     manifest as manifest_module,
-    PROTOCOL_VERSION,
     termination,
+)
+from planet_runtime.documents import (
+    base_results,
+    internal_message,
+    publish_results,
 )
 from planet_runtime.finishing import (
     FinishResult,
@@ -224,35 +227,6 @@ def upload_stream(transfers: Transfers, target: PresignedRequest | None, path: P
         transfers.put_bytes(target, b"", content_type="text/plain; charset=utf-8")
 
 
-def base_results(manifest: Mapping[str, Any], kind: str, state: str) -> dict[str, Any]:
-    empty_stream = {"text": "", "size": 0}
-    return {
-        "protocol": PROTOCOL_VERSION,
-        "kind": kind,
-        "job_id": manifest["job"]["id"],
-        "attempt": manifest["job"].get("attempt", 1),
-        "state": state,
-        "exit_code": None,
-        "termination": "normal",
-        "command_line": None,
-        "command_version": None,
-        "job_messages": [],
-        "tool_stdout": dict(empty_stream),
-        "tool_stderr": dict(empty_stream),
-        "job_stdout": dict(empty_stream),
-        "job_stderr": dict(empty_stream),
-        "filtered_outputs": [],
-        "outputs": {},
-        "discovered": [],
-        "output_collections": {},
-        "errors": [],
-    }
-
-
-def internal_message(description: str) -> dict[str, Any]:
-    return {"type": "internal", "desc": description, "code_desc": None, "error_level": StdioErrorLevel.FATAL}
-
-
 def read_state(layout: Layout) -> dict[str, Any]:
     """Load stage-in's state and remove it, so no request is left on disk while the tool's files are read."""
     with open(layout.state_file, "rb") as fh:
@@ -359,15 +333,3 @@ def run(layout: Layout, transfers: Transfers) -> int:
         }
     )
     return 0 if ok and uploaded else 1
-
-
-def publish_results(transfers: Transfers, manifest: Mapping[str, Any], results: Mapping[str, Any]) -> bool:
-    target = manifest_module.job_file(manifest, "results")
-    if target is None:
-        return True
-    try:
-        transfers.put_bytes(target, json.dumps(results, default=str).encode(), content_type="application/json")
-        return True
-    except TransferError as e:
-        log.error("Uploading results.json failed: %s", e)
-        return False

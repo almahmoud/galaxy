@@ -82,6 +82,42 @@
     },
     "errors": { "type": "array", "items": { "type": "string" } },
     "traceback": { "type": "string" },
+    "install": {
+      "type": "object",
+      "description": "kind tool_install: the repository that was read.",
+      "required": ["source", "repository_url", "revision", "warnings"],
+      "properties": {
+        "source": { "type": "object", "description": "install.source of the manifest, normalized." },
+        "repository_url": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"], "description": "Full changeset id or commit SHA." },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "kind tool_install: every tool file of the repository, in path order.",
+      "items": {
+        "type": "object",
+        "required": ["path", "id", "old_id", "version", "name", "description", "state", "slot", "bundle", "repo_tar", "errors", "warnings"],
+        "properties": {
+          "path": { "type": "string", "description": "The tool file, relative to the repository root." },
+          "id": { "type": ["string", "null"], "description": "Tool id: <tool shed>/repos/<owner>/<name>/<id>/<version> or github.com/repos/<owner>/<repository>/<id>/<version>." },
+          "old_id": { "type": ["string", "null"] },
+          "version": { "type": ["string", "null"] },
+          "name": { "type": ["string", "null"] },
+          "description": { "type": ["string", "null"] },
+          "state": {
+            "enum": ["installed", "rejected", "failed"],
+            "description": "installed: its files are in its slot; rejected: Planet cannot run it (errors say why); failed: it could not be read or stored."
+          },
+          "slot": { "type": ["integer", "null"], "minimum": 0, "description": "Index in install.slots of an installed tool." },
+          "bundle": { "$ref": "#/$defs/object_digest" },
+          "repo_tar": { "$ref": "#/$defs/object_digest" },
+          "errors": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
     "timings": {
       "type": "object",
       "properties": {
@@ -93,6 +129,19 @@
     }
   },
   "$defs": {
+    "object_digest": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["sha256", "size"],
+          "properties": {
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "size": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
     "stream": {
       "type": "object",
       "required": ["text", "size"],

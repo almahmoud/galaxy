@@ -1,0 +1,21 @@
+<tool id="concat_demo" name="Concatenate" version="@TOOL_VERSION@+galaxy@VERSION_SUFFIX@" profile="23.0">
+    <description>two datasets</description>
+    <macros>
+        <import>macros.xml</import>
+    </macros>
+    <expand macro="requirements"/>
+    <command><![CDATA[
+        sh '$__tool_directory__/concat.sh' '$first' '$second' > '$output'
+    ]]></command>
+    <inputs>
+        <param name="first" type="data" format="txt" label="First"/>
+        <param name="second" type="data" format="txt" label="Second"/>
+        <param name="genome" type="select" label="Genome">
+            <options from_data_table="demo_genomes"/>
+        </param>
+    </inputs>
+    <outputs>
+        <data name="output" format_source="first"/>
+    </outputs>
+    <help>Concatenates two datasets.</help>
+</tool>

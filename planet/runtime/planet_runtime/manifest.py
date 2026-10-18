@@ -61,6 +61,10 @@ def check(manifest: Any, kind: str | None = None) -> None:
         tool = manifest.get("tool")
         if not isinstance(tool, Mapping) or not tool.get("id"):
             raise ManifestError("Manifest of kind 'tool' requires tool.id")
+    if manifest["kind"] == "tool_install":
+        install = manifest.get("install")
+        if not isinstance(install, Mapping) or not isinstance(install.get("source"), Mapping):
+            raise ManifestError("Manifest of kind 'tool_install' requires install.source")
     for record in manifest.get("outputs") or []:
         if not record.get("name"):
             raise ManifestError("Every output requires a name")
@@ -130,6 +134,8 @@ REQUEST_PATHS: tuple[tuple[str, ...], ...] = (
     *(("outputs", "*", *path) for path in _TARGET_REQUESTS),
     *(("slots", "*", *path) for path in _TARGET_REQUESTS),
     ("upload", "files", "*", "request"),
+    ("install", "slots", "*", "bundle", "request"),
+    ("install", "slots", "*", "repo_tar", "request"),
 )
 # Sections tool-author code has no use for.
 _NOT_FOR_TEMPLATES = ("job_files", "slots")

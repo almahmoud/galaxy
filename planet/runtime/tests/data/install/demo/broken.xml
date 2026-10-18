@@ -1,0 +1,5 @@
+<tool id="broken_demo" name="Broken" version="1.0" profile="99.0">
+    <command>true</command>
+    <inputs/>
+    <outputs/>
+</tool>

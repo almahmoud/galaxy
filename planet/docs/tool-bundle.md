@@ -73,6 +73,23 @@ Add an entry to a section of `toolbox.yml`:
 Raising `commit` updates every repository tool. Downloads are checked against the git
 object ids of that commit and cached in `planet/build/cache/github/`.
 
+### Installed tools
+
+Tools installed from the Tool Shed or a GitHub commit get their bundles from a
+`tool_install` job ([job-protocol.md](job-protocol.md#tool-installation)): the install pod
+runs the same generator and stores each bundle and archive in the bucket, under
+`tools/installs/<job>-a<attempt>/<slot>/`. Their bundles differ from built-in ones in:
+
+| Field | Installed tools |
+| --- | --- |
+| `id` | `<tool shed host>/repos/<owner>/<name>/<tool id>/<version>`, or `github.com/repos/<owner>/<repository>/<tool id>/<version>` |
+| `tool_shed_repository` | `{name, owner, changeset_revision, tool_shed}` of a Tool Shed source; null for GitHub |
+| `source` | `repository` (the Tool Shed repository or GitHub URL), `commit` (full changeset id or commit SHA), `path`, `tool_file`, and `repo_tar` whose `path` is the archive's bucket key |
+| `panel_entry` | Always set, in the section `planet_installed` ("Installed tools") |
+
+The browser keeps them in the `tools` store of IndexedDB (`source: "installed"`), where
+the toolbox endpoints and the job dispatcher read them.
+
 ## Contents
 
 Values mirror what `galaxy.tools.Tool` and its parameter classes hold after parsing.
@@ -104,7 +121,7 @@ Values mirror what `galaxy.tools.Tool` and its parameter classes hold after pars
 | `parameter_models` | Galaxy's typed parameter models, or null when the tool cannot be modelled |
 | `data_tables` | Tables from the directory's `tool_data_table_conf.xml.sample`, with `.loc.sample` rows |
 | `tool_dir`, `tool_shed_repository`, `source` | Where the tool came from; `source.repo_tar` has the archive path, SHA-256 and size |
-| `panel_entry` | `GET /api/tools/{id}` payload; set for built-in toolbox tools |
+| `panel_entry` | `GET /api/tools/{id}` payload; set for built-in and installed tools |
 
 `help.html` keeps Galaxy's `${static_path}` and `${host_url}` placeholders; replace them
 with `/static` and the site origin followed by `/` before serving, as `Tool.render_help`
@@ -128,10 +145,11 @@ form, and every selectable test value without a `<when>` gets a case with no inp
 A conditional with `value_from` (`<object>:<attribute path>`, a Python callable Galaxy
 calls when it loads the tool) has `test_param` null; its test parameter is the preceding
 input named by `value_ref`. The generator computes the cases of
-`self:app.datatypes_registry.*` references, such as the upload tool's
+`self:app.datatypes_registry.get_upload_metadata_params`, the upload tool's
 `files_metadata` (one case per datatype, with a text parameter for each metadata element
-set on upload), with the datatype registry of the image, in Galaxy's order. Other
-references need a running Galaxy application, so their `cases` are empty.
+set on upload), with the datatype registry of the image, in Galaxy's order. It calls no
+other reference, since those need a running Galaxy application, so their `cases` are
+empty.
 
 Every parameter has `model_class`, `type`, `name`, `argument`, `label`, `help`,
 `help_format`, `hidden`, `refresh_on_change`, `optional`, `is_dynamic`, `sanitizer`,

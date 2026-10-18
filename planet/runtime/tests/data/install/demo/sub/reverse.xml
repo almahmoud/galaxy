@@ -1,0 +1,15 @@
+<tool id="reverse_demo" name="Reverse lines" version="2.1" profile="23.0">
+    <macros>
+        <import>../macros.xml</import>
+    </macros>
+    <requirements>
+        <container type="docker">busybox:1.37</container>
+    </requirements>
+    <command>tac '$input' > '$output'</command>
+    <inputs>
+        <param name="input" type="data" format="txt" label="Input"/>
+    </inputs>
+    <outputs>
+        <data name="output" format="txt"/>
+    </outputs>
+</tool>

@@ -50,6 +50,14 @@ RUN set -eu; cd /galaxy; \
         lib/galaxy/managers/__init__.py \
         lib/galaxy/managers/datatypes.py \
         lib/galaxy/managers/dbkeys.py \
+        lib/galaxy/tools/model_operation_macros.xml \
+        lib/galaxy/tools/zip_collection.xml \
+        lib/galaxy/tools/unzip_collection.xml \
+        lib/galaxy/tools/flatten_collection.xml \
+        lib/galaxy/tools/filter_failed_collection_1.1.0.xml \
+        lib/galaxy/tools/filter_empty_collection_1.1.0.xml \
+        lib/galaxy/tools/keep_success_collection_1.1.0.xml \
+        lib/galaxy/tools/sort_collection_list.xml \
         tool-data/shared/ucsc/builds.txt.sample; \
     do install -D -m 0644 "$path" "/opt/planet/galaxy/$path"; done; \
     cp -R tools /opt/planet/galaxy/tools; \
@@ -102,7 +110,9 @@ import pysam, h5py; \
 from galaxy.datatypes import sniff; sniff.guess_ext('/etc/hostname', []); \
 from galaxy.metadata.set_metadata import set_metadata; \
 from planet_runtime import galaxy_env; galaxy_env.install(); galaxy_env.data_fetch(); galaxy_env.registry(); \
+from planet_runtime import install, install_worker; \
 from planet_runtime.generate import datatypes, genomes, toolbox; datatypes.load_registry()" \
+    && HGRCPATH= hg version --quiet \
     && rm -rf /tmp/planet-build-cache \
     && mkdir -p /etc/planet \
     && python -c "from importlib.metadata import distributions; print('\n'.join(sorted(d.metadata['Name'] + '==' + d.version for d in distributions())))" > /etc/planet/requirements.txt

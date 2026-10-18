@@ -1,0 +1,10 @@
+<tool id="coded_demo" name="Coded" version="1.0" profile="23.0">
+    <code file="hooks.py"/>
+    <command>cat '$input' > '$output'</command>
+    <inputs>
+        <param name="input" type="data" format="txt" label="Input"/>
+    </inputs>
+    <outputs>
+        <data name="output" format="txt"/>
+    </outputs>
+</tool>

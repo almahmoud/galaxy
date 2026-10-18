@@ -1,0 +1,9 @@
+<tool id="fetch_demo" name="Fetch genomes" version="0.1" tool_type="manage_data" profile="23.0">
+    <command>echo '{}' > '$out_file'</command>
+    <inputs>
+        <param name="dbkey" type="text" label="DBKEY"/>
+    </inputs>
+    <outputs>
+        <data name="out_file" format="data_manager_json"/>
+    </outputs>
+</tool>

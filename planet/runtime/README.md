@@ -10,6 +10,7 @@ planet-stager in             # stage-in init container of a tool job
 planet-stager out            # stage-out container of a tool job
 planet-stager upload         # Galaxy data fetch and finishing of uploads
 planet-stager set-metadata   # Galaxy __SET_METADATA__ jobs
+planet-stager install        # install the tools of a Tool Shed or GitHub repository
 planet-stager wait           # wait for the tool container and print how it ended
 ```
 
@@ -29,6 +30,7 @@ Multi-architecture images are built with
 `galaxy/tools/wrappers.py`, `data_fetch.py`, `parameters/sanitize.py`,
 `parameters/validation.py`, `parameters/wrapped_json.py`, the job script templates,
 `datatypes_conf.xml.sample`, `galaxy/managers/datatypes.py` and `dbkeys.py`
+and the collection operation tools the Service Worker carries out (`galaxy/tools/*_collection*.xml`)
 under `lib/`, Galaxy's `tools/` and `tool-data/shared/ucsc/builds.txt.sample`.
 
 Every module the stagers import, the standard library included, is compiled at
@@ -69,7 +71,9 @@ planet/runtime/tests/integration/run-tool.sh planet-runtime:dev
 ```
 
 The pytest suite runs inside the image and covers the stager (`tests/`) and the
-generators (`tests/generate/`); the test stage adds Galaxy's
+generators (`tests/generate/`), without network access; `docker run --rm -e
+PLANET_NETWORK_TESTS=1 planet-runtime:test` adds a tool installation from the main
+Tool Shed; the test stage adds Galaxy's
 `test/functional/tools` and the bundle schema to the Galaxy root. `run-tool.sh`
 runs the tool wrapper as PID 1 of a busybox container next to a waiting
 stage-out container, covering normal and failing exits, the walltime and a

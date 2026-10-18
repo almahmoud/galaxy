@@ -1,0 +1,9 @@
+<macros>
+    <token name="@TOOL_VERSION@">1.0</token>
+    <token name="@VERSION_SUFFIX@">0</token>
+    <xml name="requirements">
+        <requirements>
+            <requirement type="package" version="9.5">coreutils</requirement>
+        </requirements>
+    </xml>
+</macros>
