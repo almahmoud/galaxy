@@ -40,7 +40,8 @@ planet_dir="$repo_root/planet"
 out_dir="$planet_dir/build/e2e"
 
 if [ "$build" = 1 ] || [ ! -f "$planet_dir/dist/index.html" ]; then
-    node "$planet_dir/scripts/build-site.mjs"
+    # The kind cluster runs the node-local planet-runtime:dev, which has no digest.
+    PLANET_ALLOW_UNPINNED_RUNTIME="${PLANET_ALLOW_UNPINNED_RUNTIME:-1}" node "$planet_dir/scripts/build-site.mjs"
 fi
 
 mkdir -p "$out_dir"

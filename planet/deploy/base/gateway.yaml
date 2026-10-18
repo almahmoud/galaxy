@@ -43,16 +43,19 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8090
+          # The default 1 s timeout restarted nginx, and cut every watch, on a busy node.
           readinessProbe:
             httpGet:
               path: /healthz
               port: health
             periodSeconds: 10
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: health
             periodSeconds: 20
+            timeoutSeconds: 5
             failureThreshold: 3
           resources:
             requests:
