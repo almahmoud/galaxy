@@ -26,13 +26,19 @@ export interface DatasetItem {
     readonly uuid: string;
     readonly fileSize: number | null;
     readonly totalSize: number | null;
+    /** The element identifier of a dataset a tool run maps over (`element_identifier` set by `expand_meta_parameters`). */
+    readonly elementIdentifier?: string;
 }
 
-/** A collection element: a dataset or a nested collection. */
+/** A collection element (`DatasetCollectionElement`): a dataset or a nested collection. */
 export interface CollectionElementItem {
+    /** The element's id. */
+    readonly id: string;
     readonly identifier: string;
     readonly dataset: DatasetItem | null;
     readonly collection: CollectionContent | null;
+    /** Sample sheet row values. */
+    readonly columns: unknown[] | null;
 }
 
 /** Galaxy's `DatasetCollection` with its elements. */
@@ -46,11 +52,16 @@ export interface CollectionContent {
     readonly fields: unknown[] | null;
 }
 
-/** An HDCA. */
+/**
+ * An HDCA, or a collection element holding a nested collection (`src` `dce`), which tool parameters take where Galaxy
+ * maps a tool over subcollections.
+ */
 export interface CollectionItem {
-    readonly src: "hdca";
+    readonly src: "hdca" | "dce";
     readonly id: string;
+    /** The HDCA's hid; 0 for a collection element, which has none. */
     readonly hid: number;
+    /** The HDCA's name, or the element's identifier. */
     readonly name: string;
     readonly visible: boolean;
     readonly deleted: boolean;
@@ -84,7 +95,30 @@ export function isDatasetItem(value: unknown): value is DatasetItem {
 }
 
 export function isCollectionItem(value: unknown): value is CollectionItem {
-    return isBranded(value) && value.src === "hdca";
+    return isBranded(value) && (value.src === "hdca" || value.src === "dce");
+}
+
+/** The dataset of a collection element a tool run maps over, carrying the element's identifier. */
+export function mappedDataset(dataset: DatasetItem, identifier: string): DatasetItem {
+    return branded<DatasetItem>({ ...dataset, elementIdentifier: identifier });
+}
+
+/** A collection element holding a nested collection, as a parameter value (`src` `dce`). */
+export function elementCollection(
+    element: CollectionElementItem & { collection: CollectionContent },
+    historyId: string,
+): CollectionItem {
+    return branded<CollectionItem>({
+        src: "dce",
+        id: element.id,
+        hid: 0,
+        name: element.identifier,
+        visible: true,
+        deleted: false,
+        tags: [],
+        historyId,
+        collection: element.collection,
+    });
 }
 
 export function isHistoryItem(value: unknown): value is HistoryItem {
@@ -115,9 +149,14 @@ export class HistorySnapshot {
         /** The history's collections, newest first. */
         readonly collections: readonly CollectionItem[],
         referenced: readonly HistoryItem[] = [],
+        /** Referenced collection elements by element id: their dataset, or their collection as a `dce` item. */
+        elements: ReadonlyMap<string, HistoryItem> = new Map(),
     ) {
         for (const item of [...datasets, ...collections, ...referenced]) {
             this.byKey.set(`${item.src}:${item.id}`, item);
+        }
+        for (const [id, item] of elements) {
+            this.byKey.set(`dce:${id}`, item);
         }
     }
 
@@ -209,17 +248,14 @@ class SnapshotReader {
         const elements: CollectionElementItem[] = [];
         let populated = record.populated_state === "ok";
         for (const dce of dces) {
+            const base = { id: dce.id, identifier: dce.element_identifier, columns: dce.columns };
             if (dce.hda_id) {
-                elements.push({
-                    identifier: dce.element_identifier,
-                    dataset: await this.dataset(dce.hda_id),
-                    collection: null,
-                });
+                elements.push({ ...base, dataset: await this.dataset(dce.hda_id), collection: null });
             } else if (dce.child_collection_id) {
                 const child = await this.tx.store("collections").get(dce.child_collection_id);
                 const nested = child ? await this.content(child, depth + 1) : null;
                 populated &&= nested?.populated ?? false;
-                elements.push({ identifier: dce.element_identifier, dataset: null, collection: nested });
+                elements.push({ ...base, dataset: null, collection: nested });
             }
         }
         const content: CollectionContent = {
@@ -256,6 +292,43 @@ class SnapshotReader {
         const hdca = await this.tx.store("hdcas").get(id);
         return hdca ? this.collectionFromHdca(hdca) : null;
     }
+
+    /** A collection element: the dataset it holds, or its nested collection as a `dce` item. */
+    async element(id: string): Promise<HistoryItem | null> {
+        const dce = await this.tx.store("dces").get(id);
+        if (!dce) {
+            return null;
+        }
+        if (dce.hda_id) {
+            return this.dataset(dce.hda_id);
+        }
+        const child = dce.child_collection_id ? await this.tx.store("collections").get(dce.child_collection_id) : null;
+        if (!child) {
+            return null;
+        }
+        const collection = await this.content(child);
+        return elementCollection(
+            { id: dce.id, identifier: dce.element_identifier, dataset: null, collection, columns: dce.columns },
+            await this.owningHistory(dce.collection_id),
+        );
+    }
+
+    /** The history of the HDCA whose collection contains `collectionId`, or "" when none does. */
+    private async owningHistory(collectionId: string): Promise<string> {
+        let current = collectionId;
+        for (let depth = 0; depth <= MAX_NESTING; depth++) {
+            const [hdca] = await this.tx.store("hdcas").index("collection_id").getAll(current);
+            if (hdca) {
+                return hdca.history_id;
+            }
+            const [parent] = await this.tx.store("dces").index("child_collection_id").getAll(current);
+            if (!parent) {
+                break;
+            }
+            current = parent.collection_id;
+        }
+        return "";
+    }
 }
 
 function newestFirst<T extends { hid: number }>(items: T[]): T[] {
@@ -289,7 +362,15 @@ export async function readSnapshot(
         }
     }
     const referenced: HistoryItem[] = [];
+    const elements = new Map<string, HistoryItem>();
     for (const reference of references) {
+        if (reference.src === "dce") {
+            const element = await reader.element(reference.id);
+            if (element) {
+                elements.set(reference.id, element);
+            }
+            continue;
+        }
         const item =
             reference.src === "hda"
                 ? await reader.dataset(reference.id)
@@ -300,7 +381,7 @@ export async function readSnapshot(
             referenced.push(item);
         }
     }
-    return new HistorySnapshot(history, newestFirst(datasets), newestFirst(collections), referenced);
+    return new HistorySnapshot(history, newestFirst(datasets), newestFirst(collections), referenced, elements);
 }
 
 /** Every `{src, id}` reference inside a JSON value (tool states, form data, job parameters). */

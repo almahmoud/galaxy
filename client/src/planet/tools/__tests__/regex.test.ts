@@ -4,7 +4,7 @@ import type { BundleDynamicOptions, BundleParameter } from "../bundle";
 import type { RequestContext, StateContext } from "../context";
 import { dynamicOptions } from "../options";
 import { validateValue } from "../parameters";
-import { compilePythonPattern, MAX_PATTERN_INPUT, pythonMatch, RISKY_PATTERN_INPUT } from "../regex";
+import { compilePythonPattern, MAX_PATTERN_INPUT, pythonMatch } from "../regex";
 
 function match(expression: string, value: string): boolean | undefined {
     return pythonMatch(compilePythonPattern(expression), value);
@@ -14,8 +14,8 @@ describe("Python patterns", () => {
     it("match at the start like re.match", () => {
         expect(match("[a-z]", "run")).toBe(true);
         expect(match("[a-z]", "1run")).toBe(false);
-        expect(match("^(c?[1-9]\\d*)(,c?[1-9]\\d*)*$", "c1,2,c13")).toBe(true);
-        expect(match("^(c?[1-9]\\d*)(,c?[1-9]\\d*)*$", "c1,,2")).toBe(false);
+        expect(match("^c?[1-9]\\d*,c?[1-9]\\d*$", "c1,13")).toBe(true);
+        expect(match("^c?[1-9]\\d*,c?[1-9]\\d*$", "c1,,2")).toBe(false);
         expect(match("\\*|[ACMGRSVTWYHKDBN]+$", "ACGT")).toBe(true);
     });
 
@@ -71,26 +71,72 @@ describe("Python patterns", () => {
         }
     });
 
-    it("cap inputs, more tightly for patterns that can backtrack catastrophically", () => {
+    it("decide only patterns that provably match in linear time", () => {
         const safe = compilePythonPattern("^[ACGT]+$")!;
         expect(safe.inputLimit).toBe(MAX_PATTERN_INPUT);
         expect(pythonMatch(safe, "A".repeat(MAX_PATTERN_INPUT))).toBe(true);
         expect(pythonMatch(safe, "A".repeat(MAX_PATTERN_INPUT + 1))).toBeUndefined();
 
-        for (const expression of ["^(a+)+$", "^(\\w+\\s?)*$", "^(a|aa)+$", "^(.*,)*x$", "x".repeat(1001)]) {
-            expect(compilePythonPattern(expression)?.inputLimit, expression).toBe(RISKY_PATTERN_INPUT);
-        }
-        expect(match("^(a+)+$", `${"a".repeat(40)}b`)).toBeUndefined();
-        expect(match("^(a+)+$", `${"a".repeat(RISKY_PATTERN_INPUT - 1)}b`)).toBe(false);
-
-        // Repetitions delimited by a literal, or of alternatives that start differently, are not ambiguous.
+        // Repetitions followed by something they cannot match, or only by fixed-length parts, and alternatives
+        // that start differently.
         for (const expression of [
-            "^(c?[1-9]\\d*)(,c?[1-9]\\d*)*$",
-            "^(\\d+,)*\\d+$",
+            "^[A-Za-z0-9_.-]+$",
+            "^chr[0-9XYM]+:\\d+-\\d+$",
+            "^.*\\.fa$",
+            "^\\w+@\\w+\\.(com|org)$",
+            "(?i)^[a-z]*\\d+$",
             "^([ACGT]|N)+$",
-            "^(-?[1-9]\\d*|((-?\\d+)?:(-?\\d*(:-?\\d*)?)))(,(-?[1-9]\\d*|((-?\\d+)?:(-?\\d*(:-?\\d*)?))))*$",
+            "^(yes|no|\\d+)$",
+            "^-?\\d{1,3}:\\d{2}$",
+            "^[^a]*a+$",
+            "^[^a]*b$",
+            "",
         ]) {
             expect(compilePythonPattern(expression)?.inputLimit, expression).toBe(MAX_PATTERN_INPUT);
+        }
+        expect(match("^.*\\.fa$", "genome.fa")).toBe(true);
+        expect(match("^\\w+@\\w+\\.(com|org)$", "a@b.net")).toBe(false);
+
+        // Repetitions that can trade characters, repeated groups, lookarounds and alternatives that start alike.
+        for (const expression of [
+            "^\\d*\\.?\\d*$",
+            "^\\d+\\d+$",
+            "^a*.*b$",
+            "^(a+)+$",
+            "^(\\w+\\s?)*$",
+            "^(a|aa)+$",
+            "^(.*,)*x$",
+            "^(\\d+,)*\\d+$",
+            "^(chr)?\\d+$",
+            "^(?=a)a+$",
+            "^(ab|ac)d$",
+            "^(a|)b$",
+            "(?i)^k*\u212a+$",
+            "^\\w*\u00e9+$",
+            "^[^a]*b+$",
+            "x".repeat(1001),
+        ]) {
+            expect(compilePythonPattern(expression), expression).toBeNull();
+        }
+    });
+
+    it("stay fast on the patterns that used to backtrack catastrophically", () => {
+        const cases: [string, string, boolean | undefined][] = [
+            ["^\\d*\\.?\\d*\\d*$", `${"1".repeat(9_999)}x`, undefined],
+            ["a*a*a*a*a*a*b", "a".repeat(3_000), undefined],
+            ["(a|a|a)*b", "a".repeat(20), undefined],
+            ["((a*)*)*b", "a".repeat(16), undefined],
+            ["(a*)*b", "a".repeat(24), undefined],
+            ["^(a+)+$", `${"a".repeat(5_000)}b`, undefined],
+            // Linear patterns on their worst inputs.
+            ["^.*\\.fa$", `${".".repeat(9_000)}x`, false],
+            ["^[a-z]*\\d+x$", `${"a".repeat(5_000)}${"1".repeat(4_999)}`, false],
+            ["^(yes|no|\\d+)$", `${"1".repeat(9_999)}x`, false],
+        ];
+        for (const [expression, value, expected] of cases) {
+            const started = performance.now();
+            expect(pythonMatch(compilePythonPattern(expression), value), expression).toBe(expected);
+            expect(performance.now() - started, expression).toBeLessThan(100);
         }
     });
 });
@@ -110,12 +156,12 @@ describe("regex validators", () => {
         expect(() => validateValue(text("[a-z]", true), "1run")).not.toThrow();
     });
 
-    it("never pass a value they cannot decide", () => {
-        expect(() => validateValue(text("(?P<x>a)(?P=x)"), "aa")).toThrow("uses syntax it does not support");
-        expect(() => validateValue(text("(?P<x>a)(?P=x)", true), "b")).toThrow("uses syntax it does not support");
-        expect(() => validateValue(text("^(a+)+$"), "a".repeat(100))).toThrow(
-            `only up to ${RISKY_PATTERN_INPUT} characters`,
-        );
+    it("let values they cannot decide through to the job, which checks them again", () => {
+        expect(() => validateValue(text("(?P<x>a)(?P=x)"), "ab")).not.toThrow();
+        expect(() => validateValue(text("(?P<x>a)(?P=x)", true), "aa")).not.toThrow();
+        expect(() => validateValue(text("^(a+)+$"), `${"a".repeat(100)}b`)).not.toThrow();
+        expect(() => validateValue(text("^[a-z]+$"), "a".repeat(MAX_PATTERN_INPUT + 1))).not.toThrow();
+        expect(() => validateValue(text("^[a-z]+$"), "A")).toThrow("Must start with a letter");
     });
 });
 

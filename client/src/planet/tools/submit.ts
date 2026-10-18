@@ -1,12 +1,25 @@
 /**
  * Tool runs (`Tool.handle_input` for `POST /api/tools`): batch expansion, validation of every job's parameters, and
- * for each job one IndexedDB transaction creating the job (state `new`), its output datasets and collections and the
- * `dispatch` outbox entry that hands it to the leader tab.
+ * the IndexedDB writes creating each job (state `new`), its output datasets and collections and the `dispatch` outbox
+ * entry that hands it to the leader tab. Ordinary runs write each job in its own transaction.
+ *
+ * A run over the elements of collections (`./mapover`) writes all its jobs in one transaction together with one
+ * implicit collection per output (`ExecutionTracker.precreate_output_collections`): an HDCA with the shape of the
+ * mapped collections whose leaves are the jobs' outputs, its `job_source_type` `ImplicitCollectionJobs` and its
+ * `job_source_id` the id every job carries as `implicit_collection_jobs_id`. A mapped job's datasets are hidden; its
+ * collection outputs are hidden HDCAs whose collections are the implicit collection's leaves, so a job fills them
+ * (ingest populates collections in place) and the implicit collection with them.
+ *
+ * Collection operations (`./operations`) run here: their jobs are `ok` when created and nothing is dispatched.
  */
 
 import {
+    buildCollection,
+    buildDce,
+    type CollectionRecord,
     collections,
     type DatasetRecord,
+    type DceRecord,
     type HdaRecord,
     hdas,
     type HdcaRecord,
@@ -25,7 +38,17 @@ import { newId } from "@/planet/util/ids";
 
 import { expandIncoming } from "./batch";
 import { emptyDict, InputError, ParameterValueError, type RequestContext, type StateDict } from "./context";
-import { type OutputPlan, OutputPlanError, type PlannedElement, planOutputs } from "./outputs";
+import { collectionDatasets, type CollectionItem, isHistoryItem } from "./history";
+import type { MapOver, Structure } from "./mapover";
+import { checkOperationAvailable, isCollectionOperation, planOperation } from "./operations";
+import {
+    implicitCollectionName,
+    mappedOnText,
+    type OutputPlan,
+    OutputPlanError,
+    type PlannedElement,
+    planOutputs,
+} from "./outputs";
 import { populateState, type StateErrors, stateToJobParams } from "./state";
 
 /** The options of a tool run besides its parameters. */
@@ -39,15 +62,21 @@ export interface RunOptions {
 /** What one job created. */
 export interface CreatedJob {
     job: JobRecord;
+    /** The job's output datasets. */
     datasets: { name: string; hda: HdaRecord; dataset: DatasetRecord }[];
     collections: { name: string; hdca: HdcaRecord }[];
 }
 
-/** The jobs a run created and the errors of the jobs it could not create. */
+/** The jobs a run created, the collections of a map-over and the errors of the jobs it could not create. */
 export interface RunResult {
     jobs: CreatedJob[];
+    /** One per output of a map-over (`implicit_collections`). */
+    implicitCollections: { name: string; hdca: HdcaRecord }[];
     errors: ApiError[];
 }
+
+/** `finalize_dataset_collections`: the state message of a map-over's collections when some jobs were not created. */
+export const POPULATION_FAILED = "One or more jobs failed during dataset initialization.";
 
 /** `handle_incoming_errors`: one 400 response listing every rejected parameter of every job. */
 function incomingError(allErrors: readonly StateErrors[]): ApiError {
@@ -66,17 +95,23 @@ function incomingError(allErrors: readonly StateErrors[]): ApiError {
 }
 
 function plannedElements(elements: readonly PlannedElement[], hdaIds: readonly string[]): NewElement[] {
-    return elements.map((element) =>
-        element.dataset !== undefined
-            ? { identifier: element.identifier, hda_id: hdaIds[element.dataset]! }
-            : {
-                  identifier: element.identifier,
-                  collection: {
-                      collection_type: element.collectionType ?? "list",
-                      elements: plannedElements(element.elements ?? [], hdaIds),
-                  },
-              },
-    );
+    return elements.map((element): NewElement => {
+        const columns = element.columns ?? null;
+        if (element.dataset !== undefined) {
+            return { identifier: element.identifier, hda_id: hdaIds[element.dataset]!, columns };
+        }
+        if (element.hdaId !== undefined) {
+            return { identifier: element.identifier, hda_id: element.hdaId, columns };
+        }
+        return {
+            identifier: element.identifier,
+            columns,
+            collection: {
+                collection_type: element.collectionType ?? "list",
+                elements: plannedElements(element.elements ?? [], hdaIds),
+            },
+        };
+    });
 }
 
 function uniqueTags(tags: readonly string[]): string[] {
@@ -95,14 +130,77 @@ async function checkInputs(plan: OutputPlan, tx: WriteTx): Promise<void> {
         }
     }
     for (const input of plan.inputCollections) {
-        const hdca = await tx.store("hdcas").get(input.item.id);
-        if (!hdca || hdca.deleted) {
-            throw ApiError.badRequest(`Input collection ${input.item.hid} is no longer available.`);
+        const available =
+            input.item.src === "hdca"
+                ? (await tx.store("hdcas").get(input.item.id))?.deleted === false
+                : (await tx.store("dces").get(input.item.id)) !== undefined;
+        if (!available) {
+            throw ApiError.badRequest(
+                input.item.src === "hdca"
+                    ? `Input collection ${input.item.hid} is no longer available.`
+                    : `Input collection element '${input.item.name}' is no longer available.`,
+            );
         }
     }
 }
 
-/** Creates one job with its outputs and dispatch entry in `tx`. */
+/** How a job is created: by a collection operation, and as part of a map-over. */
+interface JobKind {
+    operation: boolean;
+    /** The id shared by the jobs of a map-over (`ImplicitCollectionJobs`). */
+    implicitCollectionJobsId: string | null;
+}
+
+/** An output dataset: a new dataset, or for collection operations a copy of an existing HDA sharing its dataset. */
+async function createDataset(
+    planned: OutputPlan["datasets"][number],
+    historyId: string,
+    hid: number | undefined,
+    jobId: string,
+    tags: string[],
+    tx: WriteTx,
+): Promise<{ hda: HdaRecord; dataset: DatasetRecord }> {
+    if (planned.copyOf === undefined) {
+        return hdas.createWithDataset(
+            {
+                history_id: historyId,
+                hid,
+                name: planned.hdaName,
+                extension: planned.extension,
+                dbkey: planned.dbkey,
+                visible: planned.visible,
+                blurb: "queued",
+                metadata: planned.metadata,
+                tags,
+                creating_job_id: jobId,
+            },
+            { state: "new", job_id: jobId, created_from_basename: planned.createdFromBasename },
+            tx,
+        );
+    }
+    const source = await tx.store("hdas").get(planned.copyOf);
+    const dataset = source && (await tx.store("datasets").get(source.dataset_id));
+    if (!source || !dataset || source.purged) {
+        throw ApiError.badRequest(`Input dataset ${source?.hid ?? planned.copyOf} is no longer available.`);
+    }
+    const hda = await hdas.create(
+        {
+            ...source,
+            id: undefined,
+            hid,
+            history_id: historyId,
+            visible: planned.visible,
+            tags,
+            copied_from: { src: "hda", id: source.id },
+            // Copies in collections keep the job that made their dataset, as Galaxy's copies do.
+            creating_job_id: planned.element ? source.creating_job_id : jobId,
+        },
+        tx,
+    );
+    return { hda, dataset };
+}
+
+/** Creates one job with its outputs and, unless it is a collection operation, its dispatch entry in `tx`. */
 async function createJob(
     rc: RequestContext,
     historyId: string,
@@ -110,10 +208,12 @@ async function createJob(
     incoming: Record<string, unknown>,
     plan: OutputPlan,
     options: RunOptions,
+    kind: JobKind,
     tx: WriteTx,
 ): Promise<CreatedJob> {
     await checkInputs(plan, tx);
     const jobId = newId();
+    const mapped = kind.implicitCollectionJobsId !== null;
     const outputTags = uniqueTags([...plan.tags, ...options.tags]);
     const count = plan.hidOrder.length;
     let nextHid = count ? await histories.allocateHids(historyId, count, tx) : 0;
@@ -121,27 +221,27 @@ async function createJob(
     for (const entry of plan.hidOrder) {
         (entry.kind === "dataset" ? hids.datasets : hids.collections).set(entry.index, nextHid++);
     }
+    const hdaIds: string[] = [];
     const createdDatasets: CreatedJob["datasets"] = [];
     for (const [index, planned] of plan.datasets.entries()) {
-        const { hda, dataset } = await hdas.createWithDataset(
-            {
-                history_id: historyId,
-                hid: hids.datasets.get(index),
-                name: planned.hdaName,
-                extension: planned.extension,
-                dbkey: planned.dbkey,
-                visible: planned.visible,
-                blurb: "queued",
-                metadata: planned.metadata,
-                tags: outputTags,
-                creating_job_id: jobId,
-            },
-            { state: "new", job_id: jobId, created_from_basename: planned.createdFromBasename },
+        const tags =
+            planned.copyOf === undefined
+                ? outputTags
+                : uniqueTags([...(planned.tags ?? []), ...(planned.element ? [] : options.tags)]);
+        const { hda, dataset } = await createDataset(
+            { ...planned, visible: planned.visible && !mapped },
+            historyId,
+            hids.datasets.get(index),
+            jobId,
+            tags,
             tx,
         );
-        createdDatasets.push({ name: planned.name, hda, dataset });
+        hdaIds.push(hda.id);
+        // The datasets a collection operation copies into its collections are not outputs of its job.
+        if (!(kind.operation && planned.element)) {
+            createdDatasets.push({ name: planned.name, hda, dataset });
+        }
     }
-    const hdaIds = createdDatasets.map(({ hda }) => hda.id);
     const createdCollections: CreatedJob["collections"] = [];
     for (const [index, planned] of plan.collections.entries()) {
         const { hdca } = await collections.createHdca(
@@ -150,6 +250,7 @@ async function createJob(
                     history_id: historyId,
                     hid: hids.collections.get(index),
                     name: planned.hdcaName,
+                    visible: !mapped,
                     tags: outputTags,
                     implicit_output_name: planned.name,
                     job_source_id: jobId,
@@ -158,6 +259,7 @@ async function createJob(
                 collection: {
                     collection_type: planned.collectionType,
                     populated_state: planned.populated ? "ok" : "new",
+                    column_definitions: planned.columnDefinitions ?? null,
                     elements: plannedElements(planned.elements, hdaIds),
                 },
             },
@@ -166,7 +268,7 @@ async function createJob(
         createdCollections.push({ name: planned.name, hdca });
     }
     const inputs: JobInputAssociation[] = [
-        ...plan.inputCollections.map((input) => ({ name: input.name, src: "hdca" as const, id: input.item.id })),
+        ...plan.inputCollections.map((input) => ({ name: input.name, src: input.item.src, id: input.item.id })),
         ...plan.inputDatasets
             .filter((input) => input.item !== null)
             .map((input) => ({ name: input.name, src: "hda" as const, id: input.item!.id })),
@@ -174,13 +276,19 @@ async function createJob(
     const params = stateToJobParams(rc.tool.inputs, state, rc);
     params.dbkey = plan.dbkey;
     params.__input_ext = plan.inputExt;
+    for (const input of plan.inputDatasets) {
+        // `DefaultToolAction.execute`: the element identifier of each dataset a run maps over.
+        if (input.item?.elementIdentifier !== undefined) {
+            params[`${input.name}|__identifier__`] = input.item.elementIdentifier;
+        }
+    }
     const job = await jobs.create(
         {
             id: jobId,
             tool_id: rc.tool.id,
             tool_version: rc.tool.version,
             history_id: historyId,
-            state: "new",
+            state: kind.operation ? "ok" : "new",
             params,
             request: { ...options.request, inputs: incoming },
             inputs,
@@ -190,10 +298,13 @@ async function createJob(
                 src: "hdca" as const,
                 id: hdca.id,
             })),
+            implicit_collection_jobs_id: kind.implicitCollectionJobsId,
         },
         tx,
     );
-    await outbox.enqueue({ kind: "dispatch", job_id: job.id }, tx);
+    if (!kind.operation) {
+        await outbox.enqueue({ kind: "dispatch", job_id: job.id }, tx);
+    }
     return { job, datasets: createdDatasets, collections: createdCollections };
 }
 
@@ -207,12 +318,178 @@ function asApiError(error: unknown): ApiError {
     throw error;
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Map-over
+
+/** A job of a run, planned and ready to be created. */
+interface PlannedJob {
+    values: Record<string, unknown>;
+    state: StateDict;
+    plan: OutputPlan;
+}
+
+/** An output a map-over collects into an implicit collection; `leafType` is the type of a collection output. */
+interface ImplicitOutput {
+    name: string;
+    leafType: string | null;
+}
+
+/** The outputs the first job creates, in tool output order (`filter_output` over the example parameters). */
+function implicitOutputs(rc: RequestContext, plan: OutputPlan): ImplicitOutput[] {
+    const out: ImplicitOutput[] = [];
+    for (const output of rc.tool.outputs) {
+        const collection = plan.collections.find((planned) => planned.name === output.name);
+        if (collection) {
+            out.push({ name: output.name, leafType: collection.collectionType });
+        } else if (plan.datasets.some((planned) => planned.name === output.name && !planned.element)) {
+            out.push({ name: output.name, leafType: null });
+        }
+    }
+    return out;
+}
+
+/** What a leaf of an implicit collection holds. */
+type Leaf = { hda_id: string } | { child_collection_id: string } | null;
+
 /**
- * Runs the tool of `rc` with the flat form parameters `incoming` in the history of `rc`: one job per batch value.
- * Every job's parameters are validated before any job is created.
+ * Inserts the collections of `structure` (`precreate_dataset_collection`): one per level, typed with the mapped
+ * structure followed by `leafType`, whose leaves are given by `leaf` in walk order.
+ */
+async function insertStructure(
+    structure: Structure,
+    leafType: string | null,
+    leaf: (index: number) => Leaf,
+    counter: { next: number },
+    tx: WriteTx,
+): Promise<CollectionRecord> {
+    const collection = buildCollection(
+        {
+            collection_type: leafType ? `${structure.collectionType}:${leafType}` : structure.collectionType,
+            populated_state: "ok",
+            column_definitions: structure.columnDefinitions,
+        },
+        tx.now,
+    );
+    const dces: DceRecord[] = [];
+    for (const child of structure.children) {
+        const base = {
+            collection_id: collection.id,
+            element_index: dces.length,
+            element_identifier: child.identifier,
+            columns: child.columns,
+        };
+        if (child.child) {
+            const nested = await insertStructure(child.child, leafType, leaf, counter, tx);
+            dces.push(buildDce({ ...base, element_type: "dataset_collection", child_collection_id: nested.id }));
+            continue;
+        }
+        const target = leaf(counter.next++);
+        if (target && "hda_id" in target) {
+            dces.push(buildDce({ ...base, element_type: "hda", hda_id: target.hda_id }));
+        } else if (target) {
+            dces.push(buildDce({ ...base, element_type: "dataset_collection", ...target }));
+        }
+    }
+    collection.element_count = dces.length;
+    await tx.store("collections").add(collection);
+    for (const dce of dces) {
+        await tx.store("dces").add(dce);
+    }
+    return collection;
+}
+
+/** `auto_propagated_tags` of the collections a run maps over: their `name:` tags (a DCE's are its first dataset's). */
+function mappedTags(items: readonly CollectionItem[]): string[] {
+    const tags = items.flatMap((item) =>
+        item.src === "hdca" ? item.tags : (collectionDatasets(item.collection)[0]?.tags ?? []),
+    );
+    return uniqueTags(
+        tags
+            .map((tag) => (tag.startsWith("#") ? `name:${tag.slice(1)}` : tag))
+            .filter((tag) => tag.startsWith("name:")),
+    );
+}
+
+/**
+ * Creates the jobs of a map-over and its implicit collections in `tx`. Implicit collections get their hids first, as
+ * Galaxy creates them before the jobs; `planned` holds an error for each job that could not be planned.
+ */
+async function createMapOver(
+    rc: RequestContext,
+    historyId: string,
+    mapOver: MapOver,
+    planned: readonly (PlannedJob | ApiError)[],
+    options: RunOptions,
+    operation: boolean,
+    tx: WriteTx,
+): Promise<Pick<RunResult, "jobs" | "implicitCollections">> {
+    const example = planned.find((job): job is PlannedJob => !(job instanceof ApiError))!;
+    const outputs = implicitOutputs(rc, example.plan);
+    const firstHid = outputs.length ? await histories.allocateHids(historyId, outputs.length, tx) : 0;
+    const kind: JobKind = { operation, implicitCollectionJobsId: newId() };
+    const created: (CreatedJob | null)[] = [];
+    for (const job of planned) {
+        created.push(
+            job instanceof ApiError
+                ? null
+                : await createJob(rc, historyId, job.state, toJson(job.values), job.plan, options, kind, tx),
+        );
+    }
+    const linked = mapOver.inputs.filter((input) => input.linked);
+    const mapped = new Map(linked.map((input) => [input.key, input.item]));
+    const onText = mappedOnText(linked.map((input) => input.item));
+    const tags = mappedTags(linked.map((input) => input.item));
+    const failed = created.some((job) => job === null);
+    const implicitCollections: RunResult["implicitCollections"] = [];
+    for (const [index, output] of outputs.entries()) {
+        const leaf = (jobIndex: number): Leaf => {
+            const job = created[jobIndex];
+            if (!job) {
+                return null;
+            }
+            if (output.leafType === null) {
+                const dataset = job.datasets.find((item) => item.name === output.name);
+                return dataset ? { hda_id: dataset.hda.id } : null;
+            }
+            const collection = job.collections.find((item) => item.name === output.name);
+            return collection ? { child_collection_id: collection.hdca.collection_id } : null;
+        };
+        const collection = await insertStructure(mapOver.structure, output.leafType, leaf, { next: 0 }, tx);
+        if (failed) {
+            await tx
+                .store("collections")
+                .put({ ...collection, populated_state: "failed", populated_state_message: POPULATION_FAILED });
+        }
+        const definition = rc.tool.outputs.find((item) => item.name === output.name)!;
+        const { hdca } = await collections.createHdca(
+            {
+                hdca: {
+                    history_id: historyId,
+                    hid: firstHid + index,
+                    collection_id: collection.id,
+                    name: implicitCollectionName(rc, definition, example.state, example.plan, mapped, onText),
+                    tags,
+                    implicit_output_name: output.name,
+                    job_source_id: kind.implicitCollectionJobsId,
+                    job_source_type: "ImplicitCollectionJobs",
+                },
+            },
+            tx,
+        );
+        implicitCollections.push({ name: output.name, hdca });
+    }
+    return { jobs: created.filter((job): job is CreatedJob => job !== null), implicitCollections };
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Runs
+
+/**
+ * Runs the tool of `rc` with the flat form parameters `incoming` in the history of `rc`: one job per batch value or
+ * element of the collections it maps over. Every job's parameters are validated before any job is created.
  *
- * @throws ApiError 400 with `err_data` and `param_errors` when parameters are rejected, or the first job's error when
- * no job could be created
+ * @throws ApiError 400 with `err_data` and `param_errors` when parameters are rejected, when inputs are not ready,
+ *   or the first job's error when no job could be created
  */
 export async function runTool(
     rc: RequestContext,
@@ -223,21 +500,54 @@ export async function runTool(
     if (!history) {
         throw ApiError.missingParameter("A valid history is required to execute tools.");
     }
+    const operation = isCollectionOperation(rc);
+    if (operation) {
+        checkOperationAvailable(rc);
+    }
     const expanded = expandIncoming(rc.tool, incoming, rc);
-    const populated = expanded.map((values) => ({ values, ...populateState(rc.tool.inputs, values, rc) }));
+    const populated = expanded.combos.map((values) => ({ values, ...populateState(rc.tool.inputs, values, rc) }));
     if (populated.some(({ errors }) => Object.keys(errors).length > 0)) {
         throw incomingError(populated.map(({ errors }) => errors));
     }
-    const result: RunResult = { jobs: [], errors: [] };
-    for (const { values, state } of populated) {
+    const planned = populated.map(({ values, state }): PlannedJob | ApiError => {
         try {
-            const plan = planOutputs(rc, state);
-            const created = await withTransaction(JOB_STORES, "readwrite", (tx) =>
-                createJob(rc, history.id, state, toJson(values), plan, options, tx),
-            );
-            result.jobs.push(created);
+            return { values, state, plan: operation ? planOperation(rc, state) : planOutputs(rc, state) };
         } catch (error) {
-            result.errors.push(asApiError(error));
+            const apiError = asApiError(error);
+            // `ToolInputsNotReadyException` fails the whole run; other errors fail one job.
+            if (apiError.errCode === ErrorCodes.TOOL_INPUTS_NOT_READY) {
+                throw apiError;
+            }
+            return apiError;
+        }
+    });
+    if (expanded.mapOver && planned.length === 0) {
+        throw ApiError.badRequest("The collections this run maps over have no elements.");
+    }
+    const result: RunResult = { jobs: [], implicitCollections: [], errors: [] };
+    result.errors = planned.filter((job): job is ApiError => job instanceof ApiError);
+    if (expanded.mapOver && result.errors.length < planned.length) {
+        const mapOver = expanded.mapOver;
+        Object.assign(
+            result,
+            await withTransaction(JOB_STORES, "readwrite", (tx) =>
+                createMapOver(rc, history.id, mapOver, planned, options, operation, tx),
+            ),
+        );
+    } else if (!expanded.mapOver) {
+        const kind: JobKind = { operation, implicitCollectionJobsId: null };
+        for (const job of planned) {
+            if (job instanceof ApiError) {
+                continue;
+            }
+            try {
+                const created = await withTransaction(JOB_STORES, "readwrite", (tx) =>
+                    createJob(rc, history.id, job.state, toJson(job.values), job.plan, options, kind, tx),
+                );
+                result.jobs.push(created);
+            } catch (error) {
+                result.errors.push(asApiError(error));
+            }
         }
     }
     const [firstError] = result.errors;
@@ -247,11 +557,15 @@ export async function runTool(
     return result;
 }
 
-/** A plain JSON copy of submitted values. */
+/** A plain JSON copy of submitted values; history items become `{src, id}` references. */
 function toJson(values: Record<string, unknown>): Record<string, unknown> {
     const out = emptyDict();
     for (const [key, value] of Object.entries(values)) {
-        out[key] = JSON.parse(JSON.stringify(value ?? null)) as unknown;
+        out[key] = JSON.parse(
+            JSON.stringify(value ?? null, (_, item: unknown) =>
+                isHistoryItem(item) ? { src: item.src, id: item.id } : item,
+            ),
+        ) as unknown;
     }
     return out;
 }

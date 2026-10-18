@@ -54,14 +54,21 @@ export interface PlannedDataset {
     createdFromBasename: string | null;
     /** True for elements of an output collection. */
     element: boolean;
+    /** For collection operations: the HDA this output copies (`HistoryDatasetAssociation.copy`). */
+    copyOf?: string;
+    /** Tags of a copy, instead of the tags the job's outputs inherit. */
+    tags?: string[];
 }
 
-/** An element of a planned collection: a planned dataset (by index) or a nested collection. */
+/** An element of a planned collection: a planned dataset (by index), an existing HDA or a nested collection. */
 export interface PlannedElement {
     identifier: string;
     dataset?: number;
+    hdaId?: string;
     collectionType?: string;
     elements?: PlannedElement[];
+    /** Sample sheet row values. */
+    columns?: unknown[] | null;
 }
 
 /** An output collection to create. */
@@ -72,6 +79,7 @@ export interface PlannedCollection {
     /** False for collections whose elements the job discovers. */
     populated: boolean;
     elements: PlannedElement[];
+    columnDefinitions?: unknown[] | null;
 }
 
 /** Everything a tool run creates for one job. */
@@ -148,6 +156,23 @@ export function collectInputs(
     return { datasets, collections };
 }
 
+/** `on_text_for_names`. */
+function onTextForNames(names: readonly string[], prefix = ""): string {
+    let text: string;
+    if (names.length === 0) {
+        return "";
+    } else if (names.length === 1) {
+        text = names[0]!;
+    } else if (names.length === 2) {
+        text = `${names[0]} and ${names[1]}`;
+    } else if (names.length === 3) {
+        text = `${names[0]}, ${names[1]}, and ${names[2]}`;
+    } else {
+        text = `${names[0]}, ${names[1]}, and others`;
+    }
+    return prefix ? `${prefix} ${text}` : text;
+}
+
 /** `on_text_for_numeric_ids`. */
 function onTextForIds(ids: readonly number[], prefix: string): string {
     const unique = [...new Set(ids)].sort((a, b) => a - b);
@@ -169,23 +194,33 @@ function onTextForIds(ids: readonly number[], prefix: string): string {
             start = i;
         }
     }
-    let names: string;
-    if (groups.length === 1) {
-        names = groups[0]!;
-    } else if (groups.length === 2) {
-        names = `${groups[0]} and ${groups[1]}`;
-    } else if (groups.length === 3) {
-        names = `${groups[0]}, ${groups[1]}, and ${groups[2]}`;
-    } else {
-        names = `${groups[0]}, ${groups[1]}, and others`;
+    return onTextForNames(groups, prefix);
+}
+
+/** `on_text_for_dataset_and_collections`. */
+function joinOnText(parts: readonly string[]): string {
+    const present = parts.filter(Boolean);
+    if (present.length <= 1) {
+        return present[0] ?? "";
     }
-    return `${prefix} ${names}`;
+    return `${present.slice(0, -1).join(", ")} and ${present[present.length - 1]}`;
+}
+
+/** The on text of a map-over (`ExecutionTracker.on_text`): the collections' hids and the elements' identifiers. */
+export function mappedOnText(items: readonly CollectionItem[]): string {
+    return joinOnText([
+        onTextForIds(
+            items.filter((item) => item.src === "hdca").map((item) => item.hid),
+            "collection",
+        ),
+        onTextForNames(items.filter((item) => item.src === "dce").map((item) => item.name)),
+    ]);
 }
 
 /** `DefaultToolAction._get_on_text`. */
 export function onText(datasets: readonly InputDataset[], collections: readonly InputCollection[]): string {
     const collectionNames = new Set(collections.map((input) => input.name));
-    const collectionHids = collections.map((input) => input.item.hid);
+    const collectionHids = collections.filter((input) => input.item.src === "hdca").map((input) => input.item.hid);
     const datasetHids: number[] = [];
     for (const input of datasets) {
         const derived = [...collectionNames].some(
@@ -196,11 +231,7 @@ export function onText(datasets: readonly InputDataset[], collections: readonly 
             datasetHids.push(input.item.hid);
         }
     }
-    const parts = [onTextForIds(datasetHids, "dataset"), onTextForIds(collectionHids, "collection")].filter(Boolean);
-    if (parts.length <= 1) {
-        return parts[0] ?? "";
-    }
-    return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+    return joinOnText([onTextForIds(datasetHids, "dataset"), onTextForIds(collectionHids, "collection")]);
 }
 
 function lookupInput<T extends { name: string; legacyName: string }>(
@@ -258,7 +289,7 @@ function collectionObject(item: CollectionItem): PyObject {
             if (name === "name") {
                 return item.name;
             }
-            return name === "hid" ? item.hid : undefined;
+            return name === "hid" && item.src === "hdca" ? item.hid : undefined;
         },
     };
 }
@@ -383,7 +414,7 @@ function walk(
 }
 
 /** `get_output_name`: the rendered label, or `<tool name> on <inputs>` when there is none or it cannot be rendered. */
-function outputName(rc: RequestContext, output: BundleOutput, lookup: TemplateLookup, on: string): string {
+export function outputName(rc: RequestContext, output: BundleOutput, lookup: TemplateLookup, on: string): string {
     const fallback = on ? `${rc.tool.name} on ${on}` : rc.tool.name;
     if (!output.label) {
         return fallback;
@@ -592,11 +623,15 @@ function inheritedTags(datasets: readonly InputDataset[], collections: readonly 
     return [...byValue.values()];
 }
 
-/**
- * Plans the outputs of one job for the populated `state`: which outputs survive their filters, their provisional
- * names and formats, collection structures, and the order Galaxy gives the new items hids.
- */
-export function planOutputs(rc: RequestContext, state: StateDict): OutputPlan {
+/** A plan with the job's inputs and no outputs yet, and the label lookup over its state. */
+export interface PlanStart {
+    plan: OutputPlan;
+    lookup: TemplateLookup;
+    scope: Map<string, PyValue>;
+}
+
+/** The inputs, inherited tags, dbkey, input extension and on text of the job for `state`. */
+export function startPlan(rc: RequestContext, state: StateDict): PlanStart {
     const { tool } = rc;
     const { datasets: inputDatasets, collections: inputCollections } = collectInputs(tool, state, rc);
     const legacyProfile = profileBefore(tool.profile, "16.04");
@@ -627,6 +662,58 @@ export function planOutputs(rc: RequestContext, state: StateDict): OutputPlan {
     };
     const scope = filterScope(state, plan);
     const lookup = stateLookup(rc, state, { on_string: plan.onText, dbkey, __input_ext: inputExt });
+    return { plan, lookup, scope };
+}
+
+/**
+ * The name of the collection a map-over creates for `output` (`ExecutionTracker.output_name`): its label rendered
+ * over the first job's `state` with each mapped-over parameter holding its collection, or the default name.
+ */
+export function implicitCollectionName(
+    rc: RequestContext,
+    output: BundleOutput,
+    state: StateDict,
+    plan: Pick<OutputPlan, "dbkey" | "inputExt">,
+    mapped: ReadonlyMap<string, CollectionItem>,
+    onText: string,
+): string {
+    const labelState = structuredState(state);
+    visitInputValues(rc.tool.inputs, labelState, rc, ({ input, parent, prefixedName }) => {
+        const collection = mapped.get(prefixedName);
+        if (collection) {
+            parent[input.name] = collection;
+        }
+    });
+    const lookup = stateLookup(rc, labelState, { on_string: onText, dbkey: plan.dbkey, __input_ext: plan.inputExt });
+    return outputName(rc, output, lookup, onText);
+}
+
+/** A copy of a state's dictionaries and lists; history items stay shared. */
+function structuredState(value: StateDict): StateDict {
+    const copy = (item: unknown): unknown => {
+        if (Array.isArray(item)) {
+            return item.map(copy);
+        }
+        if (isDict(item)) {
+            const out = Object.create(null) as StateDict;
+            for (const [key, nested] of Object.entries(item)) {
+                out[key] = copy(nested);
+            }
+            return out;
+        }
+        return item;
+    };
+    return copy(value) as StateDict;
+}
+
+/**
+ * Plans the outputs of one job for the populated `state`: which outputs survive their filters, their provisional
+ * names and formats, collection structures, and the order Galaxy gives the new items hids.
+ */
+export function planOutputs(rc: RequestContext, state: StateDict): OutputPlan {
+    const { tool } = rc;
+    const { plan, lookup, scope } = startPlan(rc, state);
+    const { inputDatasets, dbkey } = plan;
     const datasetOrder: number[] = [];
     const planDataset = (definition: BundleOutput, name: string, element: boolean): number => {
         const source = definition.metadata_source ? lookupInput(inputDatasets, definition.metadata_source)?.item : null;

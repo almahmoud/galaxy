@@ -243,13 +243,7 @@ describe("POST /api/tools", () => {
         expect(await jobs.listForHistory(fixture.historyId)).toHaveLength(before);
     });
 
-    it("refuses collection map-over, the upload tool, unknown tools and immutable histories", async () => {
-        const mapOver = await run(
-            { ...defaults, input: { batch: true, values: [{ id: fixture.tables.id, src: "hdca" }] } },
-            {},
-            400,
-        );
-        expect(mapOver.err_msg).toContain("over the elements of a collection");
+    it("refuses collections outside batch mode, the upload tool, unknown tools and immutable histories", async () => {
         const collection = await run({ ...defaults, input: data(fixture.tables.id, "hdca") }, {}, 400);
         expect(collection.err_data.input).toContain("dataset collection supplied to single input dataset parameter");
         const router = makeToolRouter();

@@ -9,6 +9,7 @@
  */
 
 import * as db from "@/planet/db";
+import { INSTALLED_PANEL_SECTION } from "@/planet/install/source";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
 import {
     buildToolForm,
@@ -220,34 +221,45 @@ async function panelView(view: string): Promise<Record<string, PanelElement>> {
         (viewId === DEFAULT_PANEL_VIEW
             ? await loadOptionalStaticData<Record<string, PanelElement>>("toolbox/panel.json")
             : undefined);
-    const panel: Record<string, PanelElement> = isRecord(stored) ? { ...(stored as Record<string, PanelElement>) } : {};
-    if (viewId === DEFAULT_PANEL_VIEW && !containsTool(panel, UPLOAD_TOOL_ID)) {
+    let panel: Record<string, PanelElement> = isRecord(stored) ? { ...(stored as Record<string, PanelElement>) } : {};
+    if (viewId !== DEFAULT_PANEL_VIEW) {
+        return panel;
+    }
+    if (!containsTool(panel, UPLOAD_TOOL_ID)) {
         const section = panel[UPLOAD_SECTION.id];
         if (section && Array.isArray(section.tools)) {
             panel[UPLOAD_SECTION.id] = { ...section, tools: [UPLOAD_TOOL_ID, ...(section.tools as unknown[])] };
         } else {
-            return {
-                [UPLOAD_SECTION.id]: {
-                    model_class: "ToolSection",
-                    id: UPLOAD_SECTION.id,
-                    name: UPLOAD_SECTION.name,
-                    version: "",
-                    description: null,
-                    links: null,
-                    tools: [UPLOAD_TOOL_ID],
-                },
-                ...panel,
-            };
+            panel = { [UPLOAD_SECTION.id]: panelSection(UPLOAD_SECTION, [UPLOAD_TOOL_ID]), ...panel };
         }
     }
+    const installed = (await installedEntries()).map((entry) => entry.id).filter((id) => !containsTool(panel, id));
+    if (installed.length && !Object.hasOwn(panel, INSTALLED_PANEL_SECTION.id)) {
+        panel[INSTALLED_PANEL_SECTION.id] = panelSection(INSTALLED_PANEL_SECTION, [...new Set(installed)]);
+    }
     return panel;
+}
+
+function panelSection(section: { id: string; name: string }, tools: string[]): PanelElement {
+    return {
+        model_class: "ToolSection",
+        id: section.id,
+        name: section.name,
+        version: "",
+        description: null,
+        links: null,
+        tools,
+    };
 }
 
 /** `/api/tools?in_panel=true`: the panel view with each section's tool ids replaced by their entries. */
 async function toolsInPanel(view: string | null): Promise<unknown[]> {
     if (!view || view === DEFAULT_PANEL_VIEW) {
-        const stored = await loadOptionalStaticData<unknown[]>("toolbox/tools_in_panel.json");
-        if (Array.isArray(stored) && stored.length) {
+        const [stored, installed] = await Promise.all([
+            loadOptionalStaticData<unknown[]>("toolbox/tools_in_panel.json"),
+            installedEntries(),
+        ]);
+        if (Array.isArray(stored) && stored.length && !installed.length) {
             return stored;
         }
     }
@@ -800,6 +812,10 @@ async function runToolRequest(request: PlanetRequest): Promise<Record<string, un
                     output_name: name,
                 });
             }
+            // The collections of a mapped job are parts of the run's implicit collections.
+            if (created.job.implicit_collection_jobs_id) {
+                continue;
+            }
             for (const { name, hdca } of created.collections) {
                 outputCollections.push({
                     ...(await serializeHdcaInstance(hdca, "element", loader, rc.datatypes)),
@@ -807,11 +823,18 @@ async function runToolRequest(request: PlanetRequest): Promise<Record<string, un
                 });
             }
         }
+        const implicitCollections: Record<string, unknown>[] = [];
+        for (const { name, hdca } of result.implicitCollections) {
+            implicitCollections.push({
+                ...(await serializeHdcaInstance(hdca, "element", loader, rc.datatypes)),
+                output_name: name,
+            });
+        }
         const response: Record<string, unknown> = {
             outputs,
             output_collections: outputCollections,
             jobs: result.jobs.map(({ job }) => jobCollectionView(job)),
-            implicit_collections: [],
+            implicit_collections: implicitCollections,
             produces_entry_points: false,
         };
         if (result.errors.length) {

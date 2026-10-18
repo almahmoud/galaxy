@@ -88,6 +88,12 @@ TOOL_TYPE_CLASSES = {
     "extract_dataset": "ExtractDatasetCollectionTool",
     "data_destination": "DataDestinationTool",
     "convert_sample_sheet": "ConvertSampleSheetTool",
+    # Collection operations Galaxy loads from a <type> element instead (lib/galaxy/tools/*.xml).
+    "flatten_collection": "FlattenTool",
+    "filter_failed_datasets_collection": "FilterFailedDatasetsTool",
+    "keep_success_datasets_collection": "KeepSuccessDatasetsTool",
+    "filter_empty_datasets_collection": "FilterEmptyDatasetsTool",
+    "sort_collection": "SortTool",
 }
 # Classes rendered with the regular tool form (Tool, InteractiveTool, DatabaseOperationTool subclasses).
 REGULAR_FORM_CLASSES = {
@@ -102,6 +108,11 @@ REGULAR_FORM_CLASSES = {
     "BuildListCollectionTool",
     "ExtractDatasetCollectionTool",
     "ConvertSampleSheetTool",
+    "FlattenTool",
+    "FilterFailedDatasetsTool",
+    "KeepSuccessDatasetsTool",
+    "FilterEmptyDatasetsTool",
+    "SortTool",
 }
 
 # galaxy.tools.parameters.basic.parameter_types
@@ -127,6 +138,8 @@ PARAMETER_CLASSES = {
     "drill_down": "DrillDownSelectToolParameter",
 }
 SELECT_TYPES = {"select", "genomebuild", "group_tag", "data_column"}
+# Conditional ``value_from`` references whose cases the generator computes; Galaxy calls them on its own objects.
+VALUE_FROM_REFERENCES = frozenset({"self:app.datatypes_registry.get_upload_metadata_params"})
 DATA_TYPES = {"data", "data_collection", "hidden_data"}
 
 
@@ -169,11 +182,13 @@ def build_bundle(
         python_template_version = Version("3.5") if profile_version >= Version("19.05") else Version("2.7")
 
     tool_type = tool_source.parse_tool_type() or "default"
-    if tool_source.parse_tool_module() is not None:
-        raise BundleError(f"Tool {tool_id} declares a custom tool class")
     model_class = TOOL_TYPE_CLASSES.get(tool_type)
     if model_class is None:
         raise BundleError(f"Tool {tool_id} has unrecognized tool type {tool_type!r}")
+    # A <type> element may only name the galaxy.tools class of the tool's own tool_type.
+    tool_module = tool_source.parse_tool_module()
+    if tool_module is not None and tuple(tool_module) != ("galaxy.tools", model_class):
+        raise BundleError(f"Tool {tool_id} declares a custom tool class")
 
     all_ids = [tool_id.lower()]
     if old_id and old_id != tool_id:
@@ -479,23 +494,24 @@ def _value_from_cases(value_from: str, profile: float, tool: Any) -> list[dict[s
     """Cases Galaxy computes when it loads the tool: ``<object>:<attribute path>`` names a callable that
     returns ``{case value: inputs XML}`` (``Tool.parse_input_elem``).
 
-    Only ``self:app.datatypes_registry.*`` (the upload tool's metadata conditional) resolves here; other
-    references, or no registry, leave the cases empty.
+    Only the references in ``VALUE_FROM_REFERENCES`` (the upload tool's metadata conditional) resolve here;
+    other references, no registry, or a callable that fails leave the cases empty.
     """
-    holder, _, path = value_from.partition(":")
-    if holder != "self" or tool is None or not path.startswith("app.datatypes_registry."):
+    if tool is None or value_from.strip() not in VALUE_FROM_REFERENCES:
         return []
+    path = value_from.strip().partition(":")[2]
     target = tool
     try:
         for attribute in path.split("."):
             target = getattr(target, attribute)
-    except AttributeError:
-        return []
-    if not callable(target):
+        # Galaxy passes (context, the conditional, the tool); the registry's callables use none of them.
+        returned = target(None, None, tool) if callable(target) else None
+        items = list(returned.items()) if isinstance(returned, dict) else []
+    except Exception:
+        log.debug("value_from %s gives no cases", value_from, exc_info=True)
         return []
     cases = []
-    # Galaxy passes (context, the conditional, the tool); the registry's callables use none of them.
-    for value, inputs_xml in target(None, None, tool).items():
+    for value, inputs_xml in items:
         inputs = []
         if inputs_xml:
             inputs = _parse_input_elem(XmlPageSource(XML(f"<when>{inputs_xml}</when>")), profile, tool)

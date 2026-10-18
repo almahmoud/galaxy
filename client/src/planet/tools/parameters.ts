@@ -290,8 +290,8 @@ function rangeCheck(validator: BundleValidator, value: unknown, shown: unknown):
 }
 
 /**
- * Runs one validator on a single value. Expression and metadata validators Planet does not evaluate pass (the
- * pod's own checks apply); a regex Planet cannot decide fails, so no value passes unchecked.
+ * Runs one validator on a single value. Expression and metadata validators Planet does not evaluate pass, and so do
+ * values a regex cannot decide: the job's stage-in container runs every static validator again before the tool.
  */
 function runValidator(validator: BundleValidator, value: unknown): void {
     switch (validator.type) {
@@ -299,14 +299,9 @@ function runValidator(validator: BundleValidator, value: unknown): void {
             const pattern = compiledPattern(validator.expression ?? "");
             for (const item of Array.isArray(value) ? value : [value]) {
                 const matched = pythonMatch(pattern, item === null || item === undefined ? "" : pyStr(item));
-                if (matched === undefined) {
-                    throw new InputError(
-                        pattern
-                            ? `Planet checks this value against the tool's pattern only up to ${pattern.inputLimit} characters.`
-                            : "Planet cannot check values against this tool's pattern, which uses syntax it does not support.",
-                    );
+                if (matched !== undefined) {
+                    fail(validator, matched, item);
                 }
-                fail(validator, matched, item);
             }
             return;
         }

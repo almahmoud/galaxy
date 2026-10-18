@@ -56,3 +56,15 @@ sections:
     name: Reports
     tools:
       - path: tools/multiqc/multiqc.xml
+
+  # Galaxy's collection operations; the Service Worker carries them out without a job pod.
+  - id: collection_operations
+    name: Collection Operations
+    tools:
+      - galaxy: lib/galaxy/tools/flatten_collection.xml
+      - galaxy: lib/galaxy/tools/filter_failed_collection_1.1.0.xml
+      - galaxy: lib/galaxy/tools/filter_empty_collection_1.1.0.xml
+      - galaxy: lib/galaxy/tools/keep_success_collection_1.1.0.xml
+      - galaxy: lib/galaxy/tools/zip_collection.xml
+      - galaxy: lib/galaxy/tools/unzip_collection.xml
+      - galaxy: lib/galaxy/tools/sort_collection_list.xml

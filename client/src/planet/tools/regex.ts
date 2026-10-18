@@ -1,24 +1,20 @@
 /**
  * Python regular expressions of tool validators and option filters (`re.match` semantics), translated to
- * JavaScript where both engines agree and checked in the Service Worker. Anything else is undecided, which callers
- * must never treat as a match:
+ * JavaScript where both engines agree and run in the Service Worker only when they provably match in linear time.
+ * Anything else is undecided, which callers must never treat as a match:
  * - syntax JavaScript lacks or reads differently (`(?x)`, conditionals, atomic groups, backreferences, `\N{...}`, ...),
  *   patterns JavaScript cannot compile and patterns over {@link MAX_PATTERN_LENGTH} characters;
- * - inputs longer than {@link MAX_PATTERN_INPUT}, or than {@link RISKY_PATTERN_INPUT} for long patterns and patterns
- *   whose repetitions can match the same text in many ways (catastrophic backtracking blocks the worker).
+ * - patterns a backtracking engine may take more than linear time on (see {@link isLinear}), however short the input;
+ * - inputs longer than {@link MAX_PATTERN_INPUT}.
  *
  * Translation keeps Python's meaning: `\w`, `\d`, `\s` and `\b` are Unicode-aware (`a` flag: ASCII), `.` excludes
  * only `\n`, `$` also matches before a final newline, `\A`/`\Z` anchor the whole string, `{,n}` is `{0,n}`.
  */
 
-/** Longest input any pattern is run on. */
+/** Longest input a pattern is run on. */
 export const MAX_PATTERN_INPUT = 10_000;
-/** Longest input a long or ambiguous pattern is run on: short enough that exponential backtracking stays cheap. */
-export const RISKY_PATTERN_INPUT = 24;
-/** Patterns longer than this count as risky. */
-export const MAX_SAFE_PATTERN_LENGTH = 1000;
 /** Patterns longer than this are not translated at all (undecided). */
-export const MAX_PATTERN_LENGTH = 10_000;
+export const MAX_PATTERN_LENGTH = 1000;
 
 export interface PythonPattern {
     regex: RegExp;
@@ -28,13 +24,148 @@ export interface PythonPattern {
 
 class Unsupported extends Error {}
 
+// ---------------------------------------------------------------------------------------------------------
+// Character sets
+
+/** Code point ranges, sorted, disjoint and inclusive. */
+type CharSet = readonly (readonly [number, number])[];
+
+const MAX_CODE_POINT = 0x10ffff;
+const ALL: CharSet = [[0, MAX_CODE_POINT]];
+const NON_ASCII: CharSet = [[0x80, MAX_CODE_POINT]];
+const ASCII_LETTERS: CharSet = [
+    [0x41, 0x5a],
+    [0x61, 0x7a],
+];
+const ASCII_DIGITS: CharSet = [[0x30, 0x39]];
+/** The two non-ASCII characters case folding relates to ASCII letters: `ſ` (`s`) and the Kelvin sign (`k`). */
+const LONG_S = 0x17f;
+const KELVIN = 0x212a;
+/** Non-ASCII characters other than {@link LONG_S} and {@link KELVIN}: their case variants are of the same kind. */
+const OTHER_NON_ASCII: CharSet = [
+    [0x80, LONG_S - 1],
+    [LONG_S + 1, KELVIN - 1],
+    [KELVIN + 1, MAX_CODE_POINT],
+];
+/** A superset of Unicode digits (`\p{Nd}`): no digit is a letter. */
+const UNICODE_DIGITS: CharSet = [[0x30, 0x39], ...OTHER_NON_ASCII];
+const ASCII_WORD: CharSet = [[0x30, 0x39], ...ASCII_LETTERS, [0x5f, 0x5f]];
+const ASCII_SPACE: CharSet = [
+    [0x09, 0x0d],
+    [0x20, 0x20],
+];
+/** Python's Unicode `\s` (`str.isspace`), as {@link PY_SPACE} spells it. */
+const UNICODE_SPACE: CharSet = [
+    [0x09, 0x0d],
+    [0x1c, 0x20],
+    [0x85, 0x85],
+    [0xa0, 0xa0],
+    [0x1680, 0x1680],
+    [0x2000, 0x200a],
+    [0x2028, 0x2029],
+    [0x202f, 0x202f],
+    [0x205f, 0x205f],
+    [0x3000, 0x3000],
+];
+
+function charSet(...sets: CharSet[]): CharSet {
+    const sorted = sets
+        .flat()
+        .filter(([low, high]) => low <= high)
+        .sort((a, b) => a[0] - b[0]);
+    const out: [number, number][] = [];
+    for (const [low, high] of sorted) {
+        const last = out[out.length - 1];
+        if (last && low <= last[1] + 1) {
+            last[1] = Math.max(last[1], high);
+        } else {
+            out.push([low, high]);
+        }
+    }
+    return out;
+}
+
+function complement(set: CharSet): CharSet {
+    const out: [number, number][] = [];
+    let next = 0;
+    for (const [low, high] of set) {
+        if (low > next) {
+            out.push([next, low - 1]);
+        }
+        next = high + 1;
+    }
+    if (next <= MAX_CODE_POINT) {
+        out.push([next, MAX_CODE_POINT]);
+    }
+    return out;
+}
+
+function intersects(a: CharSet, b: CharSet): boolean {
+    let i = 0;
+    let j = 0;
+    while (i < a.length && j < b.length) {
+        const [aLow, aHigh] = a[i]!;
+        const [bLow, bHigh] = b[j]!;
+        if (aLow <= bHigh && bLow <= aHigh) {
+            return true;
+        }
+        if (aHigh < bHigh) {
+            i++;
+        } else {
+            j++;
+        }
+    }
+    return false;
+}
+
+/**
+ * A superset of what `set` matches case-insensitively (simple case folding): ASCII letters in both cases, `s` and `k`
+ * with their non-ASCII variants, and any non-ASCII character once the set holds one.
+ */
+function caseClosure(set: CharSet): CharSet {
+    const swapped: [number, number][] = [];
+    for (const [low, high] of set) {
+        for (const [start, end, offset] of [
+            [0x41, 0x5a, 0x20],
+            [0x61, 0x7a, -0x20],
+        ] as const) {
+            swapped.push([Math.max(low, start) + offset, Math.min(high, end) + offset]);
+        }
+    }
+    const letters = charSet(set, swapped);
+    const variants = (ascii: number, other: number): CharSet =>
+        intersects(letters, single(ascii)) || intersects(set, single(other))
+            ? charSet(single(ascii), single(ascii - 0x20), single(other))
+            : [];
+    return charSet(
+        letters,
+        variants(0x73, LONG_S),
+        variants(0x6b, KELVIN),
+        intersects(set, OTHER_NON_ASCII) ? OTHER_NON_ASCII : [],
+    );
+}
+
+/** What a class member matches: a superset (`over`) and a subset (`under`), equal when exactly known. */
+interface Members {
+    over: CharSet;
+    under: CharSet;
+}
+
+function exactly(set: CharSet): Members {
+    return { over: set, under: set };
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Translation
+
 type Node =
     | { type: "seq"; items: Node[] }
     | { type: "alt"; options: Node[] }
     | { type: "group"; body: Node; open: string }
     | { type: "look"; body: Node; open: string }
     | { type: "repeat"; node: Node; min: number; max: number; suffix: string }
-    | { type: "atom"; js: string }
+    /** One character; `set` is a superset of the characters it matches. */
+    | { type: "atom"; js: string; set: CharSet }
     | { type: "assert"; js: string };
 
 interface Flags {
@@ -47,22 +178,13 @@ interface Flags {
 const SYNTAX = new Set([..."^$\\.*+?()[]{}|/"]);
 const PY_SPACE = "\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SAMPLE = [
-    ...Array.from({ length: 95 }, (_, index) => String.fromCharCode(32 + index)),
-    "\t",
-    "\n",
-    "\r",
-    "é",
-    "ß",
-    "Ω",
-    "中",
-    " ",
-    "٣",
-    "\u{1f600}",
-];
 
 function hex(text: string, length: number): boolean {
     return text.length === length && /^[0-9a-fA-F]+$/.test(text);
+}
+
+function single(codePoint: number): CharSet {
+    return [[codePoint, codePoint]];
 }
 
 class Translator {
@@ -155,6 +277,16 @@ class Translator {
         return { type: "repeat", node, min, max, suffix };
     }
 
+    /** An atom matching one character of `members`, which is negated for `[^...]`. */
+    private charAtom(js: string, members: Members, negated = false): Node {
+        const set = negated
+            ? complement(members.under)
+            : this.flags.ignoreCase
+              ? caseClosure(members.over)
+              : members.over;
+        return { type: "atom", js, set };
+    }
+
     private atom(): Node | null {
         const char = this.src.codePointAt(this.i)!;
         const text = String.fromCodePoint(char);
@@ -165,7 +297,9 @@ class Translator {
                 return this.characterClass();
             case ".":
                 this.i++;
-                return { type: "atom", js: this.flags.dotAll ? "[\\s\\S]" : "[^\\n]" };
+                return this.flags.dotAll
+                    ? this.charAtom("[\\s\\S]", exactly(ALL))
+                    : this.charAtom("[^\\n]", exactly(single(0x0a)), true);
             case "^":
                 this.i++;
                 return { type: "assert", js: this.flags.multiline ? "(?<![^\\n])" : "^" };
@@ -185,7 +319,7 @@ class Translator {
                 break;
         }
         this.i += text.length;
-        return { type: "atom", js: this.literal(text) };
+        return this.charAtom(this.literal(text), exactly(single(char)));
     }
 
     private literal(text: string): string {
@@ -238,7 +372,7 @@ class Translator {
     }
 
     /** `\w`, `\d`, `\s` (and inside a class, without brackets) in Python's meaning. */
-    private classEscape(letter: string, inClass: boolean): string | null {
+    private classEscape(letter: string, inClass: boolean): { js: string; members: Members; negated: boolean } | null {
         const { ascii } = this.flags;
         const sets: Record<string, string> = {
             d: ascii ? "0-9" : "\\p{Nd}",
@@ -249,51 +383,68 @@ class Translator {
         if (!Object.hasOwn(sets, lower)) {
             return null;
         }
+        // Unicode digits and word characters are known exactly in ASCII only.
+        const members: Record<string, Members> = {
+            d: ascii ? exactly(ASCII_DIGITS) : { over: UNICODE_DIGITS, under: ASCII_DIGITS },
+            w: ascii ? exactly(ASCII_WORD) : { over: charSet(ASCII_WORD, NON_ASCII), under: ASCII_WORD },
+            s: exactly(ascii ? ASCII_SPACE : UNICODE_SPACE),
+        };
         if (letter === lower) {
-            return inClass ? sets[lower]! : `[${sets[lower]}]`;
+            return { js: inClass ? sets[lower]! : `[${sets[lower]}]`, members: members[lower]!, negated: false };
         }
         if (inClass) {
             throw new Unsupported("negated class escape inside a set");
         }
-        return `[^${sets[lower]}]`;
+        return { js: `[^${sets[lower]}]`, members: members[lower]!, negated: true };
     }
 
-    /** A single-character escape (`\n`, `\x41`, `\.`), as JavaScript text, or null when it is not one. */
-    private charEscape(inClass: boolean): string | null {
+    /** A single-character escape (`\n`, `\x41`, `\.`), as JavaScript text and code point, or null when it is not one. */
+    private charEscape(inClass: boolean): { js: string; codePoint: number } | null {
         const letter = this.src[this.i + 1];
         if (letter === undefined) {
             throw new Unsupported("bad escape (end of pattern)");
         }
-        const simple: Record<string, string> = { n: "\\n", r: "\\r", t: "\\t", f: "\\f", v: "\\v", a: "\\x07" };
+        const simple: Record<string, [string, number]> = {
+            n: ["\\n", 0x0a],
+            r: ["\\r", 0x0d],
+            t: ["\\t", 0x09],
+            f: ["\\f", 0x0c],
+            v: ["\\v", 0x0b],
+            a: ["\\x07", 0x07],
+        };
         if (Object.hasOwn(simple, letter)) {
             this.i += 2;
-            return simple[letter]!;
+            const [js, codePoint] = simple[letter]!;
+            return { js, codePoint };
         }
         if (letter === "x" || letter === "u" || letter === "U") {
             const length = letter === "x" ? 2 : letter === "u" ? 4 : 8;
             const digits = this.src.slice(this.i + 2, this.i + 2 + length);
-            if (!hex(digits, length) || Number.parseInt(digits, 16) > 0x10ffff) {
+            const codePoint = Number.parseInt(digits, 16);
+            if (!hex(digits, length) || codePoint > MAX_CODE_POINT) {
                 throw new Unsupported(`bad escape \\${letter}`);
             }
             this.i += 2 + length;
-            return `\\u{${Number.parseInt(digits, 16).toString(16)}}`;
+            return { js: `\\u{${codePoint.toString(16)}}`, codePoint };
         }
         if (letter === "0") {
             const digits = /^0[0-7]{0,2}/.exec(this.src.slice(this.i + 1))![0];
+            const codePoint = Number.parseInt(digits, 8);
             this.i += 1 + digits.length;
-            return `\\u{${Number.parseInt(digits, 8).toString(16)}}`;
+            return { js: `\\u{${codePoint.toString(16)}}`, codePoint };
         }
         if (/[0-9A-Za-z]/.test(letter)) {
             return null;
         }
-        const text = String.fromCodePoint(this.src.codePointAt(this.i + 1)!);
+        const codePoint = this.src.codePointAt(this.i + 1)!;
+        const text = String.fromCodePoint(codePoint);
         this.i += 1 + text.length;
-        return inClass ? this.classLiteral(text) : this.literal(text);
+        return { js: inClass ? this.classLiteral(text) : this.literal(text), codePoint };
     }
 
     private escape(): Node {
         const letter = this.src[this.i + 1] ?? "";
-        const word = this.classEscape("w", true);
+        const word = this.classEscape("w", true)!.js;
         const boundaries: Record<string, string> = {
             A: "(?<![\\s\\S])",
             Z: "(?![\\s\\S])",
@@ -307,51 +458,56 @@ class Translator {
         const set = this.classEscape(letter, false);
         if (set) {
             this.i += 2;
-            return { type: "atom", js: set };
+            return this.charAtom(set.js, set.members, set.negated);
         }
         const char = this.charEscape(false);
         if (char === null) {
             // Backreferences (`\1`), `\N{...}`, `\g` and unknown escapes.
             throw new Unsupported(`unsupported escape \\${letter}`);
         }
-        return { type: "atom", js: char };
+        return this.charAtom(char.js, exactly(single(char.codePoint)));
     }
 
     private classLiteral(text: string): string {
         return "\\]-[^".includes(text) ? `\\${text}` : text;
     }
 
-    /** One member of a set: a character (returned for ranges) or a class escape (null). */
-    private classMember(): { js: string; single: boolean } {
+    /** One member of a set: a character (`codePoint`, usable in ranges) or a class escape. */
+    private classMember(): { js: string; members: Members; codePoint: number | null } {
         if (this.peek() === "\\") {
             const letter = this.src[this.i + 1] ?? "";
             if (letter === "b") {
                 this.i += 2;
-                return { js: "\\x08", single: true };
+                return { js: "\\x08", members: exactly(single(0x08)), codePoint: 0x08 };
             }
             const set = this.classEscape(letter, true);
             if (set) {
                 this.i += 2;
-                return { js: set, single: false };
+                return { js: set.js, members: set.members, codePoint: null };
             }
             const char = this.charEscape(true);
             if (char === null) {
                 throw new Unsupported(`unsupported escape \\${letter} in a set`);
             }
-            return { js: char, single: true };
+            return { js: char.js, members: exactly(single(char.codePoint)), codePoint: char.codePoint };
         }
-        const text = String.fromCodePoint(this.src.codePointAt(this.i)!);
+        const codePoint = this.src.codePointAt(this.i)!;
+        const text = String.fromCodePoint(codePoint);
         this.i += text.length;
-        return { js: this.classLiteral(text), single: true };
+        return { js: this.classLiteral(text), members: exactly(single(codePoint)), codePoint };
     }
 
     private characterClass(): Node {
         this.i++;
         let js = "[";
+        let negated = false;
         if (this.peek() === "^") {
             js += "^";
+            negated = true;
             this.i++;
         }
+        const over: CharSet[] = [];
+        const under: CharSet[] = [];
         let first = true;
         while (this.peek() !== "]" || first) {
             if (this.peek() === undefined) {
@@ -360,6 +516,8 @@ class Translator {
             if (first && this.peek() === "]") {
                 this.i++;
                 js += "\\]";
+                over.push(single(0x5d));
+                under.push(single(0x5d));
                 first = false;
                 continue;
             }
@@ -368,16 +526,20 @@ class Translator {
             if (this.peek() === "-" && this.peek(1) !== "]" && this.peek(1) !== undefined) {
                 this.i++;
                 const end = this.classMember();
-                if (!start.single || !end.single) {
+                if (start.codePoint === null || end.codePoint === null) {
                     throw new Unsupported("bad character range");
                 }
                 js += `${start.js}-${end.js}`;
+                over.push([[start.codePoint, end.codePoint]]);
+                under.push([[start.codePoint, end.codePoint]]);
             } else {
                 js += start.js;
+                over.push(start.members.over);
+                under.push(start.members.under);
             }
         }
         this.i++;
-        return { type: "atom", js: `${js}]` };
+        return this.charAtom(`${js}]`, { over: charSet(...over), under: charSet(...under) }, negated);
     }
 }
 
@@ -404,132 +566,117 @@ function emit(node: Node): string {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Backtracking risk
+// Linear-time patterns
 
-/** The character a literal atom matches, or null for other nodes. */
-function literalChar(node: Node): string | null {
-    if (node.type !== "atom") {
-        return null;
-    }
-    const chars = [...node.js];
-    if (chars.length === 1) {
-        return node.js;
-    }
-    return chars.length === 2 && chars[0] === "\\" && !/[0-9A-Za-z]/.test(chars[1]!) ? chars[1]! : null;
+/** A step of a pattern without alternatives: a zero-width assertion, or one character matched `min` to `max` times. */
+type Step = { type: "assert" } | { type: "chars"; set: CharSet; min: number; max: number };
+
+/** Combinations of alternatives analysed at most. */
+const MAX_BRANCHES = 256;
+
+/** The characters the first step of `steps` must match, or null when it may match nothing. */
+function firstChars(steps: readonly Step[]): CharSet | null {
+    const first = steps.find((step) => step.type === "chars");
+    return first?.type === "chars" && first.min >= 1 ? first.set : null;
 }
 
-class Risk {
-    private readonly cache = new Map<string, RegExp>();
-
-    constructor(private readonly ignoreCase: boolean) {}
-
-    /** Whether a node can consume the character `char` (zero-width nodes cannot). */
-    canMatch(node: Node, char: string): boolean {
-        switch (node.type) {
-            case "atom": {
-                let regex = this.cache.get(node.js);
-                if (!regex) {
-                    regex = new RegExp(`^(?:${node.js})$`, this.ignoreCase ? "ui" : "u");
-                    this.cache.set(node.js, regex);
+/**
+ * The step sequences of `node`, one per combination of alternatives, or null when the node has a construct the
+ * analysis does not cover: lookarounds, repeated groups other than single characters, and alternatives that may
+ * match nothing or start with the same character (only one alternative may get past its first character).
+ */
+function branches(node: Node): Step[][] | null {
+    switch (node.type) {
+        case "atom":
+            return [[{ type: "chars", set: node.set, min: 1, max: 1 }]];
+        case "assert":
+            return [[{ type: "assert" }]];
+        case "look":
+            return null;
+        case "group":
+            return branches(node.body);
+        case "seq": {
+            let out: Step[][] = [[]];
+            for (const item of node.items) {
+                const parts = branches(item);
+                if (!parts || out.length * parts.length > MAX_BRANCHES) {
+                    return null;
                 }
-                return regex.test(char);
+                out = out.flatMap((prefix) => parts.map((part) => [...prefix, ...part]));
             }
-            case "seq":
-                return node.items.some((item) => this.canMatch(item, char));
-            case "alt":
-                return node.options.some((option) => this.canMatch(option, char));
-            case "group":
-                return this.canMatch(node.body, char);
-            case "repeat":
-                return this.canMatch(node.node, char);
-            case "look":
-            case "assert":
-                return false;
+            return out;
         }
-    }
-
-    /** True when the pattern has a repetition whose iterations can split the same text in many ways. */
-    risky(node: Node): boolean {
-        switch (node.type) {
-            case "seq":
-                return node.items.some((item) => this.risky(item));
-            case "alt":
-                return node.options.some((option) => this.risky(option));
-            case "group":
-            case "look":
-                return this.risky(node.body);
-            case "repeat":
-                return (node.max > 1 && !this.unambiguous(node.node)) || this.risky(node.node);
-            default:
-                return false;
-        }
-    }
-
-    private flexible(node: Node): boolean {
-        switch (node.type) {
-            case "repeat":
-                return node.max > 1 || this.flexible(node.node);
-            case "alt":
-                return true;
-            case "seq":
-                return node.items.some((item) => this.flexible(item));
-            case "group":
-                return this.flexible(node.body);
-            default:
-                return false;
-        }
-    }
-
-    /** Whether repeating `node` matches any text in at most one way, as far as cheap checks tell. */
-    private unambiguous(node: Node): boolean {
-        if (node.type === "group") {
-            return this.unambiguous(node.body);
-        }
-        if (!this.flexible(node)) {
-            return true;
-        }
-        if (node.type === "seq") {
-            // A literal no other part matches delimits every iteration.
-            return node.items.some((item, index) => {
-                const char = literalChar(item);
-                return char !== null && !node.items.some((other, j) => j !== index && this.canMatch(other, char));
-            });
-        }
-        if (node.type === "alt") {
-            const firsts = node.options.map((option) => this.first(option));
-            if (firsts.some((first) => first === null)) {
-                return false;
+        case "alt": {
+            const out: Step[][] = [];
+            const starts: CharSet[] = [];
+            for (const option of node.options) {
+                const parts = branches(option);
+                const firsts = parts?.map(firstChars);
+                if (!parts || !firsts || firsts.some((set) => set === null)) {
+                    return null;
+                }
+                const start = charSet(...(firsts as CharSet[]));
+                if (starts.some((other) => intersects(other, start)) || out.length + parts.length > MAX_BRANCHES) {
+                    return null;
+                }
+                starts.push(start);
+                out.push(...parts);
             }
-            // Alternatives are told apart by their first character when no sample character starts two of them.
-            const disjoint = SAMPLE.every((char) => firsts.filter((first) => this.canMatch(first!, char)).length <= 1);
-            return disjoint && node.options.every((option) => !this.flexible(option) || this.unambiguous(option));
+            return out;
         }
-        return false;
-    }
-
-    /** The node that consumes the first character of `node`, or null when that is not fixed. */
-    private first(node: Node): Node | null {
-        switch (node.type) {
-            case "atom":
-                return node;
-            case "group":
-                return this.first(node.body);
-            case "repeat":
-                return node.min > 0 ? this.first(node.node) : null;
-            case "seq": {
-                const item = node.items.find((each) => each.type !== "assert" && each.type !== "look");
-                return item ? this.first(item) : null;
+        case "repeat": {
+            // A repeated character, class or alternation of characters is one step.
+            const parts = branches(node.node);
+            const sets: CharSet[] = [];
+            for (const part of parts ?? [null]) {
+                const step = part?.length === 1 ? part[0]! : null;
+                if (step?.type !== "chars" || step.min !== 1 || step.max !== 1) {
+                    return null;
+                }
+                sets.push(step.set);
             }
-            default:
-                return null;
+            return [[{ type: "chars", set: charSet(...sets), min: node.min, max: node.max }]];
         }
     }
 }
 
 /**
+ * Whether a backtracking engine matches `steps` from a fixed start in time linear in the input: every step that can
+ * end in several places is followed by a step that must match a character it cannot match, so only one of its ends
+ * leads further, or is followed only by fixed-length steps (each of its ends is then checked in constant time).
+ */
+function linearSteps(steps: readonly Step[]): boolean {
+    const chars = steps.filter((step): step is Extract<Step, { type: "chars" }> => step.type === "chars");
+    const variable = (step: (typeof chars)[number]) => step.max > step.min;
+    let lastVariable = -1;
+    chars.forEach((step, index) => {
+        if (variable(step)) {
+            lastVariable = index;
+        }
+    });
+    return chars.every((step, index) => {
+        if (!variable(step) || index === lastVariable) {
+            return true;
+        }
+        const next = chars[index + 1]!;
+        return next.min >= 1 && !intersects(step.set, next.set);
+    });
+}
+
+/** True when the pattern is a sequence of characters and classes whose matching provably takes linear time. */
+function isLinear(tree: Node): boolean {
+    const steps = branches(tree);
+    return steps !== null && steps.every(linearSteps);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Matching
+
+/**
  * Translates and compiles a Python pattern for `re.match` semantics (anchored at the start, sticky).
  *
- * @returns null when the pattern is undecided: Python syntax JavaScript cannot express, or not compilable
+ * @returns null when the pattern is undecided: Python syntax JavaScript cannot express, not compilable, too long,
+ *   or not provably linear
  */
 export function compilePythonPattern(expression: string): PythonPattern | null {
     if (expression.length > MAX_PATTERN_LENGTH) {
@@ -551,9 +698,10 @@ export function compilePythonPattern(expression: string): PythonPattern | null {
     }
     try {
         const tree = new Translator(source, flags).parse();
-        const regex = new RegExp(emit(tree), flags.ignoreCase ? "uyi" : "uy");
-        const risky = expression.length > MAX_SAFE_PATTERN_LENGTH || new Risk(flags.ignoreCase).risky(tree);
-        return { regex, inputLimit: risky ? RISKY_PATTERN_INPUT : MAX_PATTERN_INPUT };
+        if (!isLinear(tree)) {
+            return null;
+        }
+        return { regex: new RegExp(emit(tree), flags.ignoreCase ? "uyi" : "uy"), inputLimit: MAX_PATTERN_INPUT };
     } catch {
         return null;
     }

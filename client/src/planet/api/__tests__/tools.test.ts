@@ -216,6 +216,38 @@ describe("tool panels", () => {
         const listed = await fetchJson(makeRouter(), "GET", "/api/tools?in_panel=false");
         expect(listed.map((tool: ToolEntry) => tool.id)).toContain("installed_tool");
     });
+
+    it("shows installed tools in an Installed tools section of the default panel", async () => {
+        useToolbox({ ...TOOLBOX_FILES, "/static/planet/data/toolbox/tools_in_panel.json": [{ id: "prebuilt" }] });
+        const installed = entry({ id: "installed_tool", name: "Installed", panel_section_id: "planet_installed" });
+        const record = {
+            tool_version: "1.0",
+            source: "installed" as const,
+            message: null,
+            bundle_url: null,
+            panel_section_id: "planet_installed",
+            panel_section_name: "Installed tools",
+            hidden: false,
+        };
+        await tools.put({ ...record, tool_id: "installed_tool", status: "ready", bundle: { panel_entry: installed } });
+        await tools.put({
+            ...record,
+            tool_id: "failed_tool",
+            status: "failed",
+            bundle: { panel_entry: entry({ id: "failed_tool", name: "Failed" }) },
+        });
+        const router = makeRouter();
+        const panel = await fetchJson(router, "GET", "/api/tool_panels/default");
+        expect(Object.keys(panel)).toEqual(["getext", "textutil", "datamash", "planet_installed"]);
+        expect(panel.planet_installed).toMatchObject({
+            model_class: "ToolSection",
+            name: "Installed tools",
+            tools: ["installed_tool"],
+        });
+        expect(await fetchJson(router, "GET", "/api/tool_panels/ontology:edam_topics")).toEqual(TOPIC_PANEL);
+        const sections = await fetchJson(router, "GET", "/api/tools");
+        expect(sections.at(-1)).toMatchObject({ id: "planet_installed", elems: [installed] });
+    });
 });
 
 describe("GET /api/tools/{tool_id}", () => {

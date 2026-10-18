@@ -205,6 +205,60 @@ def test_galaxy_tools_produce_valid_bundles():
     assert checked > 100
 
 
+@pytest.mark.parametrize(
+    "file_name, tool_id, model_class, tool_type",
+    [
+        ("zip_collection.xml", "__ZIP_COLLECTION__", "ZipCollectionTool", "zip_collection"),
+        ("unzip_collection.xml", "__UNZIP_COLLECTION__", "UnzipCollectionTool", "unzip_collection"),
+        ("flatten_collection.xml", "__FLATTEN__", "FlattenTool", "flatten_collection"),
+        (
+            "filter_failed_collection_1.1.0.xml",
+            "__FILTER_FAILED_DATASETS__",
+            "FilterFailedDatasetsTool",
+            "filter_failed_datasets_collection",
+        ),
+        (
+            "filter_empty_collection_1.1.0.xml",
+            "__FILTER_EMPTY_DATASETS__",
+            "FilterEmptyDatasetsTool",
+            "filter_empty_datasets_collection",
+        ),
+        (
+            "keep_success_collection_1.1.0.xml",
+            "__KEEP_SUCCESS_DATASETS__",
+            "KeepSuccessDatasetsTool",
+            "keep_success_datasets_collection",
+        ),
+        ("sort_collection_list.xml", "__SORTLIST__", "SortTool", "sort_collection"),
+    ],
+)
+def test_galaxy_collection_operations_keep_their_class(file_name, tool_id, model_class, tool_type):
+    path = Path(galaxy_directory()) / "lib" / "galaxy" / "tools" / file_name
+    bundle = build_bundle(get_tool_source(str(path)))
+    assert (bundle["id"], bundle["model_class"], bundle["tool_type"]) == (tool_id, model_class, tool_type)
+    assert bundle["form_style"] == "regular"
+    errors = [e.message for e in _validator().iter_errors(bundle)]
+    assert not errors, errors[:3]
+
+
+@pytest.mark.parametrize(
+    "type_element",
+    [
+        '<type class="FlattenTool" module="galaxy.tools"/>',
+        '<type class="Tool" module="planet_runtime.generate.bundle"/>',
+        '<type class="SetMetadataTool"/>',
+    ],
+)
+def test_rejects_tool_classes_other_than_the_tool_types(tmp_path, type_element):
+    with pytest.raises(BundleError, match="custom tool class"):
+        _bundle(tmp_path, _tool(extra=type_element))
+
+
+def test_accepts_the_tool_types_own_class(tmp_path):
+    bundle = _bundle(tmp_path, _tool(extra='<type class="Tool" module="galaxy.tools"/>'))
+    assert bundle["model_class"] == "Tool"
+
+
 def test_rejects_tools_for_newer_galaxy(tmp_path):
     with pytest.raises(BundleError, match="newer"):
         _bundle(tmp_path, _tool(attrs='profile="99.0"'))
@@ -231,3 +285,46 @@ def test_value_from_conditional_gets_the_cases_galaxy_computes():
 
     without_registry = build_bundle(get_tool_source(str(upload)))
     assert [i for i in without_registry["inputs"] if i["name"] == "files_metadata"][0]["cases"] == []
+
+
+@pytest.mark.parametrize(
+    "value_from",
+    [
+        "self:app.datatypes_registry.__class__",
+        "self:app.datatypes_registry.get_upload_metadata_params.__call__",
+        "self:app.datatypes_registry.get_datatype_by_extension",
+        "self:app.config.tool_data_path",
+        "other:app.datatypes_registry.get_upload_metadata_params",
+    ],
+)
+def test_value_from_resolves_only_known_references(tmp_path, value_from):
+    calls = []
+
+    class Registry:
+        def get_upload_metadata_params(self, context, group, tool):
+            calls.append("metadata")
+            return {"txt": ""}
+
+        def get_datatype_by_extension(self, *args):
+            calls.append("datatype")
+            raise TypeError("unexpected arguments")
+
+    conditional = (
+        f'<param name="t" type="text" value="x"/><conditional name="c" value_from="{value_from}" value_ref="t"/>'
+    )
+    bundle = _bundle(tmp_path, _tool(conditional), datatypes_registry=Registry())
+    (case_holder,) = [i for i in bundle["inputs"] if i["name"] == "c"]
+    assert case_holder["cases"] == [] and calls == []
+
+
+def test_value_from_callable_errors_give_no_cases(tmp_path):
+    class Registry:
+        def get_upload_metadata_params(self, context, group, tool):
+            raise TypeError("unexpected arguments")
+
+    conditional = (
+        '<param name="t" type="text" value="x"/>'
+        '<conditional name="c" value_from="self:app.datatypes_registry.get_upload_metadata_params" value_ref="t"/>'
+    )
+    bundle = _bundle(tmp_path, _tool(conditional), datatypes_registry=Registry())
+    assert [i for i in bundle["inputs"] if i["name"] == "c"][0]["cases"] == []
