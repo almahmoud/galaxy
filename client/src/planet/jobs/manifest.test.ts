@@ -23,10 +23,13 @@ import {
 } from "./__fixtures__/setup";
 import { slotsAndMemory } from "./k8sJob";
 import { DEADLINE_MARGIN_SECONDS, toolArchiveKey, toolArchiveStaticPath } from "./keys";
+import { MAX_UPLOAD_SLOTS } from "./limits";
 import {
     abortDispatch,
     adoptDispatch,
+    AttemptInUseError,
     DATA_FETCH_TOOL_ID,
+    DECOMPRESSION_FACTOR,
     DEFAULT_SLOT_COUNT,
     DEFAULT_START_TIMEOUT_SECONDS,
     DispatchError,
@@ -293,7 +296,7 @@ describe("prepareDispatch for a tool job", () => {
         );
         expect(deps.s3.objects.get(key)).toEqual(tar);
 
-        await prepareDispatch(job, deps);
+        await prepareDispatch(job, deps, { attempt: 2 });
         expect(deps.fetchStatic).toHaveBeenCalledTimes(1);
         expect(deps.s3.log.filter((entry) => entry === `PUT ${key}`)).toHaveLength(1);
     });
@@ -331,7 +334,7 @@ describe("prepareDispatch for a tool job", () => {
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
     });
 
-    it("creates multipart uploads for the outputs of jobs with large inputs; a new dispatch of the attempt aborts them", async () => {
+    it("creates multipart uploads for the outputs of jobs with large inputs; preparing the attempt again aborts them", async () => {
         const { output, job } = await datamashJob({ inputSize: 5 * GIB });
         const { deps } = await toolDeps();
         const plan = await prepareDispatch(job, deps);
@@ -347,18 +350,33 @@ describe("prepareDispatch for a tool job", () => {
         expect(plan.multipart).toEqual([{ key, uploadId: "upload-1" }]);
         expect(schemaErrors(manifest, "manifest")).toEqual([]);
 
-        const again = await prepareDispatch(job, deps);
+        // The attempt's objects exist: it is never prepared again, and the uploads of its record are aborted.
+        const records = deps.s3.log.length;
+        await expect(prepareDispatch(job, deps)).rejects.toBeInstanceOf(AttemptInUseError);
         expect(deps.s3.aborted).toEqual(["upload-1"]);
-        expect(again.attempt).toBe(1);
-        expect(again.dispatchId).not.toBe(plan.dispatchId);
-        expect(again.multipart).toEqual([{ key, uploadId: "upload-2" }]);
+        expect(deps.s3.log.slice(records).filter((entry) => entry.startsWith("PUT "))).toEqual([]);
+        expect((await readDispatchRecord(deps.s3, job.id, 1))?.dispatch_id).toBe(plan.dispatchId);
 
         const next = await prepareDispatch(job, deps, { attempt: 2 });
         expect(deps.s3.aborted).toEqual(["upload-1"]);
+        expect(next.multipart).toEqual([{ key, uploadId: "upload-2" }]);
         expect(next.manifestKey).toBe(`jobs/${job.id}/a2/manifest.json`);
         expect(deps.s3.json<Manifest>(next.manifestKey).job.attempt).toBe(2);
         expect(deps.s3.json<Manifest>(next.manifestKey).job_files.results).toBe(put(`jobs/${job.id}/a2/results.json`));
         expect(deps.s3.json<Manifest>(`jobs/${job.id}/a1/manifest.json`).job.attempt).toBe(1);
+    });
+
+    it("never prepares an attempt whose objects a pod of an earlier dispatch may have written", async () => {
+        const { job } = await datamashJob();
+        const { deps } = await toolDeps();
+        // A pod of a dispatch whose record is gone wrote its results.
+        deps.s3.objects.set(`jobs/${job.id}/a1/results.json`, new TextEncoder().encode("{}"));
+        const error = await prepareDispatch(job, deps).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(AttemptInUseError);
+        expect(error).toMatchObject({ jobId: job.id, attempt: 1, permanent: false });
+        expect(deps.s3.objects.has(`jobs/${job.id}/a1/manifest.json`)).toBe(false);
+        expect(deps.s3.objects.has(`jobs/${job.id}/a1/dispatch.json`)).toBe(false);
+        expect((await prepareDispatch(job, deps, { attempt: 2 })).manifestKey).toBe(`jobs/${job.id}/a2/manifest.json`);
     });
 
     it("adopts an attempt only for the Job of its own dispatch record, and aborts an attempt's uploads", async () => {
@@ -820,11 +838,48 @@ describe("prepareDispatch for an upload job", () => {
         const manifest = deps.s3.json<Manifest>(plan.manifestKey);
         expect(plan.multipart).toEqual([{ key: `datasets/${outputs[0]!.dataset.uuid}/data`, uploadId: "upload-1" }]);
         expect(manifest.outputs.map((output) => output.data?.multipart?.parts.length ?? 0)).toEqual([
-            multipartLayout(5 * GIB).parts,
+            multipartLayout(5 * GIB * DECOMPRESSION_FACTOR).parts,
             0,
             0,
         ]);
         expect(manifest.limits?.start_timeout_seconds).toBeNull();
+    });
+
+    it("gives compressed uploads that data_fetch may decompress room for their decompressed size", async () => {
+        const compressed = await addUpload({ name: "table.tabular.gz", size: 3 * GIB });
+        const kept = await addUpload({ name: "archive.tar.gz", size: 3 * GIB });
+        const { job, outputs } = await uploadJob(
+            [
+                {
+                    destination: { type: "hdas" },
+                    elements: [
+                        { src: "planet", file: compressed.id },
+                        { src: "planet", file: kept.id, auto_decompress: false },
+                    ],
+                },
+            ],
+            {},
+            2,
+        );
+        const deps = testDeps();
+        const plan = await prepareDispatch(job, deps);
+        const manifest = deps.s3.json<Manifest>(plan.manifestKey);
+        expect(plan.multipart).toEqual([{ key: `datasets/${outputs[0]!.dataset.uuid}/data`, uploadId: "upload-1" }]);
+        expect(manifest.outputs.map((output) => Boolean(output.data?.multipart))).toEqual([true, false]);
+        const layout = multipartLayout(3 * GIB * DECOMPRESSION_FACTOR);
+        expect(layout.parts * layout.partSize).toBeGreaterThan(15 * GIB);
+    });
+
+    it("refuses uploads that create more datasets than one upload job can", async () => {
+        const elements = Array.from({ length: MAX_UPLOAD_SLOTS + 1 }, (_, index) => ({
+            src: "url",
+            url: `https://example.org/${index}.txt`,
+        }));
+        const { job } = await uploadJob([{ destination: { type: "hdca" }, collection_type: "list", elements }], {}, 0);
+        const error = await prepareDispatch(job, testDeps()).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DispatchError);
+        expect(error).toMatchObject({ permanent: true });
+        expect((error as Error).message).toContain(`at most ${MAX_UPLOAD_SLOTS}`);
     });
 
     it("accepts requests the upload API already pointed at upload sessions", async () => {

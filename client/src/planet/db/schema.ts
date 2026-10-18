@@ -17,7 +17,12 @@ import type {
 } from "./types";
 
 export const DB_NAME = "planet";
-export const DB_VERSION = 1;
+/**
+ * Version 2 changes no stores. Opening it closes the connections of tabs of builds that predate the leader protocol
+ * version (`jobs/leader.ts`); they cannot reopen the database at version 1, so they can no longer lead job processing
+ * with an older job layout.
+ */
+export const DB_VERSION = 2;
 
 /** Keys of the singleton records. */
 export const SETTINGS_KEY = "settings";

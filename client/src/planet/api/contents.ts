@@ -1621,7 +1621,7 @@ export async function undeleteHda(id: string, tx: WriteTx): Promise<HdaRecord> {
 /**
  * Purges an HDA (`HDAManager.purge`): marks it deleted and purged, stops its creating job and, when no other copy
  * remains unpurged, marks the dataset purged and queues a `purge` entry so the leader removes its objects from the
- * bucket. `tx` must cover {@link JOB_STORES}.
+ * bucket once its creating job can no longer write them. `tx` must cover {@link JOB_STORES}.
  */
 export async function purgeHda(id: string, tx: WriteTx): Promise<HdaRecord> {
     const hda = await hdaOrThrow(id, tx);

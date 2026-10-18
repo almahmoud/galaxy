@@ -12,6 +12,7 @@ import {
     JobSpecError,
     type JobSpecInput,
     parseQuantity,
+    runtimePullPolicy,
     SPEC_HASH_ANNOTATION,
     specHash,
 } from "../k8sJob";
@@ -270,13 +271,10 @@ describe("tool job specs", () => {
         expect(byName(userns, "stage-in").securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 10001 });
     });
 
-    it("use the configured runtime image and pull images only when missing", async () => {
-        const spec = await buildJobSpec(
-            input({
-                cluster: { runtime_image: "registry.example.org/planet-runtime@sha256:abc" },
-            }),
-        );
-        expect(byName(spec, "stage-in").image).toBe("registry.example.org/planet-runtime@sha256:abc");
+    it("use the configured runtime image and pull pinned images only when missing", async () => {
+        const pinned = `registry.example.org/planet-runtime@sha256:${"a".repeat(64)}`;
+        const spec = await buildJobSpec(input({ cluster: { runtime_image: pinned } }));
+        expect(byName(spec, "stage-in").image).toBe(pinned);
         const containers = [...spec.spec!.template.spec.initContainers!, ...spec.spec!.template.spec.containers];
         expect(containers.every((c) => c.imagePullPolicy === "IfNotPresent")).toBe(true);
         expect(byName(await buildJobSpec(input()), "stage-out").image).toBe(DEFAULT_RUNTIME_IMAGE);
@@ -289,6 +287,42 @@ describe("tool job specs", () => {
             ).image,
         ).toBe("other:1");
         await expect(buildJobSpec(input({ buildRuntimeImage: "bad image" }))).rejects.toThrow("build's runtime image");
+    });
+
+    it("pull runtime images without a digest every time, unless the build allows node-local images", async () => {
+        const policies = (spec: Job) =>
+            Object.fromEntries(
+                [...(spec.spec!.template.spec.initContainers ?? []), ...spec.spec!.template.spec.containers].map(
+                    (c) => [c.name, c.imagePullPolicy],
+                ),
+            );
+        const tagged = await buildJobSpec(input({ cluster: { runtime_image: "registry.example.org/runtime:1" } }));
+        expect(policies(tagged)).toEqual({ "stage-in": "Always", "stage-out": "Always", tool: "IfNotPresent" });
+        expect(policies(await buildJobSpec(input()))).toMatchObject({ "stage-in": "Always", "stage-out": "Always" });
+
+        // A tool without a container of its own runs in the runtime image, with the same policy.
+        const inRuntime = await buildJobSpec(
+            input({ cluster: { runtime_image: "planet-runtime:dev" }, plan: { toolImage: "planet-runtime:dev" } }),
+        );
+        expect(policies(inRuntime)).toEqual({ "stage-in": "Always", "stage-out": "Always", tool: "Always" });
+        const local = await buildJobSpec(
+            input({
+                cluster: { runtime_image: "planet-runtime:dev" },
+                plan: { toolImage: "planet-runtime:dev" },
+                runtimeTagPullPolicy: "IfNotPresent",
+            }),
+        );
+        expect(policies(local)).toEqual({
+            "stage-in": "IfNotPresent",
+            "stage-out": "IfNotPresent",
+            tool: "IfNotPresent",
+        });
+        const upload = await buildJobSpec(input({ plan: { kind: "upload", toolImage: null } }));
+        expect(policies(upload)).toEqual({ stager: "Always" });
+
+        expect(runtimePullPolicy(`a/b@sha256:${"0".repeat(64)}`)).toBe("IfNotPresent");
+        expect(runtimePullPolicy("a/b:latest")).toBe("Always");
+        expect(runtimePullPolicy("a/b:latest", "IfNotPresent")).toBe("IfNotPresent");
     });
 
     it("refuse plans the cluster would reject", async () => {

@@ -8,6 +8,7 @@ import {
     hdas,
     histories,
     JOB_STORES,
+    type JobKubernetesInfo,
     jobs,
     kv,
     leader,
@@ -24,7 +25,14 @@ import type { JobDeps } from "../deps";
 import { DEPENDENT_PAUSE_MESSAGE } from "../gating";
 import { FAILURE_MESSAGES, ingestFailure, ingestResults, readPrepare } from "../ingest";
 import { buildJobSpec, DISPATCH_ID_ANNOTATION, jobName, SPEC_HASH_ANNOTATION } from "../k8sJob";
-import { JobManager, type JobProtocol, MISSING_JOB_GRACE_MS, NO_POD_GRACE_MS } from "../manager";
+import {
+    JobManager,
+    type JobProtocol,
+    MISSING_JOB_GRACE_MS,
+    NO_POD_GRACE_MS,
+    POD_GONE_MS,
+    PURGE_RECHECK_MS,
+} from "../manager";
 import { abortDispatch, adoptDispatch, DATA_FETCH_TOOL_ID, prepareDispatch } from "../manifest";
 import { ProtocolError } from "../schemas";
 import {
@@ -63,7 +71,7 @@ interface Harness {
 }
 
 async function start(
-    setup: { kube?: FakeKube; protocol?: FakeProtocol | JobProtocol; deps?: JobDeps } = {},
+    setup: { kube?: FakeKube; protocol?: FakeProtocol | JobProtocol; deps?: JobDeps; epoch?: number } = {},
 ): Promise<Harness> {
     const kube = setup.kube ?? new FakeKube();
     const protocol = setup.protocol ?? new FakeProtocol();
@@ -79,6 +87,7 @@ async function start(
         deps,
         protocol,
         settings: stored,
+        epoch: setup.epoch,
         now: () => Math.max(clock.now, Date.now()),
         onError: (error) => errors.push(error),
         onFenced: () => fenced.push(1),
@@ -277,12 +286,114 @@ describe("dispatch and gating", () => {
 
         const { manager: running, clock } = await start({ kube, protocol });
         const [entry] = await outbox.list();
-        expect(entry?.payload).toEqual({ attempt: 2 });
+        const replaced = jobName(stored.instance_id, job.id, 1);
+        expect(entry?.payload).toEqual({ attempt: 2, replace: [replaced] });
         protocol.prepareError = null;
         clock.now = Date.now() + 60_000;
         await running.drainOutbox();
         expect(protocol.dispatched).toEqual([{ jobId: job.id, attempt: 2 }]);
         expect((await jobs.get(job.id))?.k8s?.attempt).toBe(2);
+        expect(kube.deleted).toEqual([replaced, replaced]);
+    });
+
+    it("moves past an attempt whose Job of another dispatch it could not delete, and deletes it first next time", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const stored = await settings.getStored();
+        const kube = new FakeKube();
+        const protocol = new FakeProtocol();
+        const plan = await protocol.prepareDispatch(job, fakeDeps().deps, { attempt: 1 });
+        protocol.dispatched.length = 0;
+        const replaced = jobName(stored.instance_id, job.id, 1);
+        await kube.createJob(
+            await buildJobSpec({
+                instanceId: stored.instance_id,
+                jobId: job.id,
+                attempt: 1,
+                plan: { ...plan, dispatchId: "e".repeat(16) },
+                cluster: stored.cluster,
+            }),
+        );
+        kube.created.length = 0;
+        kube.deleteError = new KubeError(503, "ServiceUnavailable", "The gateway is unavailable");
+
+        const { manager: running, clock } = await start({ kube, protocol });
+        // The entry moved on before the deletion was tried, so attempt 1 is never prepared again.
+        expect((await outbox.list())[0]?.payload).toEqual({ attempt: 2, replace: [replaced] });
+        expect(kube.jobs.has(replaced)).toBe(true);
+        expect(protocol.abortDispatch).not.toHaveBeenCalled();
+        expect(kube.created).toEqual([]);
+
+        clock.now = Date.now() + 60_000;
+        await running.drainOutbox();
+        expect(kube.jobs.has(replaced)).toBe(false);
+        expect(protocol.dispatched).toEqual([{ jobId: job.id, attempt: 2 }]);
+        expect(kube.created.map((created) => created.metadata.name)).toEqual([jobName(stored.instance_id, job.id, 2)]);
+        expect(await outbox.list()).toEqual([]);
+    });
+
+    it("never prepares again an attempt whose objects exist although its Job does not", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const stored = await settings.getStored();
+        const protocol = new FakeProtocol();
+        // A dispatch wrote attempt 1's objects; its Job finished and was deleted by its TTL.
+        await protocol.prepareDispatch(job, fakeDeps().deps, { attempt: 1 });
+        protocol.dispatched.length = 0;
+
+        const { kube } = await start({ protocol });
+        expect(protocol.dispatched).toEqual([{ jobId: job.id, attempt: 2 }]);
+        expect(kube.created.map((created) => created.metadata.name)).toEqual([jobName(stored.instance_id, job.id, 2)]);
+        expect((await jobs.get(job.id))?.k8s).toMatchObject({ attempt: 2, stage_in_retries: 0 });
+    });
+
+    it("keeps the Job another leader recorded for a job while its own create request was in flight", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const stored = await settings.getStored();
+        const kube = new FakeKube();
+        const recorded: JobKubernetesInfo = {
+            namespace: "planet",
+            name: jobName(stored.instance_id, job.id, 7),
+            uid: "uid-other",
+            attempt: 7,
+            spec_hash: null,
+            pod_name: null,
+            node_name: null,
+            image: null,
+            kind: "tool",
+            created: null,
+            prepared: false,
+            tool_termination: null,
+            multipart: [],
+        };
+        kube.beforeCreate = async () => {
+            kube.beforeCreate = null;
+            await jobs.update(job.id, { state: "queued", k8s: recorded });
+        };
+
+        await start({ kube });
+        const ours = jobName(stored.instance_id, job.id, 1);
+        expect(kube.created.map((created) => created.metadata.name)).toEqual([ours]);
+        expect(kube.deleted).toEqual([ours]);
+        expect((await jobs.get(job.id))?.k8s).toEqual(recorded);
+        expect(await outbox.list()).toEqual([]);
+    });
+
+    it("deletes the Job it created for a job that can no longer be dispatched", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        const stored = await settings.getStored();
+        const kube = new FakeKube();
+        kube.beforeCreate = async () => {
+            kube.beforeCreate = null;
+            await jobs.update(job.id, { state: "paused" });
+        };
+
+        await start({ kube });
+        const ours = jobName(stored.instance_id, job.id, 1);
+        expect(kube.deleted).toEqual([ours]);
+        expect(await jobs.get(job.id)).toMatchObject({ state: "paused", k8s: null });
     });
 });
 
@@ -390,7 +501,20 @@ describe("dispatch through the protocol module", () => {
 
         const { fenced } = await start({ protocol, deps });
         expect(fenced.length).toBeGreaterThan(0);
-        expect(s3.log.filter((entry) => !entry.startsWith("GET ") && !entry.startsWith("HEAD "))).toEqual([]);
+        expect(s3.log.filter((entry) => !/^(GET|HEAD|LIST) /.test(entry))).toEqual([]);
+        expect(await jobState(job.id)).toBe("new");
+    });
+
+    it("writes nothing for an earlier epoch of the same tab, even while that tab's current epoch is valid", async () => {
+        const { job, deps, protocol, s3 } = await largeUpload();
+        const previous = await leader.claimEpoch();
+        // The tab leads again: its fence now holds the new, current epoch.
+        setLeaderFence(await leader.claimEpoch());
+
+        const { fenced, kube } = await start({ protocol, deps, epoch: previous });
+        expect(fenced.length).toBeGreaterThan(0);
+        expect(kube.created).toEqual([]);
+        expect(s3.aborted).toEqual([]);
         expect(await jobState(job.id)).toBe("new");
     });
 });
@@ -688,6 +812,40 @@ describe("monitoring", () => {
         });
     });
 
+    it("retries a stage-in that failed before prepare.json, counting stage-in runs apart from attempt numbers", async () => {
+        const { kube, protocol, job, name, settle, clock, manager: running } = await dispatched();
+        // Attempt 2's objects already exist (an earlier dispatch), so the retry runs as attempt 3.
+        await protocol.prepareDispatch(job, fakeDeps().deps, { attempt: 2 });
+        const failStageIn = (jobName: string) => {
+            kube.setPod(jobName, {
+                phase: "Failed",
+                initContainerStatuses: [
+                    container("stage-in", { terminated: { exitCode: 1, reason: "Error", message: "expired" } }),
+                ],
+            });
+            kube.finishJob(jobName, "Failed", "PodFailurePolicy");
+        };
+        failStageIn(name);
+        await settle();
+        clock.now = Date.now() + 60_000;
+        await running.drainOutbox();
+        await settle();
+        expect((await jobs.get(job.id))?.k8s).toMatchObject({ attempt: 3, stage_in_retries: 1 });
+        expect(protocol.failures).toEqual([]);
+
+        failStageIn((await jobs.get(job.id))!.k8s!.name);
+        await settle();
+        clock.now = Date.now() + 120_000;
+        await running.drainOutbox();
+        await settle();
+        expect((await jobs.get(job.id))?.k8s).toMatchObject({ attempt: 4, stage_in_retries: 2 });
+
+        failStageIn((await jobs.get(job.id))!.k8s!.name);
+        await settle();
+        expect(protocol.failures.map((failure) => failure.failure.reason)).toEqual(["stage_in"]);
+        expect(await jobState(job.id)).toBe("error");
+    });
+
     it("cancels a deleting job: deletes its Kubernetes Job and marks it deleted", async () => {
         const { kube, name, job, settle } = await dispatched();
         kube.setPod(name, podStatus.running());
@@ -845,6 +1003,60 @@ describe("purging datasets", () => {
         expect(s3.listObjects).toHaveBeenCalledWith(`datasets/${dataset.uuid}/`, { continuationToken: undefined });
         expect(s3.deleteObject.mock.calls.map(([key]) => key)).toEqual(keys);
         expect(await outbox.list()).toEqual([]);
+    });
+});
+
+describe("purging outputs of jobs that may still write them", () => {
+    async function purgedOutput() {
+        const { history, input } = await seedHistory();
+        const { job, outputDatasetId } = await seedJob(history.id, [input.id]);
+        const dataset = await datasets.update(outputDatasetId, { purged: true, deleted: true, job_id: job.id });
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: [dataset.id] } });
+        return { job, dataset };
+    }
+
+    function listedPrefixes(s3: ReturnType<typeof fakeDeps>["s3"]): string[] {
+        return s3.listObjects.mock.calls.map((call) => (call as unknown as [string])[0]);
+    }
+
+    it("deletes nothing until the creating job settled and its Job is gone", async () => {
+        const { job, dataset } = await purgedOutput();
+        const { manager: running, kube, s3, clock, settle } = await start();
+        const prefix = `datasets/${dataset.uuid}/`;
+        expect(await jobState(job.id)).toBe("queued");
+        expect(listedPrefixes(s3)).not.toContain(prefix);
+        const [entry] = (await outbox.list()).filter((each) => each.kind === "purge");
+        expect(entry?.payload).toEqual({ dataset_ids: [dataset.id] });
+        expect(entry!.not_before > entry!.create_time).toBe(true);
+
+        // Settled, but its Job and pod are still in the cluster.
+        await jobs.update(job.id, { state: "ok" });
+        clock.now = Date.now() + PURGE_RECHECK_MS + 1000;
+        await running.drainOutbox();
+        expect(listedPrefixes(s3)).not.toContain(prefix);
+
+        await kube.deleteJob((await jobs.get(job.id))!.k8s!.name);
+        await settle();
+        clock.now += PURGE_RECHECK_MS + 1000;
+        await running.drainOutbox();
+        expect(listedPrefixes(s3)).toContain(prefix);
+        expect((await outbox.list()).filter((each) => each.kind === "purge")).toEqual([]);
+    });
+
+    it("without a listing of the cluster, waits until the creating job settled a while ago", async () => {
+        const { job, dataset } = await purgedOutput();
+        await jobs.update(job.id, { state: "error" });
+        const kube = new FakeKube();
+        kube.listJobs = async () => {
+            throw new TypeError("Failed to fetch");
+        };
+        const { manager: running, s3, clock } = await start({ kube });
+        const prefix = `datasets/${dataset.uuid}/`;
+        expect(listedPrefixes(s3)).not.toContain(prefix);
+
+        clock.now = Date.now() + POD_GONE_MS + 1000;
+        await running.drainOutbox();
+        expect(listedPrefixes(s3)).toContain(prefix);
     });
 });
 

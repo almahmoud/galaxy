@@ -7,8 +7,10 @@ import {
     histories,
     JOB_STORES,
     jobs,
+    kv,
     leader,
     LeaderFenceError,
+    LeaderProtocolError,
     outbox,
     revokeLeaderFence,
     setLeaderFence,
@@ -41,6 +43,18 @@ describe("leader epoch and heartbeat", () => {
         expect(await leader.read()).toEqual(beat);
         await leader.resign(1);
         expect(await leader.read()).toBeUndefined();
+    });
+
+    it("records the newest leader protocol version and refuses claims of older ones", async () => {
+        expect(await leader.claimEpoch({ protocol: 1 })).toBe(1);
+        expect(await kv.get("leader_protocol")).toBe(1);
+        expect(await leader.claimEpoch({ protocol: 2 })).toBe(2);
+        const error = await leader.claimEpoch({ protocol: 1 }).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(LeaderProtocolError);
+        expect(error).toMatchObject({ protocol: 1, newest: 2 });
+        expect(await leader.currentEpoch()).toBe(2);
+        expect(await leader.claimEpoch({ protocol: 2 })).toBe(3);
+        expect(await kv.get("leader_protocol")).toBe(2);
     });
 });
 

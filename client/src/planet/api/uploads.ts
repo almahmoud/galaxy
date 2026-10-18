@@ -36,6 +36,7 @@ import {
     withTransaction,
     type WriteTx,
 } from "@/planet/db";
+import { uploadLimitProblem } from "@/planet/jobs/limits";
 import { isNotFound, isS3Error, type S3Client } from "@/planet/s3";
 import type { PlanetRequest, Router } from "@/planet/sw/router";
 import {
@@ -804,6 +805,10 @@ function parseFetch(body: unknown, datatypes: DatatypeInfo): FetchRequest {
     const targets = checkTargets(request.targets);
     replaceSyntaxSugar(targets);
     forEachSrc(targets, (item) => checkSource(item, datatypes, request.deferred === true));
+    const tooLarge = uploadLimitProblem(targets);
+    if (tooLarge) {
+        throw invalid(tooLarge);
+    }
     return { historyId, request, targets, references };
 }
 

@@ -4,10 +4,38 @@ import { checkLeaderFence, leaderFence } from "./fence";
 import { type ReadTx, useRead, useWrite, type WriteTx } from "./tx";
 import type { LeaderRecord, LeaderStatusRecord } from "./types";
 
-/** Starts a new leader epoch and returns it. Called by a tab that has just become the leader. */
-export function claimEpoch(tx?: WriteTx): Promise<number> {
+/** Raised when a tab of an older leader protocol version tries to lead after a newer one led. */
+export class LeaderProtocolError extends Error {
+    constructor(
+        readonly protocol: number,
+        readonly newest: number,
+    ) {
+        super(
+            `A newer Planet version (leader protocol ${newest}) processes jobs; this tab (${protocol}) must be reloaded.`,
+        );
+        this.name = "LeaderProtocolError";
+    }
+}
+
+/**
+ * Starts a new leader epoch and returns it. Called by a tab that has just become the leader. With `protocol`, the
+ * claim is refused with {@link LeaderProtocolError} when a tab of a newer leader protocol version has led, and
+ * otherwise records the version.
+ */
+export function claimEpoch(options: { protocol?: number } = {}, tx?: WriteTx): Promise<number> {
     return useWrite(tx, ["kv"], async (t) => {
         const store = t.store("kv");
+        const { protocol } = options;
+        if (protocol !== undefined) {
+            const stored = await store.get("leader_protocol");
+            const newest = typeof stored === "number" ? stored : 0;
+            if (newest > protocol) {
+                throw new LeaderProtocolError(protocol, newest);
+            }
+            if (newest !== protocol) {
+                await store.put(protocol, "leader_protocol");
+            }
+        }
         const current = await store.get("leader_epoch");
         const next = (typeof current === "number" ? current : 0) + 1;
         await store.put(next, "leader_epoch");

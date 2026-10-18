@@ -1,7 +1,18 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { collections, datasets, hdas, histories, type JobRecord, jobs } from "@/planet/db";
+import { purgeHda } from "@/planet/api/contents";
+import {
+    collections,
+    datasets,
+    hdas,
+    histories,
+    JOB_STORES,
+    type JobRecord,
+    jobs,
+    outbox,
+    withTransaction,
+} from "@/planet/db";
 
 import { datasetResult, discoveredResult, prepareDocument, resultsDocument } from "./__fixtures__/results";
 import {
@@ -21,6 +32,7 @@ import {
 import {
     COMMAND_LINE_LIMIT,
     coreMetrics,
+    EXTENSION_LIMIT,
     FAILURE_MESSAGES,
     ingestFailure,
     ingestResults,
@@ -33,6 +45,7 @@ import {
     STREAM_LIMIT,
 } from "./ingest";
 import { toolArchiveStaticPath } from "./keys";
+import { MAX_DOCUMENT_BYTES, resultsLimit } from "./limits";
 import { DATA_FETCH_TOOL_ID, MAX_METADATA_VALUE_SIZE, prepareDispatch, SET_METADATA_TOOL_ID } from "./manifest";
 import type { Manifest, ResultsDocument } from "./schemas";
 import { ProtocolError } from "./schemas";
@@ -836,6 +849,146 @@ describe("limits on what pods write", () => {
         expect(JSON.stringify(stored)).not.toContain("0123456789abcdef0123456789abcdef");
         expect(stored.info).toContain("[redacted]");
         expect(stored.tool_stdout).toContain("[redacted]");
+    });
+});
+
+describe("outputs purged while their job ran", () => {
+    async function purge(hdaId: string): Promise<void> {
+        await withTransaction(JOB_STORES, "readwrite", (t) => purgeHda(hdaId, t));
+    }
+
+    async function purgeEntries(): Promise<unknown[]> {
+        return (await outbox.list()).filter((entry) => entry.kind === "purge").map((entry) => entry.payload);
+    }
+
+    it("aborts their multipart uploads, keeps nothing the pod reported and queues the deletion of what it wrote", async () => {
+        const { job, deps, outputs } = await dispatchedJob({ inputSize: 5 * GIB, outputs: ["out_file", "log"] });
+        const [big, small] = outputs;
+        await purge(big!.hda.id);
+        expect((await jobs.getOrThrow(job.id)).state).not.toBe("deleting");
+        expect(await purgeEntries()).toEqual([{ dataset_ids: [big!.dataset.id] }]);
+
+        const first = deps.s3.uploadPartAsPod("upload-1", 1, "secret data");
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                outputs: {
+                    out_file: datasetResult(big!.dataset.uuid, {
+                        size: 11,
+                        total_size: 11,
+                        peek: "secret",
+                        data: { mode: "multipart", size: 11, parts: [{ part_number: 1, etag: first, size: 11 }] },
+                    }),
+                    log: datasetResult(small!.dataset.uuid),
+                },
+            }),
+        );
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        expect(deps.s3.completed).toEqual([]);
+        expect(deps.s3.aborted.sort()).toEqual(["upload-1", "upload-2"]);
+        expect(deps.s3.objects.has(`datasets/${big!.dataset.uuid}/data`)).toBe(false);
+
+        const purged = await hdas.getWithDatasetOrThrow(big!.hda.id);
+        expect(purged.dataset).toMatchObject({ state: "ok", purged: true, file_size: null });
+        expect(purged.hda).toMatchObject({ purged: true, blurb: "empty", extension: "tabular", peek: null });
+        expect((await hdas.getWithDatasetOrThrow(small!.hda.id)).hda).toMatchObject({ blurb: "2 lines" });
+        expect(await purgeEntries()).toEqual([{ dataset_ids: [big!.dataset.id] }, { dataset_ids: [big!.dataset.id] }]);
+    });
+
+    it("queues the deletion of what a failed job's pod wrote for them", async () => {
+        const { job, deps, outputs } = await dispatchedJob({ outputs: ["out_file", "log"] });
+        await purge(outputs[1]!.hda.id);
+        await ingestFailure(job, { reason: "evicted", message: "" }, deps);
+        expect((await jobs.getOrThrow(job.id)).state).toBe("error");
+        expect(await purgeEntries()).toEqual([
+            { dataset_ids: [outputs[1]!.dataset.id] },
+            { dataset_ids: [outputs[1]!.dataset.id] },
+        ]);
+    });
+});
+
+describe("caps on what pods report about datasets", () => {
+    it("stores datatypes the registry knows, dbkeys and identifiers of Galaxy's sizes", async () => {
+        const { job, deps, outputs, manifest, split } = await dispatchedJob({
+            outputs: ["out_file", "log", "long"],
+            collection: true,
+        });
+        const datatype = deps.datatype;
+        deps.datatype = async (extension) =>
+            extension === "notatype" ? { ...(await datatype(extension)), details: undefined } : datatype(extension);
+        const [slot0, slot1] = manifest.slots!.map((slot) => slot.uuid);
+        const longIdentifier = "e".repeat(300);
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                outputs: {
+                    out_file: datasetResult(outputs[0]!.dataset.uuid, { ext: "notatype", dbkey: "d".repeat(300) }),
+                    log: datasetResult(outputs[1]!.dataset.uuid, { ext: "x".repeat(EXTENSION_LIMIT + 1) }),
+                    long: datasetResult(outputs[2]!.dataset.uuid, { ext: "tabular", dbkey: "hg19" }),
+                },
+                discovered: [
+                    discoveredResult(slot0!, 0, {
+                        ext: "y".repeat(EXTENSION_LIMIT + 1),
+                        dbkey: "k".repeat(256),
+                        collection: "parts",
+                        element_identifiers: [longIdentifier],
+                    }),
+                    discoveredResult(slot1!, 1, { collection: "parts", element_identifiers: ["b"] }),
+                ],
+                output_collections: {
+                    parts: {
+                        name: "Parts",
+                        collection_type: "list",
+                        populated_state: "ok",
+                        elements: [
+                            { element_identifier: longIdentifier, slot: 0 },
+                            { element_identifier: "b", slot: 1 },
+                        ],
+                    },
+                },
+            }),
+        );
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        const [first, second, third] = await Promise.all(outputs.map((output) => hdas.getOrThrow(output.hda.id)));
+        // A dbkey longer than a dbkey can be keeps the one the output had.
+        expect(first).toMatchObject({ extension: "data", dbkey: outputs[0]!.hda.dbkey });
+        expect(second).toMatchObject({ extension: "data" });
+        expect(third).toMatchObject({ extension: "tabular", dbkey: "hg19" });
+
+        const collection = await collections.getHdcaWithCollection(split!.id);
+        const elements = await collections.elements(collection!.collection.id);
+        expect(elements.map((element) => element.element_identifier)).toEqual([
+            longIdentifier.slice(0, SHORT_TEXT_LIMIT),
+            "b",
+        ]);
+        const discovered = await hdas.getOrThrow(elements[0]!.hda_id!);
+        expect(discovered).toMatchObject({ extension: "data", dbkey: "?" });
+    });
+});
+
+describe("the size of results.json", () => {
+    it("grows with the job's outputs and slots up to a fixed maximum", () => {
+        expect(resultsLimit(1, 32)).toBeGreaterThan(MAX_DOCUMENT_BYTES);
+        expect(resultsLimit(10, 32)).toBeGreaterThan(resultsLimit(1, 32));
+        expect(resultsLimit(1, 5000)).toBeGreaterThan(resultsLimit(1, 32) + 100 * 1024 * 1024);
+        expect(resultsLimit(1000, 100_000)).toBe(256 * 1024 * 1024);
+    });
+
+    it("accepts a document over the base limit from a job with room for it, and refuses larger ones", async () => {
+        const { job, deps, outputs } = await dispatchedJob();
+        const limit = resultsLimit(1, 32);
+        const results = (padding: number) =>
+            resultsDocument(job.id, {
+                outputs: {
+                    out_file: datasetResult(outputs[0]!.dataset.uuid, { metadata: { pad: "p".repeat(padding) } }),
+                },
+            });
+        deps.s3.put(`jobs/${job.id}/a1/results.json`, results(MAX_DOCUMENT_BYTES + 1024));
+        await expect(ingestResults(job, deps)).resolves.toMatchObject({ state: "ok" });
+
+        const other = await dispatchedJob();
+        other.deps.s3.put(`jobs/${other.job.id}/a1/results.json`, { ...results(limit), job_id: other.job.id });
+        await expect(ingestResults(other.job, other.deps)).rejects.toThrow(/larger than/);
     });
 });
 

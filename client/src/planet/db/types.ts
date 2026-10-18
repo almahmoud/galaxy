@@ -252,7 +252,7 @@ export interface JobKubernetesInfo {
     /** The tool container's image; null for upload and set-metadata jobs. */
     image: string | null;
     /** Pod layout: a tool pod (stage-in, tool, stage-out) or one stager container. */
-    kind: "tool" | "upload" | "set_metadata";
+    kind: "tool" | "upload" | "set_metadata" | "tool_install";
     /** `metadata.creationTimestamp` of the Kubernetes Job. */
     created: string | null;
     /** Whether the decisions in `prepare.json` were applied to the job's outputs. */
@@ -261,6 +261,8 @@ export interface JobKubernetesInfo {
     tool_termination: ContainerTermination | null;
     /** Multipart uploads created at dispatch, completed at ingest and aborted on failure or cancel. */
     multipart: JobMultipartUpload[];
+    /** Stage-in runs of earlier attempts that failed before `prepare.json`; absent in older records. */
+    stage_in_retries?: number;
 }
 
 /** Galaxy's `Job`. */
@@ -308,6 +310,10 @@ export type OutboxKind = "dispatch" | "cancel" | "cleanup" | "purge";
 /** Payload of a `dispatch` entry; `attempt` requests a new attempt of an already dispatched job. */
 export interface DispatchPayload {
     attempt?: number;
+    /** Stage-in runs that failed before `prepare.json` in earlier attempts. */
+    stage_in_retries?: number;
+    /** Kubernetes Jobs of earlier attempts to delete before this attempt is prepared. */
+    replace?: string[];
 }
 
 /** Payload of a `cleanup` entry: Kubernetes Jobs to delete and multipart uploads to abort. */
@@ -395,6 +401,8 @@ export interface LeaderRecord {
     heartbeat: number;
     /** Whether the leading tab's document was visible at the last heartbeat. */
     visible: boolean;
+    /** The leading tab's leader protocol version (`LEADER_PROTOCOL` of `jobs/leader.ts`); absent before versions. */
+    protocol?: number;
 }
 
 /**
@@ -432,6 +440,8 @@ export interface KvValues {
     current_history_id: string;
     /** Incremented by each tab that becomes job leader. */
     leader_epoch: number;
+    /** The newest leader protocol version a tab led with; tabs of older versions no longer lead. */
+    leader_protocol: number;
     leader: LeaderRecord;
     leader_status: LeaderStatusRecord;
     /** The user's preferences (Galaxy's `User.preferences`): string values, JSON-encoded where Galaxy encodes them. */

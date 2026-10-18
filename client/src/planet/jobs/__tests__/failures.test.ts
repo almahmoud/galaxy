@@ -85,6 +85,16 @@ describe("classifying pods that ended without results", () => {
             }),
         );
         expect(upload).toMatchObject({ reason: "stage_out", message: "The upload job failed: boom" });
+        const stager = pod({
+            phase: "Failed",
+            containerStatuses: [container("stager", { terminated: { exitCode: 1, message: "no hg" } })],
+        });
+        expect(classifyFailure("tool_install", failedJob("PodFailurePolicy"), stager).message).toBe(
+            "The tool installation failed: no hg",
+        );
+        expect(classifyFailure("set_metadata", failedJob("PodFailurePolicy"), stager).message).toBe(
+            "The metadata job failed: no hg",
+        );
     });
 
     it("recognizes evictions, wrong architectures and unknown failures", () => {

@@ -9,7 +9,7 @@ export const PROTOCOL_VERSION = 1;
 /** A presigned request: a bare URL, or a URL with headers to send as given. */
 export type ProtocolRequest = string | { url: string; headers?: Record<string, string> };
 
-export type JobKind = "tool" | "upload" | "set_metadata";
+export type JobKind = "tool" | "upload" | "set_metadata" | "tool_install";
 
 // ---------------------------------------------------------------------------------------------------------
 // Tool bundles (planet/docs/tool-bundle.md), as far as the job protocol reads them
@@ -160,6 +160,20 @@ export interface Manifest {
     limits?: { max_discovered_files?: number; max_metadata_value_size?: number; start_timeout_seconds?: number | null };
     upload?: { request: Record<string, unknown>; files: Record<string, { request: ProtocolRequest; size?: number }> };
     set_metadata?: { datasets: ManifestSetMetadataEntry[] };
+    install?: ManifestInstall;
+}
+
+/** A presigned request and the object key it writes (`#/$defs/keyed_request`). */
+export interface ManifestKeyedRequest {
+    key: string;
+    request: ProtocolRequest;
+}
+
+/** `install` of a `tool_install` manifest: the repository and a slot per tool it may install. */
+export interface ManifestInstall {
+    source: Record<string, unknown>;
+    panel_section?: { id: string; name: string };
+    slots: { bundle: ManifestKeyedRequest; repo_tar: ManifestKeyedRequest }[];
 }
 
 // ---------------------------------------------------------------------------------------------------------

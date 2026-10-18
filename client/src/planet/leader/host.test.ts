@@ -14,6 +14,8 @@ import {
     waitFor,
 } from "@/planet/jobs/__tests__/fakes";
 import type { JobDepsOptions } from "@/planet/jobs/deps";
+import { DEFAULT_RUNTIME_IMAGE } from "@/planet/jobs/k8sJob";
+import type { PullPolicy } from "@/planet/jobs/runtime";
 import type { KubeClientConfig } from "@/planet/k8s";
 import { KubeError } from "@/planet/k8s";
 
@@ -25,7 +27,7 @@ class FakeWindow extends EventTarget {
 
 const hosts: LeaderHost[] = [];
 
-function host(options: { buildImage?: string | null } = {}) {
+function host(options: { buildImage?: string | null; tagPullPolicy?: PullPolicy } = {}) {
     const window = new FakeWindow();
     const kube = new FakeKube();
     const kubeConfigs: KubeClientConfig[] = [];
@@ -41,8 +43,12 @@ function host(options: { buildImage?: string | null } = {}) {
             return kube;
         },
         createDeps,
-        loadBuildImage: async () => options.buildImage ?? null,
+        loadBuildRuntime: async () => ({
+            image: options.buildImage ?? null,
+            tagPullPolicy: options.tagPullPolicy ?? "Always",
+        }),
         manager: { onError: () => undefined },
+        backup: null,
     });
     hosts.push(created);
     return { host: created, window, kube, kubeConfigs, createDeps };
@@ -148,18 +154,25 @@ describe("leader host", () => {
         expect(await resolveAfter({ requirements: [], containers: [] } as never)).toBe(settingImage);
     });
 
-    it("does not run jobs when the build's runtime image cannot be read", async () => {
+    it("does not run jobs while the build's runtime data cannot be read, and reads it again later", async () => {
+        let failure: Error | null = new Error("Planet data file runtime.json could not be read.");
+        const kube = new FakeKube();
         const failing = new LeaderHost({
             window: new FakeWindow() as unknown as HostWindow,
             locks: new FakeLocks(),
             channel: new Bus().channel(),
             protocol: new FakeProtocol(),
-            createKube: () => new FakeKube(),
+            createKube: () => kube,
             createDeps: async () => fakeDeps().deps,
-            loadBuildImage: async () => {
-                throw new Error("This page belongs to another Planet build.");
+            loadBuildRuntime: async () => {
+                if (failure) {
+                    throw failure;
+                }
+                return { image: null, tagPullPolicy: "Always" };
             },
+            runtimeRetryMs: 50,
             manager: { onError: () => undefined },
+            backup: null,
         });
         hosts.push(failing);
         await configure();
@@ -170,7 +183,37 @@ describe("leader host", () => {
         expect(await leader.readStatus()).toMatchObject({
             state: "blocked",
             blocked_reason:
-                "This tab cannot read its build's runtime image: This page belongs to another Planet build.",
+                "This tab cannot read its build's runtime image: Planet data file runtime.json could not be read.",
+        });
+        const { history, input } = await seedHistory();
+        await seedJob(history.id, [input.id]);
+        await waitFor(120);
+        await settle(failing);
+        expect(failing.manager).toBeNull();
+        expect(kube.created).toHaveLength(0);
+
+        failure = null;
+        await vi.waitFor(() => expect(failing.manager?.active).toBe(true), { timeout: 5000, interval: 10 });
+        await settle(failing);
+        expect(await leader.readStatus()).toMatchObject({ blocked_reason: null });
+        expect(kube.created).toHaveLength(1);
+        expect(kube.created[0]!.spec!.template.spec.initContainers![0]).toMatchObject({
+            image: DEFAULT_RUNTIME_IMAGE,
+            imagePullPolicy: "Always",
+        });
+    });
+
+    it("pulls runtime images without a digest every time unless the build allows node-local images", async () => {
+        const { host: running, kube } = host({ buildImage: "planet-runtime:dev", tagPullPolicy: "IfNotPresent" });
+        await configure();
+        running.start();
+        await settle(running);
+        const { history, input } = await seedHistory();
+        await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(kube.created[0]!.spec!.template.spec.initContainers![0]).toMatchObject({
+            image: "planet-runtime:dev",
+            imagePullPolicy: "IfNotPresent",
         });
     });
 
@@ -198,6 +241,12 @@ describe("leader host", () => {
             state: "active",
             last_error: { message: "The gateway is unavailable", job_id: job.id },
         });
+
+        // The next reconciliation that gets through without an error clears it.
+        kube.createError = null;
+        await running.manager!.reconcile();
+        await settle(running);
+        expect(await leader.readStatus()).toMatchObject({ state: "active", last_error: null });
 
         kube.listJobs = async () => {
             throw new TypeError("Failed to fetch");

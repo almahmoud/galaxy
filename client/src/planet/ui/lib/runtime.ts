@@ -64,8 +64,8 @@ export function runtimeImageWarning(image: string, source: RuntimeSource): strin
     }
     if (source === "settings") {
         return (
-            "This image is a tag without a digest: whoever can push to it changes what your jobs run, and nodes " +
-            "may keep an older copy. Pin it as image@sha256:<digest>."
+            "This image is a tag without a digest: whoever can push to it changes what your jobs run. " +
+            "Pin it as image@sha256:<digest>."
         );
     }
     return (

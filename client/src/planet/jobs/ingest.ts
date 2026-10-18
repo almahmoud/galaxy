@@ -3,6 +3,9 @@
  * `prepare.json`, the datasets, collections and job fields of `results.json`, and failures of pods that left no
  * results, recorded the way Galaxy's job finishing (`JobWrapper.finish`, `_finish_dataset`) and `JobWrapper.fail`
  * record them. Each function writes IndexedDB in one transaction over `JOB_STORES` and may be called again.
+ *
+ * Outputs purged while their job ran keep no data: their multipart uploads are aborted instead of completed and a
+ * `purge` entry deletes whatever the pod wrote, as Galaxy's `JobWrapper.finish` calls `full_delete` on them.
  */
 
 import {
@@ -20,15 +23,19 @@ import {
     jobs,
     LeaderFenceError,
     type MetadataFileRecord,
+    outbox,
+    type PurgePayload,
     type ReadTx,
     readTx,
     type WriteTx,
     writeTx,
 } from "@/planet/db";
 import type { NewCollectionTree, NewElement } from "@/planet/db/collections";
+import { ingestToolInstall } from "@/planet/install/ingest";
 
 import type { JobDeps } from "./deps";
 import { datasetObjectKeys, jobObjectKeys, metadataFileKey } from "./keys";
+import { resultsLimit } from "./limits";
 import { jobKind, MAX_METADATA_VALUE_SIZE } from "./manifest";
 import {
     abortMultipartUploads,
@@ -46,6 +53,7 @@ import {
     type CollectionResult,
     type CollectionResultElement,
     type DatasetResult,
+    type JobKind,
     parsePrepare,
     parseResults,
     type PrepareDocument,
@@ -91,8 +99,10 @@ export type PrepareRecord = PrepareDocument;
 /** Galaxy's `DATABASE_MAX_STRING_SIZE`: job streams are shortened to this many characters. */
 export const STREAM_LIMIT = 32768;
 const STREAM_JOIN = "\n..\n";
-/** Galaxy's `TrimmedString(255)` columns: dataset name, info and blurb. */
+/** Galaxy's `TrimmedString(255)` columns: dataset name, info and blurb; also dbkeys and element identifiers. */
 export const SHORT_TEXT_LIMIT = 255;
+/** Galaxy's `extension` column (`TrimmedString(64)`). */
+export const EXTENSION_LIMIT = 64;
 /** Peeks are a few lines (`get_file_peek`); longer ones are cut. */
 export const PEEK_LIMIT = STREAM_LIMIT;
 /** Evaluated command lines longer than this keep their beginning and end. */
@@ -121,8 +131,57 @@ export const FAILURE_MESSAGES: Record<JobFailure["reason"], string> = {
     stage_out: "Finishing the job in the cluster failed.",
 };
 
+/**
+ * Steps of job kinds whose results hold more than datasets, keyed by kind. They run before the results are applied and
+ * return the results to apply.
+ */
+const KIND_INGEST: Partial<
+    Record<JobKind, (job: JobRecord, results: ResultsDocument, deps: JobDeps) => Promise<ResultsDocument>>
+> = {
+    tool_install: ingestToolInstall,
+};
+
 /** Jobs in these states are settled; results and failures arriving later change nothing. */
 const SETTLED_STATES: ReadonlySet<string> = new Set(["ok", "error", "deleted", "deleting"]);
+
+/** Datatype extensions a pod reported, mapped to the ones ingest stores. */
+type Extensions = ReadonlyMap<string, string>;
+
+/**
+ * Maps each extension in `values` to itself when the datatypes registry knows it, else to `data` (Galaxy's datatype
+ * for extensions it has none for); extensions longer than {@link EXTENSION_LIMIT} also become `data`.
+ *
+ * @throws when the registry cannot be read
+ */
+async function registeredExtensions(
+    deps: JobDeps,
+    values: Iterable<string | null | undefined>,
+): Promise<Map<string, string>> {
+    const extensions = new Map<string, string>();
+    for (const value of values) {
+        if (typeof value !== "string" || extensions.has(value)) {
+            continue;
+        }
+        const known = value.length <= EXTENSION_LIMIT && (await deps.datatype(value)).details !== undefined;
+        extensions.set(value, known ? value : "data");
+    }
+    return extensions;
+}
+
+/** Formats prepare.json decided on. */
+function prepareFormats(prepare: PrepareDocument | null): string[] {
+    return Object.values(prepare?.outputs ?? {}).flatMap((decision) => (decision?.format ? [decision.format] : []));
+}
+
+/** Extensions results.json reports for datasets. */
+function resultFormats(results: ResultsDocument): string[] {
+    return [...Object.values(results.outputs), ...results.discovered].map((record) => record.ext);
+}
+
+/** A dbkey a pod reported, or null when there is none or it is longer than a dbkey can be. */
+function storedDbkey(value: string | null | undefined): string | null {
+    return typeof value === "string" && value.length <= SHORT_TEXT_LIMIT ? value : null;
+}
 
 // ---------------------------------------------------------------------------------------------------------
 // prepare.json
@@ -172,10 +231,11 @@ export async function readPrepare(job: JobRecord, deps: JobDeps): Promise<Prepar
     const objects = await currentAttempt(job, deps);
     const prepare = objects ? await readCurrentPrepare(job, objects, deps) : null;
     if (prepare?.state === "ok" && jobKind(job) === "tool") {
+        const extensions = await registeredExtensions(deps, prepareFormats(prepare));
         await writeTx(JOB_STORES, async (tx) => {
             const current = await jobs.get(job.id, tx);
             if (current && current.command_line === null && !SETTLED_STATES.has(current.state)) {
-                const kept = await applyDecisions(tx, current, prepare);
+                const kept = await applyDecisions(tx, current, prepare, extensions);
                 await jobs.update(current.id, { ...kept, command_line: prepare.command_line ?? "" }, tx);
             }
         });
@@ -211,13 +271,43 @@ async function removeFiltered(tx: WriteTx, job: KeptOutputs, filtered: ReadonlyS
             outputCollections.push(output);
         } else if (output.src === "hdca" && (await collections.getHdca(output.id, tx))) {
             await collections.updateHdca(output.id, { deleted: true, visible: false }, tx);
+            await settleImplicitLeaf(tx, output.id);
         }
     }
     return { outputs, output_collections: outputCollections };
 }
 
-/** Applies prepare.json's output decisions; returns the job's outputs without the filtered ones. */
-async function applyDecisions(tx: WriteTx, job: JobRecord, prepare: PrepareDocument): Promise<KeptOutputs> {
+/**
+ * Implicit collections (owned by `tools/submit.ts`): the collection of a mapped job's filtered collection output is
+ * a leaf of its run's implicit collection. It is marked populated without elements, as Galaxy finalizes implicit
+ * collections whatever their jobs create, so the implicit collection does not wait for it forever.
+ */
+async function settleImplicitLeaf(tx: WriteTx, hdcaId: string): Promise<void> {
+    const hdca = await collections.getHdca(hdcaId, tx);
+    const collection = hdca && (await collections.getCollection(hdca.collection_id, tx));
+    if (!collection || collection.populated_state !== "new") {
+        return;
+    }
+    const parents = await tx.store("dces").index("child_collection_id").count(collection.id);
+    if (parents > 0) {
+        await collections.updateCollection(
+            collection.id,
+            { populated_state: "ok", element_count: (await collections.elements(collection.id, tx)).length },
+            tx,
+        );
+    }
+}
+
+/**
+ * Applies prepare.json's output decisions; returns the job's outputs without the filtered ones. A format missing
+ * from `extensions` leaves the provisional one.
+ */
+async function applyDecisions(
+    tx: WriteTx,
+    job: JobRecord,
+    prepare: PrepareDocument,
+    extensions: Extensions,
+): Promise<KeptOutputs> {
     const decisions = prepare.outputs ?? {};
     const decision = (name: string) => (Object.hasOwn(decisions, name) ? decisions[name] : undefined);
     const filtered = new Set(
@@ -230,7 +320,10 @@ async function applyDecisions(tx: WriteTx, job: JobRecord, prepare: PrepareDocum
         if (made && hda) {
             await hdas.update(
                 hda.id,
-                { name: shortText(made.label) ?? hda.name, extension: made.format ?? hda.extension },
+                {
+                    name: shortText(made.label) ?? hda.name,
+                    extension: (made.format && extensions.get(made.format)) || hda.extension,
+                },
                 tx,
             );
         }
@@ -283,11 +376,13 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
         return null;
     }
     const { dispatch } = objects;
-    const value = await readJson(deps.s3, objects.keys.results, deps.signal);
+    const records = Math.max(job.outputs.length, job.inputs.length);
+    const limit = resultsLimit(records, dispatch.slot_uuids.length);
+    const value = await readJson(deps.s3, objects.keys.results, deps.signal, limit);
     if (value === null) {
         return null;
     }
-    const results = parseResults(value);
+    let results = parseResults(value);
     if (results.job_id !== job.id) {
         throw new ProtocolError("results.json", "/job_id", `belongs to job ${results.job_id}`);
     }
@@ -311,11 +406,18 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
                   throw error;
               })
             : null;
+    results = (await KIND_INGEST[jobKind(current)]?.(current, results, deps)) ?? results;
+    const extensions = await registeredExtensions(deps, [...prepareFormats(prepare), ...resultFormats(results)]);
     const uploadErrors = await settleMultipart(deps, dispatch, results);
-    return writeTx(JOB_STORES, (tx) => applyResults(tx, job.id, results, { prepare, dispatch, uploadErrors }));
+    return writeTx(JOB_STORES, (tx) =>
+        applyResults(tx, job.id, results, { prepare, dispatch, uploadErrors, extensions }),
+    );
 }
 
-/** Completes the multipart uploads the pod used and aborts the others; returns errors by output name. */
+/**
+ * Completes the multipart uploads the pod used and aborts the others, and those of purged datasets; returns errors by
+ * output name.
+ */
 async function settleMultipart(
     deps: JobDeps,
     dispatch: DispatchRecord,
@@ -326,7 +428,11 @@ async function settleMultipart(
     for (const upload of dispatch.multipart) {
         const record = Object.hasOwn(results.outputs, upload.output) ? results.outputs[upload.output] : undefined;
         const data = record?.data;
-        if (record?.uuid !== upload.uuid || data?.mode !== "multipart") {
+        if (
+            record?.uuid !== upload.uuid ||
+            data?.mode !== "multipart" ||
+            (await datasets.getByUuid(upload.uuid))?.purged
+        ) {
             unused.push(upload);
             continue;
         }
@@ -348,6 +454,7 @@ interface ResultsContext {
     prepare: PrepareDocument | null;
     dispatch: DispatchRecord;
     uploadErrors: Map<string, string>;
+    extensions: Extensions;
 }
 
 async function settledOutcome(tx: ReadTx, job: JobRecord): Promise<IngestOutcome> {
@@ -380,16 +487,19 @@ async function applyResults(
     let kept: KeptOutputs = job;
     let commandLine = job.command_line;
     if (context.prepare?.state === "ok" && commandLine === null) {
-        kept = await applyDecisions(tx, job, context.prepare);
+        kept = await applyDecisions(tx, job, context.prepare, context.extensions);
         commandLine = context.prepare.command_line ?? null;
     }
     kept = await removeFiltered(tx, kept, new Set(results.filtered_outputs));
     const outputs = kept.outputs;
     const jobMessages = limitJobMessages(results.job_messages);
+    const extension = (ext: string) => context.extensions.get(ext) ?? "data";
     // Galaxy's Kubernetes runner fails a job whose tool was killed for its memory limit with its OOM message.
     const oom = results.termination === "signal" && job.k8s?.tool_termination?.reason === "OOMKilled";
     if (oom) {
-        return applyOomFailure(tx, job, results, { ...kept, command_line: commandLine }, jobMessages);
+        const outcome = await applyOomFailure(tx, job, results, { ...kept, command_line: commandLine }, jobMessages);
+        await purgeWritten(tx, outputs);
+        return outcome;
     }
 
     let state = results.state;
@@ -399,7 +509,7 @@ async function applyResults(
     if (kind === "set_metadata") {
         for (const input of job.inputs.filter((item) => item.src === "hda")) {
             const record = Object.hasOwn(results.outputs, input.name) ? results.outputs[input.name]! : null;
-            const hda = await applyMetadataRecord(tx, input.id, record);
+            const hda = await applyMetadataRecord(tx, input.id, record, extension);
             if (hda) {
                 hdaIds.push(hda.id);
                 datasetIds.push(hda.dataset_id);
@@ -415,20 +525,24 @@ async function applyResults(
             }
             hdaIds.push(hda.id);
             datasetIds.push(hda.dataset_id);
-            if (!record || uploadError) {
+            const dataset = await datasets.get(hda.dataset_id, tx);
+            if (dataset?.purged) {
+                await applyPurgedOutput(tx, dataset, record, extension);
+            } else if (!record || uploadError) {
                 state = "error";
                 await failOutput(
                     tx,
                     hda,
                     uploadError ?? finishMessage ?? "The job's pod reported no result for this dataset.",
                 );
-            } else if (!(await applyOutputRecord(tx, hda, record))) {
+            } else if (!(await applyOutputRecord(tx, hda, record, extension))) {
                 state = "error";
             }
         }
+        await purgeWritten(tx, outputs);
     }
 
-    const discovered = await createDiscovered(tx, job, results, context.dispatch);
+    const discovered = await createDiscovered(tx, job, results, context.dispatch, extension);
     datasetIds.push(...discovered.datasetIds);
     hdaIds.push(...discovered.slots.values());
     const remaining = { ...job, output_collections: kept.output_collections };
@@ -552,7 +666,12 @@ function recordPeek(record: DatasetResult): string | null {
  *
  * @returns false when the dataset ended in error
  */
-async function applyOutputRecord(tx: WriteTx, hda: HdaRecord, record: DatasetResult): Promise<boolean> {
+async function applyOutputRecord(
+    tx: WriteTx,
+    hda: HdaRecord,
+    record: DatasetResult,
+    extension: (ext: string) => string,
+): Promise<boolean> {
     const dataset = await datasets.get(hda.dataset_id, tx);
     if (!dataset) {
         return true;
@@ -571,8 +690,8 @@ async function applyOutputRecord(tx: WriteTx, hda: HdaRecord, record: DatasetRes
         await hdas.update(
             copy.id,
             {
-                extension: failed && record.ext === "auto" ? "data" : record.ext,
-                dbkey: record.dbkey ?? copy.dbkey,
+                extension: failed && record.ext === "auto" ? "data" : extension(record.ext),
+                dbkey: storedDbkey(record.dbkey) ?? copy.dbkey,
                 info: recordInfo(record),
                 blurb: shortText(record.blurb) ?? (failed ? "error" : copy.blurb),
                 peek: recordPeek(record),
@@ -594,6 +713,7 @@ async function applyMetadataRecord(
     tx: WriteTx,
     hdaId: string,
     record: DatasetResult | null,
+    extension: (ext: string) => string,
 ): Promise<HdaRecord | undefined> {
     const hda = await hdas.get(hdaId, tx);
     if (!hda) {
@@ -604,13 +724,13 @@ async function applyMetadataRecord(
         return hdas.update(hda.id, { _state: "failed_metadata" }, tx);
     }
     if (record.state === "failed_metadata") {
-        return hdas.update(hda.id, { extension: record.ext, _state: "failed_metadata" }, tx);
+        return hdas.update(hda.id, { extension: extension(record.ext), _state: "failed_metadata" }, tx);
     }
     await datasets.update(dataset.id, datasetFields(dataset.uuid, record, dataset.created_from_basename), tx);
     return hdas.update(
         hda.id,
         {
-            extension: record.ext,
+            extension: extension(record.ext),
             metadata: recordMetadata(record),
             peek: recordPeek(record),
             blurb: shortText(record.blurb),
@@ -618,6 +738,48 @@ async function applyMetadataRecord(
         },
         tx,
     );
+}
+
+/**
+ * Galaxy's `_finish_dataset` for an output purged while its job ran: the dataset takes the final state, its copies
+ * the blurb "empty" and a datatype for `auto`, and nothing the pod reported about its data is kept.
+ */
+async function applyPurgedOutput(
+    tx: WriteTx,
+    dataset: DatasetRecord,
+    record: DatasetResult | null,
+    extension: (ext: string) => string,
+): Promise<void> {
+    await datasets.update(dataset.id, { state: record?.state === "error" ? "error" : "ok" }, tx);
+    for (const copy of await hdas.listForDataset(dataset.id, tx)) {
+        await hdas.update(
+            copy.id,
+            {
+                blurb: "empty",
+                extension: copy.extension === "auto" ? (record ? extension(record.ext) : "data") : copy.extension,
+                _state: null,
+            },
+            tx,
+        );
+    }
+}
+
+/**
+ * Queues the deletion of what the pod wrote for outputs that were purged while the job ran (Galaxy's `full_delete` of
+ * purged outputs at finish). The leader runs it once the job's pod is gone.
+ */
+async function purgeWritten(tx: WriteTx, outputs: readonly JobOutputAssociation[]): Promise<void> {
+    const purged: string[] = [];
+    for (const output of outputs) {
+        const hda = await hdas.get(output.id, tx);
+        const dataset = hda && (await datasets.get(hda.dataset_id, tx));
+        if (dataset?.purged && !purged.includes(dataset.id)) {
+            purged.push(dataset.id);
+        }
+    }
+    if (purged.length) {
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: purged } satisfies PurgePayload }, tx);
+    }
 }
 
 /** `JobWrapper.fail` for one output: the dataset is in error and the history dataset says why. */
@@ -646,10 +808,11 @@ interface Discovered {
 /** The job output name Galaxy's discovery gives a dataset (`__new_primary_file_<output>|<designation>__`). */
 function discoveredOutputName(record: ResultsDocument["discovered"][number]): string | null {
     if (record.output && record.designation) {
-        return `__new_primary_file_${record.output}|${record.designation}__`;
+        return `__new_primary_file_${record.output}|${podText(record.designation, SHORT_TEXT_LIMIT)}__`;
     }
     if (record.collection && record.element_identifiers?.length) {
-        return `__new_primary_file_${record.collection}|${record.element_identifiers.join(":")}__`;
+        const identifiers = record.element_identifiers.map((identifier) => podText(identifier, SHORT_TEXT_LIMIT));
+        return `__new_primary_file_${record.collection}|${identifiers.join(":")}__`;
     }
     return null;
 }
@@ -660,6 +823,7 @@ async function createDiscovered(
     job: JobRecord,
     results: ResultsDocument,
     dispatch: DispatchRecord,
+    extension: (ext: string) => string,
 ): Promise<Discovered> {
     const discovered: Discovered = { slots: new Map(), datasetIds: [], associations: [] };
     const historyId = job.history_id;
@@ -682,8 +846,8 @@ async function createDiscovered(
                 {
                     history_id: historyId,
                     name: shortText(record.name ?? record.designation ?? "") ?? "",
-                    extension: failed && record.ext === "auto" ? "data" : record.ext,
-                    dbkey: record.dbkey ?? "?",
+                    extension: failed && record.ext === "auto" ? "data" : extension(record.ext),
+                    dbkey: storedDbkey(record.dbkey) ?? "?",
                     info: recordInfo(record),
                     blurb: shortText(record.blurb),
                     peek: recordPeek(record),
@@ -779,15 +943,16 @@ function elementTree(
 ): NewElement[] {
     return elements.flatMap((element): NewElement[] => {
         const columns = Array.isArray(element.columns) ? element.columns : null;
+        const identifier = podText(element.element_identifier, SHORT_TEXT_LIMIT);
         if (element.elements) {
             const collection: NewCollectionTree = {
-                collection_type: element.collection_type ?? "list",
+                collection_type: podText(element.collection_type ?? "list", SHORT_TEXT_LIMIT),
                 elements: elementTree(element.elements, resolve),
             };
-            return [{ identifier: element.element_identifier, collection, columns }];
+            return [{ identifier, collection, columns }];
         }
         const hdaId = resolve(element);
-        return hdaId ? [{ identifier: element.element_identifier, hda_id: hdaId, columns }] : [];
+        return hdaId ? [{ identifier, hda_id: hdaId, columns }] : [];
     });
 }
 
@@ -858,6 +1023,8 @@ export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: J
     }
     const kind = jobKind(job);
     const prepare = objects && kind === "tool" ? await readCurrentPrepare(job, objects, deps).catch(() => null) : null;
+    // Without the registry, prepare.json's formats are not applied: the job fails either way.
+    const extensions = await registeredExtensions(deps, prepareFormats(prepare)).catch(() => new Map<string, string>());
     const message = redactSignedUrls(failure.message.trim()) || FAILURE_MESSAGES[failure.reason];
     const stderr = [
         message,
@@ -873,10 +1040,11 @@ export async function ingestFailure(job: JobRecord, failure: JobFailure, deps: J
         let kept: KeptOutputs = current;
         let commandLine = current.command_line;
         if (prepare?.state === "ok" && commandLine === null) {
-            kept = await applyDecisions(tx, current, prepare);
+            kept = await applyDecisions(tx, current, prepare, extensions);
             commandLine = prepare.command_line ?? null;
         }
         const outputs = kept.outputs;
+        await purgeWritten(tx, outputs);
         if (kind === "set_metadata") {
             for (const input of current.inputs.filter((item) => item.src === "hda")) {
                 if (await hdas.get(input.id, tx)) {

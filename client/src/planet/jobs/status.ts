@@ -1,12 +1,16 @@
 /**
  * The leader's status record (`kv` key `leader_status`, {@link LeaderStatusRecord}) for status pages: whether job
  * processing runs, is idle or is blocked and why, the last error and the number of queued and running jobs. One
- * reporter lives for one leadership epoch; its writes are dropped once another tab claimed a newer epoch.
+ * reporter lives for one leadership epoch; its writes are dropped once another tab claimed a newer epoch. The last
+ * error is dropped by the next reconciliation that listed the cluster without one, and after {@link LAST_ERROR_MS}.
  */
 
 import { jobs, leader, type LeaderStatusRecord, outbox } from "@/planet/db";
 
 import { errorMessage } from "./failures";
+
+/** How long the last error is reported when nothing clears it earlier. */
+export const LAST_ERROR_MS = 15 * 60_000;
 
 export class LeaderStatus {
     private blockedReason: string | null = null;
@@ -46,6 +50,18 @@ export class LeaderStatus {
         return this.write();
     }
 
+    /**
+     * Drops the last error when it happened before `time` (epoch milliseconds): a reconciliation that started then
+     * went through without one. Writes the record when that changed it.
+     */
+    clearErrorsBefore(time: number): Promise<boolean> {
+        if (!this.lastError || this.lastError.time >= time) {
+            return Promise.resolve(true);
+        }
+        this.lastError = null;
+        return this.write();
+    }
+
     /** Writes the record with fresh counts; concurrent calls coalesce into one more write. */
     write(): Promise<boolean> {
         if (this.writing) {
@@ -73,10 +89,14 @@ export class LeaderStatus {
         const counts = await jobs.countByState(["queued", "running"] as const);
         const blocked = this.blockedReason ?? this.clusterProblem;
         const busy = counts.queued + counts.running > 0 || (await outbox.list()).length > 0;
+        const now = this.now();
+        if (this.lastError && now - this.lastError.time > LAST_ERROR_MS) {
+            this.lastError = null;
+        }
         return {
             epoch: this.epoch,
             tab_id: this.tabId,
-            heartbeat: this.now(),
+            heartbeat: now,
             state: blocked ? "blocked" : busy ? "active" : "idle",
             blocked_reason: blocked,
             last_error: this.lastError,

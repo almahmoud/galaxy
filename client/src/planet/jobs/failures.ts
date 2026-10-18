@@ -23,6 +23,12 @@ const EXEC_FORMAT = /exec format error/i;
 const NEVER_STARTED = new Set(["StartError", "ContainerCannotRun"]);
 
 /** The main container of a job's pod, whose start marks the job running. */
+/** How failure messages name jobs that run the single stager container. */
+const STAGER_JOB_NAMES: Partial<Record<DispatchKind, string>> = {
+    upload: "The upload job",
+    tool_install: "The tool installation",
+};
+
 export function mainContainer(kind: DispatchKind): string {
     return kind === "tool" ? TOOL_CONTAINER : STAGER_CONTAINER;
 }
@@ -197,7 +203,7 @@ export function classifyFailure(kind: DispatchKind, job: KubeJob | undefined, po
             const error = stagerError(pod, STAGER_CONTAINER);
             return {
                 reason: "stage_out",
-                message: `The ${kind === "upload" ? "upload" : "metadata"} job failed${error ? `: ${error}` : "."}`,
+                message: `${STAGER_JOB_NAMES[kind] ?? "The metadata job"} failed${error ? `: ${error}` : "."}`,
                 detail,
             };
         }

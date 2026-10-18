@@ -37,6 +37,7 @@ import type { IngestOutcome, JobFailure } from "../ingest";
 import type { ChannelLike, LockManagerLike } from "../leader";
 import type { JobProtocol } from "../manager";
 import type { AdoptedDispatch, DispatchPlan } from "../manifest";
+import { AttemptInUseError } from "../objects";
 
 export const INSTANCE = "a1b2c3d4";
 
@@ -77,6 +78,10 @@ export class FakeKube implements KubeClient {
     readonly deleted: string[] = [];
     /** Throws this from the next createJob call. */
     createError: Error | null = null;
+    /** Throws this from the next deleteJob call. */
+    deleteError: Error | null = null;
+    /** Runs before each createJob call creates the Job (a request in flight). */
+    beforeCreate: ((spec: KubeJob) => Promise<void>) | null = null;
     private revision = 100;
     private readonly watchers: Record<"jobs" | "pods", Set<Watcher>> = { jobs: new Set(), pods: new Set() };
 
@@ -105,6 +110,7 @@ export class FakeKube implements KubeClient {
             this.createError = null;
             throw error;
         }
+        await this.beforeCreate?.(spec);
         const name = spec.metadata.name!;
         if (this.jobs.has(name)) {
             throw new KubeError(409, "AlreadyExists", `jobs.batch "${name}" already exists`);
@@ -139,6 +145,11 @@ export class FakeKube implements KubeClient {
     }
 
     async deleteJob(name: string): Promise<boolean> {
+        if (this.deleteError) {
+            const error = this.deleteError;
+            this.deleteError = null;
+            throw error;
+        }
         const job = this.jobs.get(name);
         this.deleted.push(name);
         if (!job) {
@@ -349,6 +360,10 @@ export class FakeProtocol implements JobProtocol {
         async (job: JobRecord, _deps: JobDeps, options: { attempt: number }): Promise<DispatchPlan> => {
             if (this.prepareError) {
                 throw this.prepareError;
+            }
+            // Like the protocol module: an attempt whose objects exist is never prepared again.
+            if (this.records.has(`${job.id}/a${options.attempt}`)) {
+                throw new AttemptInUseError(job.id, options.attempt);
             }
             this.dispatched.push({ jobId: job.id, attempt: options.attempt });
             const dispatchId = (++this.dispatches).toString(16).padStart(16, "0");

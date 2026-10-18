@@ -7,9 +7,15 @@
  *   steals the lock (frozen tabs keep holding Web Locks).
  * - Hidden tabs are throttled, so a hidden leader hands over to a visible tab: the visible tab asks on the
  *   `planet:leader` BroadcastChannel and the leader names it, after which it steals the lock.
+ * - Heartbeats, claims and handovers carry the tab's {@link LEADER_PROTOCOL}. A tab never hands over to a tab of an
+ *   older version and takes the lock from a leader of one; a tab of an older version than one that led stops taking
+ *   part (`claimEpoch` refuses it) until it is reloaded. Builds from before versions ignore all this; they are shut
+ *   out by the database version instead (`db/schema.ts`).
+ * - A tab that leads again installs its new fence only once the job processing of its previous leadership stopped
+ *   (the promise `onDemote` returned settled), or after {@link STOP_WAIT_MS}.
  */
 
-import { leader as leaderStore, revokeLeaderFence, setLeaderFence } from "@/planet/db";
+import { leader as leaderStore, LeaderProtocolError, revokeLeaderFence, setLeaderFence } from "@/planet/db";
 import { randomHex } from "@/planet/util/ids";
 
 export const LOCK_NAME = "planet:leader";
@@ -19,6 +25,15 @@ export const HEARTBEAT_MS = 20_000;
 export const STALE_MS = 90_000;
 /** How often followers check the heartbeat. */
 export const FOLLOWER_CHECK_MS = 30_000;
+/** A tab that holds the lock but could not claim an epoch asks again after this long. */
+export const CLAIM_RETRY_MS = 5000;
+/** How long a tab that leads again waits for the job processing of its previous leadership to stop. */
+export const STOP_WAIT_MS = 60_000;
+/**
+ * Version of what a leader reads and writes: the job bucket layout, the job protocol and the job records. Bump it
+ * with every change an older leader would misread. Tabs of builds without it count as version 0.
+ */
+export const LEADER_PROTOCOL = 1;
 
 /** The parts of `LockManager` the election uses. */
 export interface LockManagerLike {
@@ -33,7 +48,9 @@ export interface ChannelLike {
     close(): void;
 }
 
-type HandoverMessage = { type: "claim"; tab: string } | { type: "handover"; to: string; epoch: number };
+type HandoverMessage =
+    | { type: "claim"; tab: string; protocol?: number }
+    | { type: "handover"; to: string; epoch: number; protocol?: number };
 
 export interface LeaderElectionOptions {
     locks: LockManagerLike;
@@ -42,31 +59,73 @@ export interface LeaderElectionOptions {
     visible: () => boolean;
     /** Called once this tab leads, with its epoch. Not awaited. */
     onLead: (epoch: number) => void | Promise<void>;
-    /** Called when this tab stops leading; its job writes are already fenced off. Not awaited. */
+    /**
+     * Called when this tab stops leading; its job writes are already fenced off. Not awaited, but this tab leads
+     * again only after the returned promise settled (or {@link STOP_WAIT_MS} passed): it should resolve once job
+     * processing stopped.
+     */
     onDemote: () => void | Promise<void>;
+    /** Called once when this tab stops taking part because a tab of a newer leader protocol version led. */
+    onOutdated?: (error: LeaderProtocolError) => void;
+    /** This tab's leader protocol version; {@link LEADER_PROTOCOL} by default. */
+    protocol?: number;
     /** Called after each heartbeat this tab wrote as the leader, with its epoch. Not awaited. */
     onHeartbeat?: (epoch: number) => void | Promise<void>;
     /** Milliseconds since the epoch. */
     now?: () => number;
+    /** Replaces {@link STOP_WAIT_MS} (tests). */
+    stopWaitMs?: number;
     tabId?: string;
     onError?: (error: unknown) => void;
 }
 
+/** Settles when `promise` does, or after `ms`. */
+function settledWithin(promise: Promise<void>, ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function isHandoverMessage(value: unknown): value is HandoverMessage {
-    const message = value as Partial<{ type: string; tab: string; to: string; epoch: number }> | null;
+    const message = value as Partial<{
+        type: string;
+        tab: string;
+        to: string;
+        epoch: number;
+        protocol: unknown;
+    }> | null;
     return (
         typeof message === "object" &&
         message !== null &&
+        (message.protocol === undefined || Number.isSafeInteger(message.protocol)) &&
         ((message.type === "claim" && typeof message.tab === "string") ||
             (message.type === "handover" && typeof message.to === "string" && typeof message.epoch === "number"))
     );
 }
 
+/** The leader protocol version a heartbeat or message names; 0 when it names none (builds before versions). */
+function protocolOf(value: { protocol?: unknown }): number {
+    return typeof value.protocol === "number" && Number.isSafeInteger(value.protocol) ? value.protocol : 0;
+}
+
 export class LeaderElection {
     readonly tabId: string;
+    readonly protocol: number;
     private readonly now: () => number;
     private currentEpoch: number | null = null;
     private running = false;
+    private outdatedBy: LeaderProtocolError | null = null;
+    /**
+     * Settles once the job processing of the last leadership stopped (what `onDemote` returned), or
+     * {@link STOP_WAIT_MS} after it was asked to: a manager that never stops must not keep this tab from leading,
+     * and its Kubernetes and bucket writes check its own epoch.
+     */
+    private stopped: Promise<void> = Promise.resolve();
+    private retryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Ends the wait of a lock grant for the previous leadership's stop, once that grant is superseded. */
+    private wakeLead: (() => void) | null = null;
     /** Aborts the queued (not yet granted) lock request. */
     private queued: AbortController | null = null;
     /** Identifies the lock request that holds or waits for the lock; older ones are ignored. */
@@ -81,7 +140,13 @@ export class LeaderElection {
 
     constructor(private readonly options: LeaderElectionOptions) {
         this.tabId = options.tabId ?? randomHex(8);
+        this.protocol = options.protocol ?? LEADER_PROTOCOL;
         this.now = options.now ?? Date.now;
+    }
+
+    /** True once this tab found that a tab of a newer leader protocol version led; it no longer takes part. */
+    get outdated(): boolean {
+        return this.outdatedBy !== null;
     }
 
     /** The epoch this tab leads with, or null. */
@@ -115,7 +180,12 @@ export class LeaderElection {
             clearInterval(this.followerTimer);
             this.followerTimer = null;
         }
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+        }
         this.generation += 1;
+        this.wakeLead?.();
         this.queued?.abort();
         this.queued = null;
         const epoch = this.currentEpoch;
@@ -138,11 +208,11 @@ export class LeaderElection {
     }
 
     /**
-     * Checks the leader's heartbeat: steals the lock when it is stale, and asks a hidden leader to hand over
-     * when this tab is visible.
+     * Checks the leader's heartbeat: steals the lock when it is stale or of an older leader protocol version, and
+     * asks a hidden leader to hand over when this tab is visible. A leader of a newer version is left alone.
      */
     async checkLeader(): Promise<void> {
-        if (!this.running || this.isLeader) {
+        if (!this.running || this.isLeader || this.outdated) {
             return;
         }
         try {
@@ -157,10 +227,19 @@ export class LeaderElection {
                 return;
             }
             this.missingSince = null;
-            if (now - record.heartbeat > STALE_MS) {
+            const protocol = protocolOf(record);
+            if (protocol > this.protocol) {
+                // The next claim of this tab is refused; nothing to ask for until then.
+                return;
+            }
+            if (protocol < this.protocol || now - record.heartbeat > STALE_MS) {
                 this.request(true);
             } else if (!record.visible && this.options.visible()) {
-                this.options.channel.postMessage({ type: "claim", tab: this.tabId } satisfies HandoverMessage);
+                this.options.channel.postMessage({
+                    type: "claim",
+                    tab: this.tabId,
+                    protocol: this.protocol,
+                } satisfies HandoverMessage);
             }
         } catch (error) {
             this.report(error);
@@ -168,28 +247,37 @@ export class LeaderElection {
     }
 
     private message(data: unknown): void {
-        if (!this.running || !isHandoverMessage(data)) {
+        if (!this.running || this.outdated || !isHandoverMessage(data)) {
             return;
         }
-        if (data.type === "claim" && this.isLeader && !this.options.visible() && data.tab !== this.tabId) {
+        const protocol = protocolOf(data);
+        if (
+            data.type === "claim" &&
+            this.isLeader &&
+            !this.options.visible() &&
+            data.tab !== this.tabId &&
+            protocol >= this.protocol
+        ) {
             this.options.channel.postMessage({
                 type: "handover",
                 to: data.tab,
                 epoch: this.currentEpoch!,
+                protocol: this.protocol,
             } satisfies HandoverMessage);
             // Keep leading until the visible tab steals the lock; if it never does, nothing is lost.
-        } else if (data.type === "handover" && data.to === this.tabId && !this.isLeader) {
+        } else if (data.type === "handover" && data.to === this.tabId && !this.isLeader && protocol <= this.protocol) {
             this.request(true);
         }
     }
 
     /** Requests the lock: queued behind the holder, or stolen from it. */
     private request(steal: boolean): void {
-        if (!this.running) {
+        if (!this.running || this.outdated) {
             return;
         }
         this.queued?.abort();
         const generation = ++this.generation;
+        this.wakeLead?.();
         const controller = new AbortController();
         this.queued = steal ? null : controller;
         const options: LockOptions = steal ? { steal: true } : { signal: controller.signal };
@@ -220,15 +308,33 @@ export class LeaderElection {
     }
 
     private async lead(generation: number, release: () => void): Promise<void> {
+        // Job writes of the previous leadership must have ended before a new epoch lets them through again.
+        await this.previousStopped();
+        if (generation !== this.generation || !this.running) {
+            release();
+            return;
+        }
         let epoch: number;
         try {
-            epoch = await leaderStore.claimEpoch();
+            epoch = await leaderStore.claimEpoch({ protocol: this.protocol });
         } catch (error) {
-            this.report(error);
             release();
             if (generation === this.generation) {
                 this.release = null;
-                this.request(false);
+            }
+            if (error instanceof LeaderProtocolError) {
+                this.retire(error);
+                return;
+            }
+            this.report(error);
+            if (generation === this.generation) {
+                // Not at once: a database this build cannot open fails every claim.
+                this.retryTimer = setTimeout(() => {
+                    this.retryTimer = null;
+                    if (generation === this.generation) {
+                        this.request(false);
+                    }
+                }, CLAIM_RETRY_MS);
             }
             return;
         }
@@ -241,7 +347,7 @@ export class LeaderElection {
         setLeaderFence(epoch);
         await this.beat();
         this.heartbeatTimer = setInterval(() => void this.beat(), HEARTBEAT_MS);
-        this.notify(() => this.options.onLead(epoch));
+        void this.notify(() => this.options.onLead(epoch));
     }
 
     /** Writes the heartbeat; finding a newer epoch means another tab leads now. */
@@ -256,12 +362,13 @@ export class LeaderElection {
                 tab_id: this.tabId,
                 heartbeat: this.now(),
                 visible: this.options.visible(),
+                protocol: this.protocol,
             });
             if (!current && this.currentEpoch === epoch) {
                 await this.lost();
             } else if (current && this.options.onHeartbeat) {
                 const onHeartbeat = this.options.onHeartbeat;
-                this.notify(() => onHeartbeat(epoch));
+                void this.notify(() => onHeartbeat(epoch));
             }
         } catch (error) {
             this.report(error);
@@ -290,18 +397,54 @@ export class LeaderElection {
             this.currentEpoch = null;
             // A demoted tab's job manager may still be finishing work: none of its job writes may commit now.
             revokeLeaderFence();
-            this.notify(() => this.options.onDemote());
+            this.stopped = settledWithin(
+                this.notify(() => this.options.onDemote()),
+                this.options.stopWaitMs ?? STOP_WAIT_MS,
+            );
             this.release?.();
             this.release = null;
         });
     }
 
-    /** Calls a host callback without waiting for it: starting or stopping job processing can take a while. */
-    private notify(callback: () => void | Promise<void>): void {
+    /** Settles with {@link stopped}, or once a newer lock request superseded the grant that waits. */
+    private previousStopped(): Promise<void> {
+        let wake!: () => void;
+        const superseded = new Promise<void>((resolve) => (wake = resolve));
+        this.wakeLead = wake;
+        return Promise.race([this.stopped, superseded]).finally(() => {
+            if (this.wakeLead === wake) {
+                this.wakeLead = null;
+            }
+        });
+    }
+
+    /** Stops taking part: a tab of a newer leader protocol version led. */
+    private retire(error: LeaderProtocolError): void {
+        if (this.outdatedBy) {
+            return;
+        }
+        this.outdatedBy = error;
+        this.queued?.abort();
+        this.queued = null;
+        this.generation += 1;
+        const onOutdated = this.options.onOutdated;
+        if (onOutdated) {
+            void this.notify(() => onOutdated(error));
+        } else {
+            this.report(error);
+        }
+    }
+
+    /**
+     * Calls a host callback without waiting for it: starting or stopping job processing can take a while. Returns a
+     * promise that settles (never rejects) when the callback's promise does.
+     */
+    private notify(callback: () => void | Promise<void>): Promise<void> {
         try {
-            void Promise.resolve(callback()).catch((error: unknown) => this.report(error));
+            return Promise.resolve(callback()).catch((error: unknown) => this.report(error));
         } catch (error) {
             this.report(error);
+            return Promise.resolve();
         }
     }
 

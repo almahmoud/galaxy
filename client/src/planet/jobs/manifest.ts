@@ -26,14 +26,25 @@ import {
     readTx,
     type UploadRecord,
 } from "@/planet/db";
+import { INSTALL_SLOT_COUNT, installSlotKeys, isInstalledArchiveKey } from "@/planet/install/keys";
+import {
+    INSTALLED_PANEL_SECTION,
+    InstallSourceError,
+    parseInstallSource,
+    TOOL_INSTALL_TOOL_ID,
+} from "@/planet/install/source";
+import { isNotFound } from "@/planet/s3";
 import { newUuid, randomHex } from "@/planet/util/ids";
 import { galaxyNow } from "@/planet/util/time";
 
 import type { JobDeps } from "./deps";
 import { slotsAndMemory } from "./k8sJob";
 import { jobObjectKeys, jobTimeLimits } from "./keys";
+import { DEFAULT_SLOT_COUNT, uploadLimitProblem, uploadSlotCount } from "./limits";
 import {
     abortMultipartUploads,
+    attemptHasObjects,
+    AttemptInUseError,
     createMultipartUpload,
     datasetTargets,
     DispatchError,
@@ -62,12 +73,11 @@ import {
     type ToolBundle,
 } from "./schemas";
 
-export { DispatchError };
+export { AttemptInUseError, DispatchError };
 
 export const DATA_FETCH_TOOL_ID = "__DATA_FETCH__";
 export const SET_METADATA_TOOL_ID = "__SET_METADATA__";
-/** Datasets a tool job may discover (`slots`). */
-export const DEFAULT_SLOT_COUNT = 32;
+export { DEFAULT_SLOT_COUNT };
 /** Galaxy's default `max_metadata_value_size`. */
 export const MAX_METADATA_VALUE_SIZE = 5 * 1024 * 1024;
 /**
@@ -109,15 +119,19 @@ export function jobKind(job: Pick<JobRecord, "tool_id">): JobKind {
     if (job.tool_id === SET_METADATA_TOOL_ID) {
         return "set_metadata";
     }
+    if (job.tool_id === TOOL_INSTALL_TOOL_ID) {
+        return "tool_install";
+    }
     return "tool";
 }
 
 /**
  * Prepares an attempt of a job: copies the tool archive into the bucket on first use, creates multipart uploads
  * for large outputs, presigns every request the pod needs, writes the attempt's manifest and dispatch record. Call
- * it before creating the attempt's Kubernetes Job, and only when no Job of the attempt exists: the attempt's objects
- * are rewritten and the uploads of the record they replace are aborted.
+ * it before creating the attempt's Kubernetes Job, and only when no Job of the attempt exists. An attempt whose
+ * objects exist is never prepared again: the uploads of its record are aborted and {@link AttemptInUseError} raised.
  *
+ * @throws AttemptInUseError when the attempt's objects exist
  * @throws DispatchError when the job cannot run (`permanent`) or not yet (inputs or uploads not ready)
  */
 export async function prepareDispatch(
@@ -130,9 +144,12 @@ export async function prepareDispatch(
     const keys = jobObjectKeys(job.id, attempt);
     const cluster = deps.settings.cluster;
     // The first request also teaches the client the bucket's clock, which every presigned request below relies on.
-    const previous = await readDispatchRecord(deps.s3, job.id, attempt, deps.signal);
-    if (previous?.multipart.length) {
-        await abortMultipartUploads(deps.s3, previous.multipart, deps.signal);
+    if (await attemptHasObjects(deps.s3, job.id, attempt, deps.signal)) {
+        const previous = await readDispatchRecord(deps.s3, job.id, attempt, deps.signal);
+        if (previous?.multipart.length) {
+            await abortMultipartUploads(deps.s3, previous.multipart, deps.signal);
+        }
+        throw new AttemptInUseError(job.id, attempt);
     }
     const dispatchId = randomHex(8);
 
@@ -248,6 +265,8 @@ async function buildManifest(kind: JobKind, context: BuildContext, bundle: ToolB
             return buildUploadManifest(context);
         case "set_metadata":
             return buildSetMetadataManifest(context);
+        case "tool_install":
+            return buildInstallManifest(context);
     }
 }
 
@@ -443,7 +462,7 @@ async function loadSnapshot(job: JobRecord, kind: JobKind): Promise<Snapshot> {
             for (const input of current.inputs) {
                 await loader.ref({ src: input.src, id: input.id });
             }
-        } else {
+        } else if (kind === "upload") {
             for (const id of uploadIds(fetchPayload(current))) {
                 const upload = await tx.store("uploads").get(id);
                 if (upload) {
@@ -947,7 +966,7 @@ async function buildToolManifest(context: BuildContext, bundle: ToolBundle): Pro
     const { job, deps, sign } = context;
     const registry = new InputRegistry(context.snapshot, true);
     const params = registry.convert(toolState(job, bundle)) as Record<string, unknown>;
-    const archive = await ensureToolArchive(deps, bundle);
+    const archive = (await installedToolArchive(deps, bundle)) ?? (await ensureToolArchive(deps, bundle));
     const inputBytes = registry.bytes;
     const outputs: ManifestOutput[] = [];
     for (const association of job.outputs) {
@@ -973,6 +992,69 @@ async function buildToolManifest(context: BuildContext, bundle: ToolBundle): Pro
         slots,
         job_files: files,
         limits: limitsFor(slots.length, "tool"),
+    };
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Tool installations (`install/`)
+
+/**
+ * The archive of a tool a `tool_install` job installed: its install pod stored it in the bucket, where the bundle's
+ * `source.repo_tar.path` names it. Stage-in checks its SHA-256.
+ *
+ * @returns null for other tools, whose archive {@link ensureToolArchive} copies from the site
+ * @throws DispatchError when the archive is missing or has another size
+ */
+async function installedToolArchive(
+    deps: JobDeps,
+    bundle: ToolBundle,
+): Promise<{ key: string; sha256: string } | null> {
+    const archive = bundle.source?.repo_tar;
+    if (!archive || !isInstalledArchiveKey(archive.path)) {
+        return null;
+    }
+    let size: number | null;
+    try {
+        size = (await deps.s3.headObject(archive.path, { signal: deps.signal })).contentLength;
+    } catch (error) {
+        if (isNotFound(error)) {
+            throw new DispatchError(
+                `The archive of tool ${bundle.id} ${bundle.version} is missing from the bucket; install the tool again.`,
+                true,
+            );
+        }
+        throw error;
+    }
+    if (size !== archive.size) {
+        throw new DispatchError(
+            `The archive of tool ${bundle.id} ${bundle.version} in the bucket does not match its bundle; install the tool again.`,
+            true,
+        );
+    }
+    return { key: archive.path, sha256: archive.sha256 };
+}
+
+/** A `tool_install` manifest: the job's install source and a slot of presigned PUTs per tool it may install. */
+async function buildInstallManifest(context: BuildContext): Promise<Manifest> {
+    const { job, manifestJob, sign } = context;
+    let source;
+    try {
+        source = parseInstallSource((job.params as { source?: unknown }).source);
+    } catch (error) {
+        throw new DispatchError(error instanceof InstallSourceError ? error.message : String(error), true);
+    }
+    const slots = await Promise.all(
+        Array.from({ length: INSTALL_SLOT_COUNT }, async (_, slot) => {
+            const keys = installSlotKeys(job.id, manifestJob.attempt, slot);
+            const [bundle, repoTar] = await Promise.all([sign.put(keys.bundle), sign.put(keys.repoTar)]);
+            return { bundle: { key: keys.bundle, request: bundle }, repo_tar: { key: keys.repoTar, request: repoTar } };
+        }),
+    );
+    return {
+        ...baseManifest("tool_install", context),
+        install: { source: { ...source }, panel_section: { ...INSTALLED_PANEL_SECTION }, slots },
+        job_files: await jobFiles(context, "tool_install"),
+        limits: limitsFor(0, "tool_install"),
     };
 }
 
@@ -1103,8 +1185,22 @@ interface RewrittenUpload {
     request: Record<string, unknown>;
     /** Upload sessions the request refers to. */
     uploads: UploadRecord[];
-    /** Bytes uploaded for each `hdas` element, by the id of its dataset (URLs and pasted text count as 0). */
+    /**
+     * Expected size of each `hdas` element's dataset, by its id: the bytes uploaded for it (URLs and pasted text count
+     * as 0), times {@link DECOMPRESSION_FACTOR} when data_fetch may decompress them.
+     */
     outputBytes: Map<string, number>;
+}
+
+/**
+ * How much larger than its upload a dataset that data_fetch decompresses (gzip, bz2, zip; `auto_decompress`) is
+ * expected to be: compressed text is commonly up to ten times smaller.
+ */
+export const DECOMPRESSION_FACTOR = 10;
+
+/** data_fetch's `UploadConfig.get_option(item, "auto_decompress")`: the item's own value, else the request's. */
+function mayDecompress(item: Record<string, unknown>, request: Record<string, unknown>): boolean {
+    return Boolean(Object.hasOwn(item, "auto_decompress") ? item.auto_decompress : request.auto_decompress);
 }
 
 /** Size of the uploaded files an element refers to, its composite parts included. */
@@ -1239,7 +1335,8 @@ function rewriteFetchRequest(context: BuildContext, outputIds: string[]): Rewrit
                     element.object_id = id;
                 }
                 const objectId = String(element.object_id);
-                outputBytes.set(objectId, (outputBytes.get(objectId) ?? 0) + uploadedBytes(element, used));
+                const factor = mayDecompress(element, request) ? DECOMPRESSION_FACTOR : 1;
+                outputBytes.set(objectId, (outputBytes.get(objectId) ?? 0) + uploadedBytes(element, used) * factor);
                 nextOutput++;
             }
         } else if (target.destination.type !== "hdas") {
@@ -1250,45 +1347,19 @@ function rewriteFetchRequest(context: BuildContext, outputIds: string[]): Rewrit
     return { request, uploads: [...used.values()], outputBytes };
 }
 
-/** Datasets an upload discovers: collection elements and expanded archives or directories. */
-function uploadSlotCount(targets: unknown[]): number {
-    let count = 0;
-    let dynamic = false;
-    const leaves = (value: unknown): number => {
-        if (Array.isArray(value)) {
-            return value.reduce((sum: number, item) => sum + leaves(item), 0);
-        }
-        if (!isRecord(value)) {
-            return 0;
-        }
-        if (value.elements_from) {
-            dynamic = true;
-        }
-        return Array.isArray(value.elements) ? leaves(value.elements) : "src" in value ? 1 : 0;
-    };
-    for (const target of targets) {
-        if (!isRecord(target) || !isRecord(target.destination)) {
-            continue;
-        }
-        if (target.destination.type === "hdca") {
-            count += leaves(target.elements ?? []);
-            dynamic ||= Boolean(target.elements_from);
-        } else if (target.elements_from) {
-            dynamic = true;
-        }
-    }
-    return count + (dynamic ? DEFAULT_SLOT_COUNT : 0);
-}
-
 async function buildUploadManifest(context: BuildContext): Promise<Manifest> {
     const { job, sign } = context;
     const outputIds = job.outputs.map((output) => output.id);
     const rewritten = rewriteFetchRequest(context, outputIds);
+    const tooLarge = uploadLimitProblem(rewritten.request.targets);
+    if (tooLarge) {
+        throw new DispatchError(tooLarge, true);
+    }
     const outputs: ManifestOutput[] = [];
     for (const association of job.outputs) {
         outputs.push(
             await outputRecord(context, association.name, association.id, {
-                // Each output holds one upload: its own size decides whether it needs a multipart upload.
+                // Each output holds one upload: its expected size decides whether it needs a multipart upload.
                 inputBytes: rewritten.outputBytes.get(association.id) ?? 0,
                 data: true,
                 objectId: association.id,

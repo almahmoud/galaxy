@@ -19,6 +19,7 @@ import {
     toolArchiveStaticPath,
     UUID_PATTERN,
 } from "./keys";
+import { MAX_DOCUMENT_BYTES } from "./limits";
 import {
     type DataUploadResult,
     type JobKind,
@@ -59,11 +60,37 @@ export class DispatchError extends Error {
     }
 }
 
+/**
+ * Raised when an attempt's objects (`jobs/<job>/a<attempt>/`) already exist although no Kubernetes Job of the attempt
+ * does: a pod of an earlier dispatch may have written prepare.json or results.json there. Dispatch the next attempt.
+ */
+export class AttemptInUseError extends DispatchError {
+    constructor(
+        readonly jobId: string,
+        readonly attempt: number,
+    ) {
+        super(`The objects of attempt ${attempt} of job ${jobId} already exist.`, false);
+        this.name = "AttemptInUseError";
+    }
+}
+
+/** True when the bucket holds any object of the attempt (`jobs/<job>/a<attempt>/`). */
+export async function attemptHasObjects(
+    s3: S3Client,
+    jobId: string,
+    attempt: number,
+    signal?: AbortSignal,
+): Promise<boolean> {
+    const { dispatch } = jobObjectKeys(jobId, attempt);
+    const prefix = dispatch.slice(0, dispatch.lastIndexOf("/") + 1);
+    const page = await s3.listObjects(prefix, { maxKeys: 1, signal });
+    return page.objects.length > 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // JSON documents
 
-/** Pod documents (`results.json`, `prepare.json`) and dispatch records larger than this are refused. */
-export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
+export { MAX_DOCUMENT_BYTES };
 
 /**
  * Throws `LeaderFenceError` when this tab no longer leads job processing. Every bucket write of the job protocol

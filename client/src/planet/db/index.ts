@@ -14,6 +14,7 @@ export * as histories from "./histories";
 export * as jobs from "./jobs";
 export * as kv from "./kv";
 export * as leader from "./leader";
+export { LeaderProtocolError } from "./leader";
 export { MIGRATIONS } from "./migrations";
 export * as outbox from "./outbox";
 export { touchHistory } from "./propagation";

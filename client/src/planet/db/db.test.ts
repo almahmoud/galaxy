@@ -20,6 +20,7 @@ import {
     histories,
     jobs,
     kv,
+    MIGRATIONS,
     outbox,
     type PlanetDB,
     type PlanetDBSchema,
@@ -70,6 +71,28 @@ describe("schema and migrations", () => {
         expect(upgraded.version).toBe(DB_VERSION + 1);
         upgraded.close();
         await expect(getDb()).rejects.toThrow();
+    });
+
+    it("upgrades a version 1 database in place and shuts out connections of version 1", async () => {
+        // A tab of a build from before the leader protocol version holds the database open at version 1.
+        const old = await openDB<PlanetDBSchema>(DB_NAME, 1, {
+            upgrade(database, _oldVersion, _newVersion, transaction) {
+                MIGRATIONS[1]!(database, transaction);
+            },
+        });
+        let closed = false;
+        old.addEventListener("versionchange", () => {
+            old.close();
+            closed = true;
+        });
+        await old.put("kv", 4, "leader_epoch");
+
+        expect(DB_VERSION).toBe(2);
+        expect(await kv.get("leader_epoch")).toBe(4);
+        expect(closed).toBe(true);
+        expect([...(await getDb()).objectStoreNames].sort()).toEqual([...STORE_NAMES].sort());
+        // Such a tab can no longer open the database, so it cannot claim a leader epoch either.
+        await expect(openDB(DB_NAME, 1)).rejects.toMatchObject({ name: "VersionError" });
     });
 });
 

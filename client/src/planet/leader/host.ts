@@ -1,9 +1,12 @@
 /**
  * Runs job processing in a Planet tab: joins the leader election and, while this tab leads and the cluster and
  * storage settings are complete, runs a {@link JobManager}. Settings changes restart it; visibility and network
- * changes trigger a reconciliation. The leader keeps the status record (`kv` `leader_status`) current.
+ * changes trigger a reconciliation. The leader keeps the status record (`kv` `leader_status`) current. Without its
+ * build's runtime data (`runtime.json`) a leader runs no jobs and tries again every {@link RUNTIME_RETRY_MS}. While
+ * it leads, the tab also writes the bucket snapshots of `@/planet/backup`.
  */
 
+import { BackupScheduler, type LeaderTask } from "@/planet/backup";
 import { settings } from "@/planet/db";
 import { resolveToolImage } from "@/planet/jobs/containers";
 import { createJobDeps, type JobDeps, type JobDepsOptions } from "@/planet/jobs/deps";
@@ -11,10 +14,13 @@ import { errorMessage } from "@/planet/jobs/failures";
 import { runtimeImage } from "@/planet/jobs/k8sJob";
 import { type ChannelLike, LeaderElection, type LockManagerLike } from "@/planet/jobs/leader";
 import { JobManager, type JobManagerOptions, type JobProtocol } from "@/planet/jobs/manager";
+import { type BuildRuntime, loadBuildRuntime } from "@/planet/jobs/runtime";
 import { LeaderStatus } from "@/planet/jobs/status";
 import { createKubeClient, type KubeClient, type KubeClientConfig } from "@/planet/k8s";
-import { loadBuildRuntimeImage } from "@/planet/ui/lib/runtime";
 import { subscribeTo } from "@/planet/util/events";
+
+/** How long a leader without its build's runtime data waits before reading it again. */
+export const RUNTIME_RETRY_MS = 30_000;
 
 /** The page events the host listens to. */
 export interface HostWindow {
@@ -34,20 +40,26 @@ export interface LeaderHostOptions {
     protocol: JobProtocol;
     createKube?: (config: KubeClientConfig) => KubeClient;
     createDeps?: (options: JobDepsOptions) => Promise<JobDeps | null>;
-    /** Reads this build's runtime image; defaults to `loadBuildRuntimeImage`. */
-    loadBuildImage?: () => Promise<string | null>;
+    /** Reads this build's runtime data; defaults to `loadBuildRuntime`. */
+    loadBuildRuntime?: () => Promise<BuildRuntime>;
+    /** Replaces {@link RUNTIME_RETRY_MS} (tests). */
+    runtimeRetryMs?: number;
     /** Extra manager options (tests). */
     manager?: Partial<Pick<JobManagerOptions, "now" | "sleep" | "onError">>;
+    /** Writes bucket snapshots while this tab leads; defaults to a `BackupScheduler`, null turns snapshots off. */
+    backup?: LeaderTask | null;
 }
 
 export class LeaderHost {
     readonly election: LeaderElection;
+    private readonly backup: LeaderTask | null;
     private current: JobManager | null = null;
     private status: LeaderStatus | null = null;
     private controller: AbortController | null = null;
     private queue: Promise<void> = Promise.resolve();
     private unsubscribe: (() => void) | null = null;
     private started = false;
+    private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     private readonly onVisibility = () => {
         this.election.visibilityChanged();
@@ -64,6 +76,7 @@ export class LeaderHost {
     };
 
     constructor(private readonly options: LeaderHostOptions) {
+        this.backup = options.backup === undefined ? new BackupScheduler() : options.backup;
         this.election = new LeaderElection({
             locks: options.locks,
             channel: options.channel,
@@ -72,12 +85,15 @@ export class LeaderHost {
                 this.status = new LeaderStatus(epoch, this.election.tabId, Date.now, (error) =>
                     console.warn(`Planet job status: ${errorMessage(error)}`),
                 );
+                this.backup?.start(epoch);
                 return this.enqueue(() => this.startManager());
             },
+            // The election installs this tab's next fence only once this resolves, after the manager stopped.
             onDemote: () => {
                 this.status = null;
-                return this.enqueue(() => this.stopManager());
+                return Promise.all([this.backup?.stop(), this.enqueue(() => this.stopManager())]).then(() => undefined);
             },
+            onOutdated: (error) => console.warn(`Planet: ${error.message}`),
             onHeartbeat: (epoch) => {
                 if (this.status?.epoch === epoch) {
                     return this.status.write().then(() => undefined);
@@ -147,9 +163,11 @@ export class LeaderHost {
     }
 
     private async startManager(): Promise<void> {
+        this.cancelRetry();
         if (this.current || !this.election.isLeader) {
             return;
         }
+        const epoch = this.election.epoch!;
         const status = this.status;
         const current = await settings.get();
         const configured = settings.configured(current);
@@ -165,16 +183,17 @@ export class LeaderHost {
             await status?.setBlocked("No cluster token is stored.");
             return;
         }
-        let buildImage: string | null;
+        let build: BuildRuntime;
         try {
-            buildImage = await (this.options.loadBuildImage ?? loadBuildRuntimeImage)();
+            build = await (this.options.loadBuildRuntime ?? loadBuildRuntime)();
         } catch (error) {
-            // Only a page of another build fails here; it is offered a reload.
+            // Never the default tag in place of the build's image: no jobs until the build's data can be read.
             await status?.setBlocked(`This tab cannot read its build's runtime image: ${errorMessage(error)}`);
+            this.retryLater(epoch);
             return;
         }
         const controller = new AbortController();
-        const runtime = runtimeImage(stored.cluster, buildImage);
+        const runtime = runtimeImage(stored.cluster, build.image);
         const deps = await (this.options.createDeps ?? createJobDeps)({
             resolveContainer: (bundle) => resolveToolImage(bundle, runtime, { signal: controller.signal }),
             signal: controller.signal,
@@ -183,7 +202,7 @@ export class LeaderHost {
             await status?.setBlocked("The storage settings are incomplete.");
             return;
         }
-        if (!this.election.isLeader) {
+        if (this.election.epoch !== epoch || this.current) {
             return;
         }
         const kube = (this.options.createKube ?? defaultKubeClient)({
@@ -199,7 +218,9 @@ export class LeaderHost {
             deps,
             protocol: this.options.protocol,
             settings: stored,
-            buildRuntimeImage: buildImage,
+            buildRuntimeImage: build.image,
+            runtimeTagPullPolicy: build.tagPullPolicy,
+            epoch,
             onFenced: () => void this.enqueue(() => this.stopManager()),
             onError: (error, context, jobId) => {
                 if (onError) {
@@ -210,12 +231,32 @@ export class LeaderHost {
                 void status?.recordError(error, jobId ?? null);
             },
             onClusterStatus: (problem) => void status?.setClusterProblem(problem),
+            onReconciled: (started) => void status?.clearErrorsBefore(started),
         });
         this.current.start();
         void status?.setBlocked(null);
     }
 
+    /** Starts the manager again later, if this tab still leads with `epoch` and runs none. */
+    private retryLater(epoch: number): void {
+        this.cancelRetry();
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            if (this.started && this.election.epoch === epoch && !this.current) {
+                void this.enqueue(() => this.startManager());
+            }
+        }, this.options.runtimeRetryMs ?? RUNTIME_RETRY_MS);
+    }
+
+    private cancelRetry(): void {
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+        }
+    }
+
     private async stopManager(): Promise<void> {
+        this.cancelRetry();
         const manager = this.current;
         this.current = null;
         this.controller?.abort();

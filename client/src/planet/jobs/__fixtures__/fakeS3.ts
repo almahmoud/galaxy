@@ -3,7 +3,7 @@
  * (`https://<endpoint>.s3.test/<key>?method=PUT&expires=97200`), so tests can check targets and expiries.
  */
 
-import type { S3Body, S3Client, S3ListedPart, S3ObjectInfo, S3Part } from "@/planet/s3";
+import type { S3Body, S3Client, S3ListedPart, S3ListOptions, S3ListResult, S3ObjectInfo, S3Part } from "@/planet/s3";
 import { S3Error } from "@/planet/s3";
 
 interface PendingUpload {
@@ -102,8 +102,19 @@ export class FakeS3 implements S3Client {
         this.objects.delete(key);
     }
 
-    async listObjects(): Promise<never> {
-        throw new Error("not used by the job protocol");
+    async listObjects(prefix: string, options: S3ListOptions = {}): Promise<S3ListResult> {
+        this.log.push(`LIST ${prefix}`);
+        const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix)).sort();
+        const start = options.continuationToken ? keys.indexOf(options.continuationToken) : 0;
+        const limit = options.maxKeys ?? 1000;
+        const page = keys.slice(start, start + limit);
+        const next = keys[start + limit];
+        return {
+            objects: page.map((key) => ({ key, size: this.objects.get(key)!.byteLength, etag: "", lastModified: "" })),
+            commonPrefixes: [],
+            isTruncated: next !== undefined,
+            nextContinuationToken: next ?? null,
+        };
     }
 
     async presignGet(key: string, expiresSeconds: number, options: { endpoint?: string } = {}): Promise<string> {

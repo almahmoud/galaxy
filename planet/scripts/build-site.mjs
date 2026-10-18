@@ -10,8 +10,11 @@
  * the sources, and the files that embed it are rebuilt with the final value.
  *
  * PLANET_RUNTIME_IMAGE names the planet-runtime image built from the same
- * commit. It is written to static/planet/data/runtime.json, the default image
- * of job pods; pin it by digest. Without it, jobs default to a movable tag.
+ * commit, pinned by digest. It is written to static/planet/data/runtime.json,
+ * the default image of job pods. The build fails without a digest unless
+ * PLANET_ALLOW_UNPINNED_RUNTIME=1 is set (local clusters with node-local
+ * images): the image may then be a tag or unset, and runtime images without a
+ * digest are pulled IfNotPresent instead of Always.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -50,7 +53,7 @@ const SCRIPT_ENTRIES = {
 const REPO_STATIC = ["style/jquery-ui", "favicon.svg", "favicon.ico", "robots.txt"];
 /** Stable-named files a page loads before Galaxy's entries, precached with them. */
 const BOOT_FILES = ["static/planet/boot.js", "static/planet/boot.css", "static/welcome.html"];
-/** Site path of the runtime image data (client/src/planet/ui/lib/runtime.ts). */
+/** Site path of the runtime data (client/src/planet/jobs/runtime.ts). */
 const RUNTIME_DATA = "static/planet/data/runtime.json";
 /** [registry[:port]/]repository[:tag][@sha256:digest], as the setup page validates it. */
 const IMAGE_REFERENCE =
@@ -226,20 +229,30 @@ function isContentHashed(path) {
     return /^\/static\/dist\/(?:chunks|assets)\//.test(path);
 }
 
-/** The runtime image data from PLANET_RUNTIME_IMAGE: `{image}`, null when unset. */
+/**
+ * The runtime data (client/src/planet/jobs/runtime.ts) from PLANET_RUNTIME_IMAGE: `{image}`, with
+ * `tag_pull_policy: "IfNotPresent"` when PLANET_ALLOW_UNPINNED_RUNTIME=1 allows an image without a digest.
+ */
 function runtimeData() {
     const image = (process.env.PLANET_RUNTIME_IMAGE ?? "").trim();
-    if (!image) {
-        warn("PLANET_RUNTIME_IMAGE is not set; jobs default to the movable planet-runtime tag");
-        return { image: null };
-    }
-    if (image.length > 512 || !IMAGE_REFERENCE.test(image)) {
+    const allowUnpinned = process.env.PLANET_ALLOW_UNPINNED_RUNTIME === "1";
+    if (image && (image.length > 512 || !IMAGE_REFERENCE.test(image))) {
         fail(`PLANET_RUNTIME_IMAGE is not an image reference: ${JSON.stringify(image)}`);
     }
-    if (!IMAGE_DIGEST.test(image)) {
-        warn(`PLANET_RUNTIME_IMAGE ${image} has no digest; pin it as image@sha256:<digest>`);
+    if (image && IMAGE_DIGEST.test(image)) {
+        return allowUnpinned ? { image, tag_pull_policy: "IfNotPresent" } : { image };
     }
-    return { image };
+    const problem = image
+        ? `PLANET_RUNTIME_IMAGE ${image} has no digest`
+        : "PLANET_RUNTIME_IMAGE is not set, so jobs would use the movable planet-runtime tag";
+    if (!allowUnpinned) {
+        fail(
+            `${problem}. Set it to the image built from this commit as image@sha256:<digest>, ` +
+                "or set PLANET_ALLOW_UNPINNED_RUNTIME=1 for a local development build.",
+        );
+    }
+    warn(`${problem}; allowed by PLANET_ALLOW_UNPINNED_RUNTIME=1, and images without a digest are pulled IfNotPresent`);
+    return { image: image || null, tag_pull_policy: "IfNotPresent" };
 }
 
 function sha256(file) {
@@ -466,7 +479,7 @@ function main() {
         copyInto(join(siteDir, "_headers"), join(distDir, "_headers"));
         mkdirSync(dirname(join(distDir, RUNTIME_DATA)), { recursive: true });
         writeFileSync(join(distDir, RUNTIME_DATA), `${JSON.stringify(runtime, null, 2)}\n`);
-        return `runtime image: ${runtime.image ?? "not set"}`;
+        return `runtime image: ${runtime.image ?? "not set"}${runtime.tag_pull_policy ? ", unpinned allowed" : ""}`;
     });
 
     step("tool archives", checkToolArchives);

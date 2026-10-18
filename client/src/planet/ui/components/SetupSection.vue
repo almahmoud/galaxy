@@ -2,7 +2,7 @@
 import { faChevronDown } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 
-import type { CardState } from "../lib/display";
+import type { CardState, PillInfo } from "../lib/display";
 
 import StatusPill from "./StatusPill.vue";
 
@@ -13,7 +13,9 @@ defineProps<{
     step: number;
     title: string;
     description: string;
-    state: CardState;
+    /** A connection state, or `pill` for other kinds of status. */
+    state?: CardState;
+    pill?: PillInfo;
     expanded: boolean;
 }>();
 
@@ -29,7 +31,7 @@ const emit = defineEmits<{ toggle: [] }>();
                 <p class="pw-section__description">{{ description }}</p>
             </div>
             <div class="pw-section__aside">
-                <StatusPill :state="state" />
+                <StatusPill :state="state" :pill="pill" />
                 <button
                     type="button"
                     class="btn btn-sm btn-outline-primary pw-section__toggle"

@@ -59,6 +59,8 @@ export const MIGRATIONS: Readonly<Record<number, (db: PlanetDB, tx: UpgradeTrans
         uploads.createIndex("state", "state");
         uploads.createIndex("history_id", "history_id");
     },
+    // No store changes: the version bump shuts out tabs of builds before the leader protocol version.
+    2() {},
 };
 
 /** Applies every migration between `oldVersion` and `newVersion` in order. */

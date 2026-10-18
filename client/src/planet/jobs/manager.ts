@@ -7,7 +7,9 @@
  * rewriting or aborting anything, any other one is deleted and the next attempt used.
  *
  * Work on one job is serialized; job writes are fenced to the leader epoch (`db/fence.ts`), and bucket and
- * Kubernetes writes check it first.
+ * Kubernetes writes check it first, and that it is still this manager's own epoch.
+ *
+ * Purged datasets keep their bucket objects until the job that creates them can no longer write them.
  */
 
 import {
@@ -21,6 +23,7 @@ import {
     jobs,
     type JobState,
     leader,
+    leaderFence,
     LeaderFenceError,
     outbox,
     type OutboxRecord,
@@ -31,6 +34,7 @@ import {
     writeTx,
 } from "@/planet/db";
 import { isKubeError, type Job as KubeJob, type KubeClient, type Pod } from "@/planet/k8s";
+import type { S3Client } from "@/planet/s3";
 import { type PlanetEvent, subscribe } from "@/planet/util/events";
 import { formatGalaxyTime, parseGalaxyTime } from "@/planet/util/time";
 
@@ -63,6 +67,8 @@ import {
 } from "./k8sJob";
 import type { AdoptedDispatch, DispatchPlan } from "./manifest";
 import { ClusterMonitor } from "./monitor";
+import { AttemptInUseError } from "./objects";
+import type { PullPolicy } from "./runtime";
 import { ProtocolError } from "./schemas";
 
 /** The protocol module's entry points (`jobs/manifest.ts`, `jobs/ingest.ts`). */
@@ -86,6 +92,13 @@ export interface JobManagerOptions {
     settings: StoredSettings;
     /** This build's runtime image (`runtime.json`), used when the settings name none. */
     buildRuntimeImage?: string | null;
+    /** Pull policy of runtime images without a digest (`runtime.json`); `Always` by default. */
+    runtimeTagPullPolicy?: PullPolicy;
+    /**
+     * The leader epoch this manager works for. Its Kubernetes and bucket writes are refused once this context is
+     * fenced to another epoch, even when that epoch is current.
+     */
+    epoch?: number;
     /** Milliseconds since the epoch. */
     now?: () => number;
     /** Called when a write found that another tab leads now; the caller stops this manager. */
@@ -94,6 +107,8 @@ export interface JobManagerOptions {
     onError?: (error: unknown, context: string, jobId?: string) => void;
     /** Called after each listing of the cluster: null when it answered, else why it could not be listed. */
     onClusterStatus?: (problem: string | null) => void;
+    /** Called after a reconciliation that listed the cluster, with the time it started (epoch milliseconds). */
+    onReconciled?: (started: number) => void;
     /** Replaces the monitor's waits between failed watch streams (tests). */
     sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -106,8 +121,18 @@ export const INPUT_RECHECK_MS = 60_000;
 export const NO_POD_GRACE_MS = 30_000;
 /** A Job missing from the watch caches this long after its creation is looked up directly. */
 export const MISSING_JOB_GRACE_MS = 60_000;
-/** Stage-in failures without `prepare.json` (an expired manifest URL, an unreachable bucket) are retried. */
+/**
+ * Stage-in failures without `prepare.json` (an expired manifest URL, an unreachable bucket) are retried until stage-in
+ * ran this many times. Attempt numbers count every dispatch, so they can be higher.
+ */
 export const MAX_ATTEMPTS = 3;
+/** A purge whose datasets the creating job may still write is looked at again after this long. */
+export const PURGE_RECHECK_MS = 60_000;
+/**
+ * Without a listing of the cluster, a job is taken to have no pod left this long after it settled (the pod's
+ * termination grace period, with a margin).
+ */
+export const POD_GONE_MS = 5 * 60_000;
 /** Unclassified dispatch errors fail the job after this many attempts; transient ones are retried forever. */
 export const MAX_UNKNOWN_DISPATCH_FAILURES = 5;
 const BACKOFF_BASE_MS = 5000;
@@ -139,6 +164,46 @@ function galaxyTime(ms: number): string {
 /** True when the API server answered a create request without creating anything. */
 function refusedCreation(error: unknown): boolean {
     return isKubeError(error) && [400, 401, 403, 404, 409, 413, 415, 422, 429].includes(error.status);
+}
+
+/** Stage-in runs of a dispatched job before its current one (records before the count use the attempt number). */
+function stageInRetries(k8s: JobKubernetesInfo): number {
+    return k8s.stage_in_retries ?? k8s.attempt - 1;
+}
+
+/** When the job entered its current state, in epoch milliseconds. */
+function stateSince(job: JobRecord): number {
+    const last = job.state_history.at(-1);
+    return parseGalaxyTime(last?.state === job.state ? last.time : job.update_time) / 1000;
+}
+
+/** S3 requests that change the bucket. */
+const S3_WRITES: ReadonlySet<PropertyKey> = new Set<keyof S3Client>([
+    "putObject",
+    "deleteObject",
+    "createMultipartUpload",
+    "uploadPart",
+    "completeMultipartUpload",
+    "abortMultipartUpload",
+]);
+
+/** `s3` with every request that changes the bucket refused when `check` throws. */
+function fencedS3(s3: S3Client, check: () => void): S3Client {
+    return new Proxy(s3, {
+        get(target, property) {
+            const value: unknown = Reflect.get(target, property, target);
+            if (typeof value !== "function") {
+                return value;
+            }
+            if (!S3_WRITES.has(property)) {
+                return value.bind(target);
+            }
+            return async (...args: unknown[]) => {
+                check();
+                return value.apply(target, args);
+            };
+        },
+    });
 }
 
 /** The tool container's image of a Kubernetes Job, or null for single-container jobs. */
@@ -174,7 +239,11 @@ export class JobManager {
 
     constructor(private readonly options: JobManagerOptions) {
         this.kube = options.kube;
-        this.deps = options.deps;
+        // Bucket writes of the protocol module check this manager's epoch too.
+        this.deps =
+            options.epoch === undefined
+                ? options.deps
+                : { ...options.deps, s3: fencedS3(options.deps.s3, () => this.checkEpoch()) };
         this.protocol = options.protocol;
         this.settings = options.settings;
         this.now = options.now ?? Date.now;
@@ -248,6 +317,7 @@ export class JobManager {
         if (!this.running) {
             return;
         }
+        const started = this.now();
         try {
             await this.monitor.resync(this.controller.signal);
             this.synced = true;
@@ -284,6 +354,9 @@ export class JobManager {
             this.handle(error, "reconcile");
         }
         await this.drainOutbox(true);
+        if (this.synced && this.running) {
+            this.options.onReconciled?.(started);
+        }
     }
 
     /** Asks for the job to be checked against the cluster; repeated requests before it runs coalesce. */
@@ -387,9 +460,17 @@ export class JobManager {
                 case "cleanup":
                     await this.cleanup((entry.payload ?? {}) as CleanupPayload);
                     break;
-                case "purge":
-                    await this.purge((entry.payload ?? {}) as PurgePayload);
+                case "purge": {
+                    const later = await this.purge((entry.payload ?? {}) as PurgePayload);
+                    if (later.length) {
+                        await writeTx(["outbox"], async (t) => {
+                            await outbox.setPayload(entry.id, { dataset_ids: later } satisfies PurgePayload, t);
+                            await outbox.postpone(entry.id, galaxyTime(this.now() + PURGE_RECHECK_MS), t);
+                        });
+                        return;
+                    }
                     break;
+                }
                 default:
                     this.report(new Error(`Unknown outbox entry kind '${entry.kind}'`), "outbox");
             }
@@ -446,12 +527,26 @@ export class JobManager {
             await outbox.remove(entry.id);
             return;
         }
-        const first = (entry.payload as DispatchPayload | null)?.attempt ?? 1;
+        let payload: DispatchPayload = (entry.payload as DispatchPayload | null) ?? {};
+        const first = payload.attempt ?? 1;
+        /** Moves the entry on to the next attempt, keeping the stage-in count; `replace` names Jobs to delete. */
+        const movePast = async (attempt: number, replace?: string[]) => {
+            payload = {
+                attempt: attempt + 1,
+                ...(payload.stage_in_retries ? { stage_in_retries: payload.stage_in_retries } : {}),
+                ...(replace ? { replace } : {}),
+            };
+            await outbox.setPayload(entry.id, payload);
+        };
         let plan: DispatchPlan | undefined;
         // Whether a Kubernetes Job of `plan` may exist although its creation failed (the request's outcome is
         // unknown): its uploads stay for the next dispatch, which adopts that Job or proves it absent.
         const creation = { mayExist: false };
         try {
+            // Jobs of earlier attempts this dispatch moved past, which their deletion may not have reached.
+            for (const name of payload.replace ?? []) {
+                await this.deleteKubeJob(name);
+            }
             for (let attempt = first; attempt < first + SPEC_CONFLICT_RETRIES; attempt++) {
                 plan = undefined;
                 creation.mayExist = false;
@@ -471,25 +566,37 @@ export class JobManager {
                             existing,
                             { ...adopted, toolImage: toolImage(existing) },
                             entry.id,
+                            payload,
                         );
                         return;
                     }
-                    // Not created from this attempt's record: it must not write this job's outputs.
+                    // Not created from this attempt's record: it must not write this job's outputs. The entry moves
+                    // on first, so this attempt's objects are never prepared again, and keeps the Job to delete.
+                    await movePast(attempt, [name]);
                     await this.deleteKubeJob(name);
                     await this.protocol.abortDispatch(job, this.deps, { attempt });
-                    await outbox.setPayload(entry.id, { attempt: attempt + 1 } satisfies DispatchPayload);
                     continue;
                 }
-                plan = await this.protocol.prepareDispatch(job, this.deps, { attempt });
+                try {
+                    plan = await this.protocol.prepareDispatch(job, this.deps, { attempt });
+                } catch (error) {
+                    if (!(error instanceof AttemptInUseError)) {
+                        throw error;
+                    }
+                    // An earlier dispatch wrote the attempt's objects and its Job is gone: a pod may have written
+                    // prepare.json or results.json there, which must not be taken for a new pod's.
+                    await movePast(attempt);
+                    continue;
+                }
                 const kubeJob = await this.createKubeJob(job, plan, creation);
                 if (kubeJob) {
-                    await this.recordDispatch(job.id, kubeJob, plan, entry.id);
+                    await this.recordDispatch(job.id, kubeJob, plan, entry.id, payload);
                     return;
                 }
                 // Another dispatch's Job was in the way and is deleted; this plan's uploads were never handed out.
                 await this.abortUploads(plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })));
                 plan = undefined;
-                await outbox.setPayload(entry.id, { attempt: attempt + 1 } satisfies DispatchPayload);
+                await movePast(attempt);
             }
             throw new Error(`Kubernetes Jobs of earlier dispatches of job ${job.id} are in the way.`);
         } catch (error) {
@@ -543,9 +650,10 @@ export class JobManager {
             plan,
             cluster: this.settings.cluster,
             buildRuntimeImage: this.options.buildRuntimeImage,
+            runtimeTagPullPolicy: this.options.runtimeTagPullPolicy,
         });
         const name = spec.metadata.name!;
-        await leader.assertCurrent();
+        await this.assertLeader();
         try {
             creation.mayExist = true;
             return await this.kube.createJob(spec, { signal: this.controller.signal });
@@ -566,11 +674,16 @@ export class JobManager {
         return null;
     }
 
+    /**
+     * Records the Kubernetes Job a dispatch created or adopted. A job that meanwhile got another Job recorded, or can
+     * no longer be dispatched, keeps what it has: this Job is deleted and its uploads aborted.
+     */
     private async recordDispatch(
         jobId: string,
         kubeJob: KubeJob,
         plan: Pick<DispatchPlan, "kind" | "attempt" | "toolImage" | "multipart">,
         entryId: string,
+        payload: DispatchPayload,
     ): Promise<void> {
         const k8s: JobKubernetesInfo = {
             namespace: this.kube.namespace,
@@ -586,22 +699,34 @@ export class JobManager {
             prepared: false,
             tool_termination: null,
             multipart: plan.multipart.map(({ key, uploadId }) => ({ key, upload_id: uploadId })),
+            stage_in_retries: payload.stage_in_retries ?? 0,
         };
-        const deleting = await writeTx(JOB_STORES, async (t) => {
+        const outcome = await writeTx(JOB_STORES, async (t): Promise<"recorded" | "cancel" | "stray"> => {
             const current = await jobs.get(jobId, t);
             await outbox.remove(entryId, t);
             if (!current) {
-                return false;
+                return "stray";
+            }
+            if (current.k8s) {
+                return current.k8s.name === k8s.name ? "recorded" : "stray";
             }
             if (current.state === "deleting") {
                 await jobs.update(jobId, { k8s }, t);
-                return true;
+                return "cancel";
+            }
+            if (!DISPATCHABLE.has(current.state)) {
+                return "stray";
             }
             await this.transition(jobId, "queued", { k8s }, t);
-            return false;
+            return "recorded";
         });
+        if (outcome === "stray") {
+            await this.removeKubeJob(k8s.name);
+            await this.abortUploads(k8s.multipart);
+            return;
+        }
         this.monitor.remember(kubeJob);
-        if (deleting) {
+        if (outcome === "cancel") {
             const job = await jobs.get(jobId);
             if (job) {
                 await this.cancel(job);
@@ -801,7 +926,7 @@ export class JobManager {
             return;
         }
         const failure = classifyFailure(job.k8s.kind, kubeJob, pod);
-        if (failure.reason === "stage_in" && job.k8s.attempt < MAX_ATTEMPTS) {
+        if (failure.reason === "stage_in" && stageInRetries(job.k8s) < MAX_ATTEMPTS - 1) {
             const prepared = job.k8s.prepared || (await this.protocol.readPrepare(job, this.deps)) !== null;
             if (!prepared) {
                 await this.retry(job);
@@ -817,7 +942,7 @@ export class JobManager {
         await this.deleteKubeJob(k8s.name);
         // The attempt's pod has finished and its Job is gone: nothing uses its uploads any more.
         await this.abortUploads(k8s.multipart);
-        const payload: DispatchPayload = { attempt: k8s.attempt + 1 };
+        const payload: DispatchPayload = { attempt: k8s.attempt + 1, stage_in_retries: stageInRetries(k8s) + 1 };
         await writeTx(JOB_STORES, async (t) => {
             const current = await jobs.get(job.id, t);
             if (current?.k8s?.name === k8s.name && ACTIVE.has(current.state)) {
@@ -969,18 +1094,27 @@ export class JobManager {
             await this.deleteKubeJob(name);
         }
         for (const upload of payload.multipart ?? []) {
-            await leader.assertCurrent();
+            await this.assertLeader();
             await this.deps.s3.abortMultipartUpload(upload.key, upload.upload_id);
         }
     }
 
-    /** Deletes the bucket objects of purged datasets (`datasets/<uuid>/`). */
-    private async purge(payload: PurgePayload): Promise<void> {
+    /**
+     * Deletes the bucket objects of purged datasets (`datasets/<uuid>/`). A dataset its creating job may still write
+     * keeps them for now (a pod would write them again after the deletion); returns the ids of those datasets.
+     */
+    private async purge(payload: PurgePayload): Promise<string[]> {
         const uuids = new Set(payload.uuids ?? []);
+        const later: string[] = [];
         for (const id of payload.dataset_ids ?? []) {
             const dataset = await datasets.get(id);
             // Datasets that are not purged (an undelete, another copy) keep their objects.
-            if (dataset?.purged) {
+            if (!dataset?.purged) {
+                continue;
+            }
+            if (await this.mayStillWrite(dataset.job_id)) {
+                later.push(id);
+            } else {
                 uuids.add(dataset.uuid);
             }
         }
@@ -992,17 +1126,54 @@ export class JobManager {
             do {
                 const page = await this.deps.s3.listObjects(`datasets/${uuid}/`, { continuationToken: token });
                 for (const object of page.objects) {
-                    await leader.assertCurrent();
+                    await this.assertLeader();
                     await this.deps.s3.deleteObject(object.key);
                 }
                 token = page.isTruncated ? (page.nextContinuationToken ?? undefined) : undefined;
             } while (token);
         }
+        return later;
+    }
+
+    /**
+     * Whether a pod of the job may still write its datasets: the job has not settled (paused jobs have no pod and
+     * ingest purges what a resumed one writes), or the cluster still has its Job or pod. Without a listing of the
+     * cluster, only a job that settled {@link POD_GONE_MS} ago is known to have no pod.
+     */
+    private async mayStillWrite(jobId: string | null): Promise<boolean> {
+        if (!jobId) {
+            return false;
+        }
+        const job = await jobs.get(jobId);
+        if (job && !SETTLED.has(job.state)) {
+            return true;
+        }
+        if (this.synced) {
+            return this.monitor.knownJobIds().has(jobId);
+        }
+        return !job || this.now() - stateSince(job) < POD_GONE_MS;
+    }
+
+    /**
+     * Throws `LeaderFenceError` unless this context is still fenced to this manager's epoch and that epoch is current.
+     * Checked before every Kubernetes and bucket write of the manager.
+     */
+    private async assertLeader(): Promise<void> {
+        this.checkEpoch();
+        await leader.assertCurrent();
+    }
+
+    /** Throws `LeaderFenceError` when this context is no longer fenced to this manager's epoch. */
+    private checkEpoch(): void {
+        const epoch = this.options.epoch;
+        if (epoch !== undefined && leaderFence() !== epoch) {
+            throw new LeaderFenceError(epoch, leaderFence());
+        }
     }
 
     /** Deletes a Kubernetes Job and its pods. Throws when the API cannot be reached. */
     private async deleteKubeJob(name: string): Promise<void> {
-        await leader.assertCurrent();
+        await this.assertLeader();
         await this.kube.deleteJob(name, { signal: this.controller.signal });
         this.monitor.forget(name);
         this.eventChecks.delete(name);
@@ -1022,7 +1193,7 @@ export class JobManager {
         if (!uploads.length) {
             return;
         }
-        await leader.assertCurrent();
+        await this.assertLeader();
         const failed: JobMultipartUpload[] = [];
         for (const upload of uploads) {
             try {

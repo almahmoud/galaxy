@@ -15,14 +15,16 @@ import type {
     SecurityContext,
     VolumeMount,
 } from "@/planet/k8s";
+import { isPinnedImage } from "@/planet/ui/lib/runtime";
 import { sha256Hex } from "@/planet/util/digest";
 
 import { MAX_DEADLINE_SECONDS } from "./keys";
 import type { DispatchPlan } from "./manifest";
+import type { PullPolicy } from "./runtime";
 
 type ClusterSettings = StoredSettings["cluster"];
 
-/** Runtime image used when the cluster settings name none. Tags without a digest are pulled IfNotPresent. */
+/** Runtime image used when neither the cluster settings nor the build name one. */
 export const DEFAULT_RUNTIME_IMAGE = "ghcr.io/almahmoud/planet-runtime:latest";
 
 /** uid, gid and fsGroup of every container. */
@@ -98,6 +100,14 @@ export function runtimeImage(
     buildImage: string | null = null,
 ): string {
     return cluster.runtime_image.trim() || buildImage || DEFAULT_RUNTIME_IMAGE;
+}
+
+/**
+ * Pull policy of the runtime image: an image pinned by digest cannot change, so a node's copy is used; a tag is pulled
+ * every time (whoever can push to it changes what the next pod runs) unless the build allows node-local images.
+ */
+export function runtimePullPolicy(image: string, tagPolicy: PullPolicy = "Always"): PullPolicy {
+    return isPinnedImage(image) ? "IfNotPresent" : tagPolicy;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -185,6 +195,8 @@ export interface JobSpecInput {
     cluster: ClusterSettings;
     /** This build's runtime image, used when the settings name none. */
     buildRuntimeImage?: string | null;
+    /** Pull policy of a runtime image without a digest (see {@link runtimePullPolicy}); `Always` by default. */
+    runtimeTagPullPolicy?: PullPolicy;
 }
 
 function env(name: string, value: string | number): EnvVar {
@@ -235,6 +247,7 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
         runtimeImage(cluster, input.buildRuntimeImage),
         cluster.runtime_image.trim() ? "runtime image setting" : "build's runtime image",
     );
+    const runtimePolicy = runtimePullPolicy(runtime, input.runtimeTagPullPolicy);
     const scratch = requireQuantity(plan.resources.scratch, "scratch size");
     const userNamespaces = cluster.user_namespaces;
 
@@ -268,7 +281,7 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
     ): Container => ({
         name: containerName,
         image: runtime,
-        imagePullPolicy: "IfNotPresent",
+        imagePullPolicy: runtimePolicy,
         command: ["planet-stager", command],
         env: [...(manifestUrl ? [env(MANIFEST_URL_ENV, plan.manifestUrl)] : []), ...stagerEnv()],
         resources,
@@ -297,7 +310,8 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
         const tool: Container = {
             name: TOOL_CONTAINER,
             image,
-            imagePullPolicy: "IfNotPresent",
+            // Tools without a container of their own run in the runtime image.
+            imagePullPolicy: image === runtime ? runtimePolicy : "IfNotPresent",
             command: ["/bin/sh", "/planet/bin/run-tool"],
             workingDir: "/planet/job/working",
             env: [
@@ -346,7 +360,7 @@ export async function buildJobSpec(input: JobSpecInput): Promise<Job> {
         containers = [
             stager(
                 STAGER_CONTAINER,
-                plan.kind === "upload" ? "upload" : "set-metadata",
+                plan.kind === "upload" ? "upload" : plan.kind === "tool_install" ? "install" : "set-metadata",
                 {
                     requests: {
                         cpu: plan.resources.cpu,

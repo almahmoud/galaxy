@@ -7,7 +7,7 @@ exports[`tool job specs > matches the recommended spec 1`] = `
   "metadata": {
     "annotations": {
       "planet.dev/dispatch-id": "5f0c2a9e7b1d3c4e",
-      "planet.dev/spec-sha256": "03636015fcc36ea601ce1b1b61a3535f9750e2fabc5a1f45ff2bc740e3885fce",
+      "planet.dev/spec-sha256": "bec183c0e61957ed6277ddd829953b5d54e9fa5e61be9db7396c5f399cb5e0d9",
     },
     "labels": {
       "app.kubernetes.io/managed-by": "planet",
@@ -151,7 +151,7 @@ exports[`tool job specs > matches the recommended spec 1`] = `
               },
             ],
             "image": "ghcr.io/almahmoud/planet-runtime:latest",
-            "imagePullPolicy": "IfNotPresent",
+            "imagePullPolicy": "Always",
             "name": "stage-out",
             "resources": {
               "limits": {
@@ -212,7 +212,7 @@ exports[`tool job specs > matches the recommended spec 1`] = `
               },
             ],
             "image": "ghcr.io/almahmoud/planet-runtime:latest",
-            "imagePullPolicy": "IfNotPresent",
+            "imagePullPolicy": "Always",
             "name": "stage-in",
             "resources": {
               "limits": {

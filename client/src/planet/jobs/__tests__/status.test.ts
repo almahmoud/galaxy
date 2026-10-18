@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { jobs, leader } from "@/planet/db";
 
-import { LeaderStatus } from "../status";
+import { LAST_ERROR_MS, LeaderStatus } from "../status";
 import { resetDb, seedHistory, seedJob } from "./fakes";
 
 beforeEach(resetDb);
@@ -45,6 +45,29 @@ describe("leader status record", () => {
             state: "blocked",
             blocked_reason: "The cluster settings are incomplete.",
         });
+    });
+
+    it("drops the last error after a reconciliation without one, or once it is old", async () => {
+        const epoch = await leader.claimEpoch();
+        const clock = { now: 10_000 };
+        const status = new LeaderStatus(epoch, "tab-a", () => clock.now);
+        await status.recordError(new Error("watch dropped"));
+        clock.now = 12_000;
+        // A reconciliation that started before the error does not clear it.
+        await status.clearErrorsBefore(9_000);
+        expect((await leader.readStatus())?.last_error).toMatchObject({ message: "watch dropped", time: 10_000 });
+        await status.clearErrorsBefore(10_000);
+        expect((await leader.readStatus())?.last_error).not.toBeNull();
+        await status.clearErrorsBefore(11_000);
+        expect((await leader.readStatus())?.last_error).toBeNull();
+
+        await status.recordError(new Error("gateway unavailable"));
+        clock.now += LAST_ERROR_MS;
+        await status.write();
+        expect((await leader.readStatus())?.last_error).toMatchObject({ message: "gateway unavailable" });
+        clock.now += 1;
+        await status.write();
+        expect((await leader.readStatus())?.last_error).toBeNull();
     });
 
     it("writes nothing once another tab claimed a newer epoch", async () => {

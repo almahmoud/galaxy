@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { collections, hdas, histories, jobs, outbox, settings, uploads } from "@/planet/db";
+import { MAX_UPLOAD_SLOTS } from "@/planet/jobs/limits";
 import { Router } from "@/planet/sw/router";
 import { MIN_PART_SIZE, partLayout, type UploadSession } from "@/planet/upload/protocol";
 
@@ -811,6 +812,18 @@ describe("POST /api/tools/fetch", () => {
                 "Invalid collection type",
             ],
             [fetchBody(historyId, { destination: { type: "hdca" }, elements: [] }), 400, "collection_type"],
+            [
+                fetchBody(historyId, {
+                    destination: { type: "hdca" },
+                    collection_type: "list",
+                    elements: Array.from({ length: MAX_UPLOAD_SLOTS + 1 }, (_, index) => ({
+                        src: "url",
+                        url: `https://example.org/${index}.txt`,
+                    })),
+                }),
+                400,
+                "Split it into several uploads",
+            ],
             [fetchBody(historyId, { destination: { type: "hdas" }, elements: [{ name: "x" }] }), 400, "needs a src"],
             [{ targets: [] }, 400, "history_id"],
             [{ ...url({}), "files_0|file_data": "abc" }, 400, "session_id"],
