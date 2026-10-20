@@ -2,6 +2,7 @@
 
 export * from "./bucket";
 export { BackupError, type BackupErrorCode, isBackupError } from "./errors";
+export { FORK_KEY, type ForkRecord, sharedBefore } from "./forks";
 export {
     fromBase64,
     MAX_PAYLOAD_BYTES,
@@ -18,9 +19,19 @@ export {
     MAX_PASSPHRASE_LENGTH,
     MIN_PASSPHRASE_LENGTH,
     passphraseProblem,
+    passphraseStrength,
 } from "./keys";
-export { collectState, isLocalKvKey, SNAPSHOT_STORES } from "./payload";
-export { FORK_KEY, forkInstance, type ForkRecord } from "./restore";
+export {
+    acquireLease,
+    InstanceLease,
+    LEASE_CHECK_MS,
+    LEASE_CONFLICT_MESSAGE,
+    LEASE_VALID_MS,
+    type LeaseView,
+    TAKE_OVER_GRACE_MS,
+} from "./lease";
+export { collectState, isLocalKvKey, MIN_SCHEMA_VERSION, SNAPSHOT_STORES } from "./payload";
+export { type ClusterEndpoints, forkInstance, PARKED_MESSAGE, parkedJobs, resumeParkedJobs } from "./restore";
 export { BackupScheduler, type LeaderTask } from "./scheduler";
 export {
     type BackupOutcome,

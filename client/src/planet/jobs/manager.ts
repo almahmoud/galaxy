@@ -7,13 +7,17 @@
  * rewriting or aborting anything, any other one is deleted and the next attempt used.
  *
  * Work on one job is serialized; job writes are fenced to the leader epoch (`db/fence.ts`), and bucket and
- * Kubernetes writes check it first, and that it is still this manager's own epoch.
+ * Kubernetes writes check it first, that it is still this manager's own epoch, and that this device still holds the
+ * instance's lease (`backup/lease.ts`). Only Kubernetes Jobs named for this instance are ever deleted.
  *
- * Purged datasets keep their bucket objects until the job that creates them can no longer write them.
+ * Purged datasets keep their bucket objects until the job that creates them can no longer write them, and for good
+ * when another instance made from the same records may use them (`backup/forks.ts`).
  */
 
+import { FORK_KEY, parseForkRecord, sharedBefore } from "@/planet/backup/forks";
 import {
     type CleanupPayload,
+    type DatasetRecord,
     datasets,
     type DispatchPayload,
     JOB_STORES,
@@ -25,6 +29,7 @@ import {
     leader,
     leaderFence,
     LeaderFenceError,
+    LeaseFenceError,
     outbox,
     type OutboxRecord,
     type PurgePayload,
@@ -101,8 +106,16 @@ export interface JobManagerOptions {
     epoch?: number;
     /** Milliseconds since the epoch. */
     now?: () => number;
-    /** Called when a write found that another tab leads now; the caller stops this manager. */
-    onFenced?: () => void;
+    /**
+     * Why this device may not run the instance's jobs now (it does not hold the instance's lease), or null. Checked
+     * before every Kubernetes and bucket write.
+     */
+    leaseProblem?: () => string | null;
+    /**
+     * Called when a write found that another tab leads now, or with a `LeaseFenceError` that the lease no longer
+     * allows writes; the caller stops this manager.
+     */
+    onFenced?: (error: LeaderFenceError) => void;
     /** Called for errors that are retried later, with the job they concern when there is one. */
     onError?: (error: unknown, context: string, jobId?: string) => void;
     /** Called after each listing of the cluster: null when it answered, else why it could not be listed. */
@@ -171,6 +184,15 @@ function stageInRetries(k8s: JobKubernetesInfo): number {
     return k8s.stage_in_retries ?? k8s.attempt - 1;
 }
 
+/** A dataset's creation time in microseconds; an unreadable one counts as before any fork. */
+function createdMicros(dataset: DatasetRecord): number {
+    try {
+        return parseGalaxyTime(dataset.create_time);
+    } catch {
+        return Number.NEGATIVE_INFINITY;
+    }
+}
+
 /** When the job entered its current state, in epoch milliseconds. */
 function stateSince(job: JobRecord): number {
     const last = job.state_history.at(-1);
@@ -225,6 +247,8 @@ export class JobManager {
     private readonly inFlight = new Set<Promise<unknown>>();
     private readonly firstSeen = new Map<string, number>();
     private readonly eventChecks = new Map<string, number>();
+    /** Boundaries of the fork markers read so far (`backup/forks.ts`), by key. */
+    private readonly forkMarkers = new Map<string, number>();
     private intervals: ReturnType<typeof setInterval>[] = [];
     private outboxTimer: ReturnType<typeof setTimeout> | null = null;
     private wakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1104,27 +1128,38 @@ export class JobManager {
      * keeps them for now (a pod would write them again after the deletion); returns the ids of those datasets.
      */
     private async purge(payload: PurgePayload): Promise<string[]> {
-        const uuids = new Set(payload.uuids ?? []);
         const later: string[] = [];
+        const purged: DatasetRecord[] = [];
         for (const id of payload.dataset_ids ?? []) {
             const dataset = await datasets.get(id);
             // Datasets that are not purged (an undelete, another copy) keep their objects.
-            if (!dataset?.purged) {
+            if (!dataset?.purged || !UUID_PATTERN.test(dataset.uuid)) {
                 continue;
             }
             if (await this.mayStillWrite(dataset.job_id)) {
                 later.push(id);
             } else {
-                uuids.add(dataset.uuid);
+                purged.push(dataset);
             }
         }
-        for (const uuid of uuids) {
-            if (!UUID_PATTERN.test(uuid)) {
+        if (!purged.length) {
+            return later;
+        }
+        const origin = parseForkRecord(await readTx(["kv"], (t) => t.store("kv").get(FORK_KEY)));
+        const shared = await sharedBefore(
+            this.deps.s3,
+            this.settings.instance_id,
+            origin,
+            this.forkMarkers,
+            this.controller.signal,
+        );
+        for (const dataset of purged) {
+            if (shared > 0 && createdMicros(dataset) <= shared) {
                 continue;
             }
             let token: string | undefined;
             do {
-                const page = await this.deps.s3.listObjects(`datasets/${uuid}/`, { continuationToken: token });
+                const page = await this.deps.s3.listObjects(`datasets/${dataset.uuid}/`, { continuationToken: token });
                 for (const object of page.objects) {
                     await this.assertLeader();
                     await this.deps.s3.deleteObject(object.key);
@@ -1163,16 +1198,27 @@ export class JobManager {
         await leader.assertCurrent();
     }
 
-    /** Throws `LeaderFenceError` when this context is no longer fenced to this manager's epoch. */
+    /**
+     * Throws `LeaderFenceError` when this context is no longer fenced to this manager's epoch, and `LeaseFenceError`
+     * when the instance's lease does not allow writes.
+     */
     private checkEpoch(): void {
         const epoch = this.options.epoch;
         if (epoch !== undefined && leaderFence() !== epoch) {
             throw new LeaderFenceError(epoch, leaderFence());
         }
+        const problem = this.options.leaseProblem?.();
+        if (problem) {
+            throw new LeaseFenceError(problem);
+        }
     }
 
-    /** Deletes a Kubernetes Job and its pods. Throws when the API cannot be reached. */
+    /** Deletes a Kubernetes Job and its pods. Throws when the API cannot be reached. Jobs of other instances stay. */
     private async deleteKubeJob(name: string): Promise<void> {
+        if (!name.startsWith(`planet-${this.settings.instance_id}-`)) {
+            this.report(new Error(`Kubernetes Job ${name} is not one of this instance's; it is left alone.`), "delete");
+            return;
+        }
         await this.assertLeader();
         await this.kube.deleteJob(name, { signal: this.controller.signal });
         this.monitor.forget(name);
@@ -1313,7 +1359,7 @@ export class JobManager {
     private handle(error: unknown, context: string, jobId?: string): void {
         if (error instanceof LeaderFenceError) {
             if (this.running) {
-                this.options.onFenced?.();
+                this.options.onFenced?.(error);
             }
             return;
         }

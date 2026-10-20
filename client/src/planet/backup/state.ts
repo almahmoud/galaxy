@@ -12,6 +12,10 @@ export const KEY_KEY = "backup:key";
 export const DEVICE_KEY = "backup:device";
 export const STATE_KEY = "backup:state";
 export const REQUEST_KEY = "backup:request";
+/** Jobs a restore paused until the user resumes them ({@link ParkedJobs}). */
+export const PARKED_KEY = "backup:parked";
+/** Keys of earlier passphrases, kept until the snapshots written with them are re-encrypted. */
+export const PREVIOUS_KEYS_KEY = "backup:previous_keys";
 
 /** BroadcastChannel the Service Worker nudges the leading tab on when a snapshot is requested. */
 export const BACKUP_CHANNEL = "planet:backup";
@@ -31,6 +35,8 @@ export interface SnapshotInfo {
     /** Records per store. */
     counts: Record<string, number>;
     key_id: string;
+    /** IndexedDB schema version of the records; absent in records of builds before payload migrations. */
+    schema_version?: number;
 }
 
 /** What this device knows about the instance's lease (`state/<instance>/lease.json`). */
@@ -42,6 +48,30 @@ export interface LeaseInfo {
     renewed: string | null;
     /** When this device last read it, in milliseconds since the epoch. */
     checked: number;
+    /** When this device took the lease from another device, in milliseconds since the epoch. */
+    taken_over?: number | null;
+}
+
+/** What to do with snapshots of earlier passphrases once a snapshot with the current one is written. */
+export interface RekeyRequest {
+    mode: "reencrypt" | "delete";
+    /** The key the snapshots end up with. */
+    key_id: string;
+    time: number;
+    /** Snapshots handled, and those left with an earlier key this device does not have or that are unreadable. */
+    done: number;
+    skipped: number;
+    last_error: string | null;
+    /** When every snapshot was handled, in milliseconds since the epoch; null while work is left. */
+    finished: number | null;
+}
+
+/** Jobs a restore paused (`kv` {@link PARKED_KEY}): they run once the user resumes them. */
+export interface ParkedJobs {
+    instance_id: string;
+    job_ids: string[];
+    /** When the restore paused them, in milliseconds since the epoch. */
+    time: number;
 }
 
 export interface BackupState {
@@ -61,6 +91,8 @@ export interface BackupState {
     take_over: boolean;
     /** The snapshot this device's records were restored from. */
     restored: { instance_id: string; created: string; time: number; forked_to: string | null } | null;
+    /** Pending work on snapshots of earlier passphrases. */
+    rekey?: RekeyRequest | null;
 }
 
 /** A snapshot request (`kv` `backup:request`); `force` writes one even when nothing changed. */
@@ -92,6 +124,22 @@ function isObject(value: unknown): value is Record<string, unknown> {
 export async function readKey(): Promise<BackupKey | null> {
     const value = await readTx(["kv"], (tx) => tx.store("kv").get(KEY_KEY));
     return isObject(value) && value.key instanceof CryptoKey ? (value as unknown as BackupKey) : null;
+}
+
+/** Keys of earlier passphrases this device keeps for re-encrypting their snapshots. */
+export async function readPreviousKeys(): Promise<BackupKey[]> {
+    const value = await readTx(["kv"], (tx) => tx.store("kv").get(PREVIOUS_KEYS_KEY));
+    return Array.isArray(value)
+        ? (value as unknown[]).filter((entry): entry is BackupKey => isObject(entry) && entry.key instanceof CryptoKey)
+        : [];
+}
+
+export function writePreviousKeys(keys: readonly BackupKey[]): Promise<void> {
+    return writeTx(["kv"], async (tx) => {
+        await (keys.length
+            ? tx.store("kv").put([...keys], PREVIOUS_KEYS_KEY)
+            : tx.store("kv").delete(PREVIOUS_KEYS_KEY));
+    });
 }
 
 export function writeKey(key: BackupKey | null): Promise<void> {

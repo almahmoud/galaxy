@@ -26,6 +26,18 @@ export class LeaderFenceError extends Error {
     }
 }
 
+/**
+ * Raised for a bucket or Kubernetes write of a job manager whose device does not hold, or could not lately confirm,
+ * its instance's lease (`backup/lease.ts`). Handled like {@link LeaderFenceError}: the write is dropped, nothing fails.
+ */
+export class LeaseFenceError extends LeaderFenceError {
+    constructor(message: string) {
+        super(REVOKED, null);
+        this.message = message;
+        this.name = "LeaseFenceError";
+    }
+}
+
 /** Fences job writes in this context to `value`, or removes the fence with null. */
 export function setLeaderFence(value: number | null): void {
     epoch = value;

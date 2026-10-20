@@ -170,8 +170,38 @@ export interface Seeded {
     runningOutputDatasetId: string;
 }
 
+/** An installed tool record as install ingest stores it. */
+export function installedTool(
+    toolId = "toolshed.g2.bx.psu.edu/repos/me/tool/tool/1.0",
+    version = "1.0",
+): Parameters<typeof tools.put>[0] {
+    return {
+        tool_id: toolId,
+        tool_version: version,
+        source: "installed",
+        status: "ready",
+        message: null,
+        bundle: {
+            id: toolId,
+            version,
+            name: "tool",
+            inputs: [],
+            outputs: [],
+            source: {
+                repo_tar: { path: "tools/installs/0123456789abcdef-a1/0/repo.tar", sha256: "0".repeat(64), size: 10 },
+            },
+            panel_entry: { id: toolId, version, panel_section_id: "planet_installed" },
+        },
+        bundle_url: null,
+        panel_section_id: "planet_installed",
+        panel_section_name: "Installed tools",
+        hidden: false,
+    };
+}
+
 /** Histories, datasets, a finished and a running job, an outbox entry, an upload, a tool and preferences. */
 export async function seed(): Promise<Seeded> {
+    const instanceId = (await settings.getStored()).instance_id;
     const history = await histories.create({ name: "RNA-seq" });
     await histories.create({ name: "Scratch", tags: ["name:tmp"] });
     const { hda: input } = await hdas.createWithDataset(
@@ -199,11 +229,11 @@ export async function seed(): Promise<Seeded> {
                 inputs: [{ name: "input", src: "hda", id: input.id }],
                 k8s: {
                     namespace: "planet",
-                    name: "planet-a1b2c3d4-job-a1",
+                    name: `planet-${instanceId}-job-a1`,
                     uid: "uid-1",
                     attempt: 1,
                     spec_hash: "hash",
-                    pod_name: "planet-a1b2c3d4-job-a1-xyz",
+                    pod_name: `planet-${instanceId}-job-a1-xyz`,
                     node_name: "node-7",
                     image: "quay.io/biocontainers/coreutils:9.5",
                     kind: "tool",
@@ -221,22 +251,11 @@ export async function seed(): Promise<Seeded> {
             tx,
         );
         await jobs.update(running.id, { outputs: [{ name: "out_file1", src: "hda", id: hda.id }] }, tx);
-        await outbox.enqueue({ kind: "purge", payload: { uuids: [dataset.uuid] } }, tx);
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: [dataset.id] } }, tx);
         return { finished: finished.id, running: running.id, output: dataset.id };
     });
     await uploads.create({ name: "big.bam", size: 10, part_size: 8 * 1024 * 1024, history_id: history.id });
-    await tools.put({
-        tool_id: "toolshed.example.org/repos/me/tool/tool/1.0",
-        tool_version: "1.0",
-        source: "installed",
-        status: "ready",
-        message: null,
-        bundle: { id: "tool", inputs: [] },
-        bundle_url: null,
-        panel_section_id: "custom",
-        panel_section_name: "Custom",
-        hidden: false,
-    });
+    await tools.put(installedTool());
     await kv.set("preferences", { theme: "dark" });
     await kv.set("current_history_id", history.id);
     return {

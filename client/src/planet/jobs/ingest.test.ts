@@ -464,6 +464,37 @@ describe("ingestResults", () => {
         expect(deps.s3.aborted).toEqual(["upload-2"]);
     });
 
+    it("accepts an upload an earlier ingest completed only when the object has the reported size", async () => {
+        const { job, deps, outputs } = await dispatchedJob({ inputSize: 5 * GIB });
+        const etag = deps.s3.uploadPartAsPod("upload-1", 1, "part one ");
+        const data = { mode: "multipart" as const, size: 9, part_size: 9, parts: [{ part_number: 1, etag, size: 9 }] };
+        writeResults(
+            deps,
+            resultsDocument(job.id, {
+                outputs: { out_file: datasetResult(outputs[0]!.dataset.uuid, { size: 9, total_size: 9, data }) },
+            }),
+        );
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        expect(deps.s3.completed).toEqual(["upload-1"]);
+
+        // The records were restored from a snapshot taken while the job ran: it is ingested again.
+        const unsettle = async () => {
+            await jobs.update(job.id, { state: "running" });
+            await datasets.update(outputs[0]!.dataset.id, { state: "running" });
+        };
+        await unsettle();
+        expect((await ingestResults(job, deps))!.state).toBe("ok");
+        expect(deps.s3.log).toContain(`COMPLETE-MULTIPART datasets/${outputs[0]!.dataset.uuid}/data`);
+        expect((await hdas.getWithDatasetOrThrow(outputs[0]!.hda.id)).dataset.state).toBe("ok");
+
+        await unsettle();
+        deps.s3.objects.set(`datasets/${outputs[0]!.dataset.uuid}/data`, new TextEncoder().encode("part"));
+        expect((await ingestResults(job, deps))!.state).toBe("error");
+        const failed = await hdas.getWithDatasetOrThrow(outputs[0]!.hda.id);
+        expect(failed.dataset.state).toBe("error");
+        expect(failed.hda.info).toMatch(/the bucket holds 4 bytes, the job wrote 9/);
+    });
+
     it("fails an output whose multipart upload cannot be completed", async () => {
         const { job, deps, outputs } = await dispatchedJob({ inputSize: 5 * GIB });
         writeResults(

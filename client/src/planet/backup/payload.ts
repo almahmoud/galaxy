@@ -17,6 +17,24 @@ import { fromUtf8, MAX_PAYLOAD_BYTES, utf8 } from "./format";
 export const PAYLOAD_FORMAT = "planet-state";
 export const PAYLOAD_VERSION = 1;
 
+/** The oldest IndexedDB schema version whose snapshots this build restores. */
+export const MIN_SCHEMA_VERSION = 1;
+
+/**
+ * Payload migrations, one per database migration (`db/migrations.ts`): `PAYLOAD_MIGRATIONS[n]` rewrites the stores
+ * of a payload of schema `n - 1` into schema `n`, so snapshots of every version from {@link MIN_SCHEMA_VERSION} on
+ * restore. They run on untrusted data before it is checked.
+ */
+export const PAYLOAD_MIGRATIONS: Readonly<Record<number, (stores: Record<string, unknown>) => void>> = {
+    // Version 2 changed no stores.
+    2() {},
+};
+
+/** Whether snapshots of `version` can be restored by this build. */
+export function restorableSchema(version: number): boolean {
+    return Number.isSafeInteger(version) && version >= MIN_SCHEMA_VERSION && version <= DB_VERSION;
+}
+
 /** Stores a snapshot never contains. */
 export const EXCLUDED_STORES: ReadonlySet<StoreName> = new Set<StoreName>(["secrets"]);
 
@@ -181,10 +199,17 @@ export async function storeKeyPaths(): Promise<Record<string, string | string[] 
     );
 }
 
+export function schemaError(version: unknown): BackupError {
+    return new BackupError(
+        "schema_version",
+        `The snapshot was written by a Planet with database schema ${String(version)}; this Planet restores schemas ${MIN_SCHEMA_VERSION} to ${DB_VERSION}. Restore it with a newer Planet build.`,
+    );
+}
+
 /**
- * Parses and validates a decrypted payload against this build's schema.
+ * Parses a decrypted payload, migrates it to this build's schema and validates it against that schema.
  *
- * @throws BackupError `schema_version` when it was written by a build with another IndexedDB schema
+ * @throws BackupError `schema_version` when it was written by a build with a newer IndexedDB schema
  */
 export function parsePayload(bytes: Uint8Array, keyPaths: Record<string, string | string[] | null>): StatePayload {
     let value: unknown;
@@ -206,11 +231,8 @@ export function parsePayload(bytes: Uint8Array, keyPaths: Record<string, string 
             `The snapshot's records use version ${String(payload.version)}; this Planet reads version ${PAYLOAD_VERSION}.`,
         );
     }
-    if (payload.schema_version !== DB_VERSION) {
-        throw new BackupError(
-            "schema_version",
-            `The snapshot was written by a Planet with database schema ${String(payload.schema_version)}; this Planet uses schema ${DB_VERSION}. Restore it with a matching Planet build.`,
-        );
+    if (typeof payload.schema_version !== "number" || !restorableSchema(payload.schema_version)) {
+        throw schemaError(payload.schema_version);
     }
     if (typeof payload.instance_id !== "string" || !/^[0-9a-f]{8}$/.test(payload.instance_id)) {
         invalid("the instance id is invalid");
@@ -221,6 +243,9 @@ export function parsePayload(bytes: Uint8Array, keyPaths: Record<string, string 
     const stores = payload.stores;
     if (typeof stores !== "object" || stores === null || Array.isArray(stores)) {
         invalid("the stores are missing");
+    }
+    for (let version = payload.schema_version + 1; version <= DB_VERSION; version++) {
+        PAYLOAD_MIGRATIONS[version]!(stores as Record<string, unknown>);
     }
     for (const name of Object.keys(stores)) {
         if (!(name in keyPaths)) {

@@ -4,8 +4,8 @@
  * - `snapshots/<YYYYMMDDTHHMMSSmmm>Z.json.gz.enc`: encrypted snapshots (`format.ts`); the newest {@link KEEP} stay.
  * - `latest.json`: {@link LatestPointer}, unencrypted: the newest snapshot's name, time, size, schema version and
  *   record counts.
- * - `lease.json`: {@link LeaseRecord}, unencrypted: the device that writes the instance's snapshots. A device
- *   writes snapshots only while it holds the lease, and takes it from another device only when asked to.
+ * - `lease.json`: {@link LeaseRecord}, unencrypted: the device that runs the instance's jobs and writes its
+ *   snapshots (`lease.ts`). A device takes it from another device only when asked to.
  *
  * Writes are plain PUTs: two devices that find no lease at the same moment can both write one snapshot before
  * the next check shows the conflict.
@@ -52,6 +52,8 @@ export interface LeaseRecord {
     /** ISO 8601 UTC times the device took the lease and last renewed it. */
     acquired: string;
     renewed: string;
+    /** The device this one took the lease from, if it was held when this one took it. */
+    taken_from?: string | null;
 }
 
 export function instancePrefix(instanceId: string): string {
@@ -218,6 +220,7 @@ export function parseLease(value: unknown, instanceId: string): LeaseRecord | nu
         device_id: lease.device_id,
         acquired: lease.acquired,
         renewed: lease.renewed,
+        taken_from: typeof lease.taken_from === "string" && DEVICE_RE.test(lease.taken_from) ? lease.taken_from : null,
     };
 }
 

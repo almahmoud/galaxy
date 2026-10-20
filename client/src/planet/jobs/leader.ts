@@ -31,9 +31,10 @@ export const CLAIM_RETRY_MS = 5000;
 export const STOP_WAIT_MS = 60_000;
 /**
  * Version of what a leader reads and writes: the job bucket layout, the job protocol and the job records. Bump it
- * with every change an older leader would misread. Tabs of builds without it count as version 0.
+ * with every change an older leader would misread. Tabs of builds without it count as version 0. Version 2 runs
+ * jobs only while the device holds the instance's lease (`backup/lease.ts`).
  */
-export const LEADER_PROTOCOL = 1;
+export const LEADER_PROTOCOL = 2;
 
 /** The parts of `LockManager` the election uses. */
 export interface LockManagerLike {

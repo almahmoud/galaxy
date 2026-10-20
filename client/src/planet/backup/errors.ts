@@ -8,7 +8,7 @@ export type BackupErrorCode =
     /** The snapshot's IndexedDB schema version differs from this build's. */
     | "schema_version"
     | "wrong_passphrase"
-    /** The new passphrase is too short or too long. */
+    /** The new passphrase is too short, too long or too predictable. */
     | "weak_passphrase"
     /** Decryption or decompression failed although the passphrase is right. */
     | "damaged"
@@ -20,7 +20,9 @@ export type BackupErrorCode =
     /** Restoring would replace records that are in no snapshot. */
     | "unsaved_changes"
     /** Another device holds the instance's lease. */
-    | "lease_conflict";
+    | "lease_conflict"
+    /** The snapshot's cluster gateway or runtime image differs from this device's and needs the user's confirmation. */
+    | "cluster_settings";
 
 export class BackupError extends Error {
     constructor(

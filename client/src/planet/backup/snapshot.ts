@@ -12,46 +12,55 @@ import { readTx } from "@/planet/db/tx";
 import type { S3Client, S3Config } from "@/planet/s3";
 import { newInstanceId } from "@/planet/util/ids";
 import { JOB_STATES, TERMINAL_JOB_STATES } from "@/planet/util/states";
+import { loadOptionalStaticData } from "@/planet/util/staticData";
 
 import {
     backupClient,
     bucketRef,
     LATEST_FORMAT,
-    LEASE_FORMAT,
-    type LeaseRecord,
+    listSnapshots,
     pruneSnapshots,
-    readLease,
+    readSnapshotObject,
     snapshotKey,
     snapshotName,
     writeLatest,
-    writeLease,
 } from "./bucket";
 import { BackupError } from "./errors";
+import { registerFork } from "./forks";
 import { openSnapshot, readSnapshotFile, sealSnapshot } from "./format";
 import { type BackupKey, unlockKey } from "./keys";
-import { type CollectedState, collectState, parsePayload, storeKeyPaths } from "./payload";
-import { importState } from "./restore";
+import { acquireLease } from "./lease";
+import {
+    type CollectedState,
+    collectState,
+    parsePayload,
+    restorableSchema,
+    schemaError,
+    storeKeyPaths,
+} from "./payload";
+import { type ClusterEndpoints, endpointsToConfirm, importState } from "./restore";
 import {
     type BackupState,
     clearRequest,
     deviceId,
     emptyState,
-    type LeaseInfo,
     readKey,
+    readPreviousKeys,
     readRequest,
     readState,
+    type RekeyRequest,
     requestSnapshot,
     updateState,
     writeKey,
+    writePreviousKeys,
     writeState,
 } from "./state";
+import { checkRecords } from "./validate";
 
 /** How often the leader looks for changes to snapshot. */
 export const INTERVAL_MS = 15 * 60 * 1000;
 /** How long the leader waits after a failed snapshot before trying again unasked. */
 export const RETRY_MS = 5 * 60 * 1000;
-/** How old the lease may get before the holder renews it. */
-export const LEASE_RENEW_MS = 60 * 60 * 1000;
 
 export interface BackupRunOptions {
     /** The caller's leader epoch: state writes stop once another tab leads. */
@@ -87,48 +96,6 @@ function errorText(error: unknown): string {
     return message.length > 500 ? `${message.slice(0, 499)}…` : message;
 }
 
-/** Reads the lease and takes it when it is free, ours, or `takeOver` is set. */
-async function acquireLease(
-    s3: S3Client,
-    instanceId: string,
-    device: string,
-    takeOver: boolean,
-    now: number,
-    assertCurrent: () => Promise<void>,
-    signal?: AbortSignal,
-): Promise<LeaseInfo> {
-    const current = await readLease(s3, instanceId, signal);
-    const conflict = (lease: LeaseRecord): LeaseInfo => ({
-        state: "conflict",
-        device_id: lease.device_id,
-        renewed: lease.renewed,
-        checked: now,
-    });
-    if (current && current.device_id !== device && !takeOver) {
-        return conflict(current);
-    }
-    const ours = current?.device_id === device;
-    if (ours && now - Date.parse(current.renewed) < LEASE_RENEW_MS) {
-        return { state: "held", device_id: device, renewed: current.renewed, checked: now };
-    }
-    const time = new Date(now).toISOString();
-    const lease: LeaseRecord = {
-        format: LEASE_FORMAT,
-        version: 1,
-        instance_id: instanceId,
-        device_id: device,
-        acquired: ours ? current.acquired : time,
-        renewed: time,
-    };
-    await assertCurrent();
-    await writeLease(s3, lease, signal);
-    const written = await readLease(s3, instanceId, signal);
-    if (written && written.device_id !== device) {
-        return conflict(written);
-    }
-    return { state: "held", device_id: device, renewed: time, checked: now };
-}
-
 /** Collects the records and seals them with `key`. */
 export async function buildSnapshot(
     key: BackupKey,
@@ -141,6 +108,76 @@ export async function buildSnapshot(
         schema_version: DB_VERSION,
     });
     return { sealed, collected, name: snapshotName(now) };
+}
+
+/**
+ * Re-encrypts with `key`, or deletes, the instance's snapshots of earlier keys, as `request` asks; called once the
+ * newest snapshot has `key`. Snapshots of keys this device does not have, and unreadable ones, stay. Returns the
+ * request with its progress, or null when there is nothing to do. A failure is recorded and retried by the next cycle.
+ */
+async function rekeyAfter(
+    s3: S3Client,
+    instanceId: string,
+    key: BackupKey,
+    request: RekeyRequest | null | undefined,
+    assertCurrent: () => Promise<void>,
+    now: number,
+    signal?: AbortSignal,
+): Promise<RekeyRequest | null> {
+    if (!request || request.finished !== null || request.key_id !== key.key_id) {
+        return null;
+    }
+    const previous = new Map((await readPreviousKeys()).map((each) => [each.key_id, each]));
+    let { done } = request;
+    let skipped = 0;
+    try {
+        for (const listed of await listSnapshots(s3, instanceId, signal)) {
+            const bytes = await readSnapshotObject(s3, instanceId, listed.name, signal);
+            let file: ReturnType<typeof readSnapshotFile>;
+            try {
+                file = readSnapshotFile(bytes);
+            } catch {
+                skipped++;
+                continue;
+            }
+            if (file.header.key_id === key.key_id) {
+                continue;
+            }
+            const objectKey = snapshotKey(instanceId, listed.name);
+            if (request.mode === "delete") {
+                await assertCurrent();
+                await s3.deleteObject(objectKey, { signal });
+                done++;
+                continue;
+            }
+            const old = previous.get(file.header.key_id);
+            let plain: Uint8Array<ArrayBuffer>;
+            try {
+                if (!old) {
+                    throw new BackupError("wrong_passphrase", "The key is not on this device.");
+                }
+                plain = await openSnapshot(file, old.key);
+            } catch {
+                skipped++;
+                continue;
+            }
+            const sealed = await sealSnapshot(plain, key.key, key, {
+                instance_id: file.header.instance_id,
+                created: file.header.created,
+                schema_version: file.header.schema_version,
+            });
+            await assertCurrent();
+            await s3.putObject(objectKey, sealed, { contentType: "application/octet-stream", signal });
+            done++;
+        }
+    } catch (error) {
+        if (error instanceof LeaderFenceError || signal?.aborted) {
+            throw error;
+        }
+        return { ...request, done, last_error: errorText(error) };
+    }
+    await writePreviousKeys([]);
+    return { ...request, done, skipped, last_error: null, finished: now };
 }
 
 /**
@@ -182,7 +219,12 @@ export async function runBackup(options: BackupRunOptions = {}): Promise<BackupO
     };
     try {
         const device = await deviceId();
-        const lease = await acquireLease(s3, instanceId, device, state.take_over, start, assertCurrent, signal);
+        const lease = await acquireLease(s3, instanceId, device, {
+            takeOver: state.take_over,
+            now: start,
+            assertCurrent,
+            signal,
+        });
         if (lease.state === "conflict") {
             await update((current) => ({ ...current, lease, checked: start, last_error: null }));
             return finish("lease_conflict");
@@ -192,8 +234,12 @@ export async function runBackup(options: BackupRunOptions = {}): Promise<BackupO
             // The settings changed while the records were read; the next cycle starts over.
             return finish("superseded");
         }
-        const changed = collected.digest !== state.digest || state.last_snapshot?.key_id !== key.key_id;
+        const changed =
+            collected.digest !== state.digest ||
+            state.last_snapshot?.key_id !== key.key_id ||
+            state.last_snapshot?.schema_version !== DB_VERSION;
         if (!changed && !request?.force) {
+            const rekey = await rekeyAfter(s3, instanceId, key, state.rekey, assertCurrent, start, signal);
             await update((current) => ({
                 ...current,
                 lease,
@@ -201,6 +247,7 @@ export async function runBackup(options: BackupRunOptions = {}): Promise<BackupO
                 checked: start,
                 changed: false,
                 last_error: null,
+                ...(rekey ? { rekey } : {}),
             }));
             return finish("unchanged");
         }
@@ -244,6 +291,7 @@ export async function runBackup(options: BackupRunOptions = {}): Promise<BackupO
                 size: sealed.byteLength,
                 counts: collected.counts,
                 key_id: key.key_id,
+                schema_version: DB_VERSION,
             },
             digest: collected.digest,
             lease,
@@ -252,6 +300,10 @@ export async function runBackup(options: BackupRunOptions = {}): Promise<BackupO
             changed: false,
             last_error: pruneError ? { message: pruneError, time: start } : null,
         }));
+        const rekey = await rekeyAfter(s3, instanceId, key, state.rekey, assertCurrent, start, signal);
+        if (rekey) {
+            await update((current) => ({ ...current, rekey }));
+        }
         return finish("written");
     } catch (error) {
         if (error instanceof LeaderFenceError || signal?.aborted) {
@@ -313,10 +365,19 @@ export interface RestoreOptions {
     /** This device's next snapshot takes the instance's lease from whichever device holds it. */
     takeOver?: boolean;
     /**
+     * The user's choice for a snapshot whose cluster gateway or runtime image differs from this device's: keep this
+     * device's, or take the snapshot's (the values the user was shown).
+     */
+    endpoints?: "device" | ClusterEndpoints;
+    /**
      * Called with the snapshot's instance id before anything is replaced, unless forking or taking over; throws
      * `lease_conflict` when another device writes that instance's snapshots.
      */
     checkLease?: (instanceId: string) => Promise<void>;
+    /** The bucket, for the marker a fork leaves its origin; the leader writes it later when missing. */
+    s3?: S3Client | null;
+    /** Ids of the tools built into this build; defaults to those of `toolbox/tools.json`. */
+    builtInToolIds?: () => Promise<ReadonlySet<string>>;
     now?: () => number;
     /** The new instance id of a fork (tests). */
     newInstanceId?: () => string;
@@ -330,17 +391,70 @@ export interface RestoreResult {
     created: string;
     forked: boolean;
     failed_jobs: number;
+    /** Jobs paused until the user resumes restored jobs. */
+    parked_jobs: number;
     counts: Record<string, number>;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Ids of the tools of this build's toolbox, every version of each. */
+export async function builtInToolIds(): Promise<ReadonlySet<string>> {
+    const entries = await loadOptionalStaticData<unknown>("toolbox/tools.json");
+    const ids = new Set<string>();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+        if (!isObject(entry) || typeof entry.id !== "string") {
+            continue;
+        }
+        ids.add(entry.id);
+        // A Tool Shed id ends with its version: `<host>/repos/<owner>/<name>/<tool>/<version>`.
+        const versions = Array.isArray(entry.versions) ? entry.versions : [];
+        if (
+            entry.id.includes("/repos/") &&
+            typeof entry.version === "string" &&
+            entry.id.endsWith(`/${entry.version}`)
+        ) {
+            const base = entry.id.slice(0, entry.id.length - entry.version.length);
+            for (const version of versions) {
+                if (typeof version === "string") {
+                    ids.add(`${base}${version}`);
+                }
+            }
+        }
+    }
+    return ids;
+}
+
+/** The snapshot's gateway and runtime image to take, after the user confirmed them; throws until then. */
+async function chooseEndpoints(
+    payload: Parameters<typeof endpointsToConfirm>[0],
+    choice: RestoreOptions["endpoints"],
+): Promise<boolean> {
+    const [local, secrets] = await Promise.all([settings.getStored(), settings.getSecrets()]);
+    const shown = endpointsToConfirm(payload, local, Boolean(secrets.cluster_token));
+    if (!shown || choice === "device") {
+        return false;
+    }
+    if (isObject(choice) && choice.gateway_url === shown.gateway_url && choice.runtime_image === shown.runtime_image) {
+        return true;
+    }
+    throw new BackupError(
+        "cluster_settings",
+        "The snapshot names a cluster gateway and runtime image. Confirm them, or keep this device's cluster settings.",
+        { cluster: shown },
+    );
+}
+
 /**
- * Decrypts a snapshot file with `passphrase` and replaces this device's records with it (`restore.ts`). The key
- * becomes this device's snapshot key, and a snapshot cycle is requested: a fork writes the new instance's first
- * snapshot; otherwise the cycle takes the lease when it is free (or `takeOver` is set) and writes only once the
- * records change.
+ * Decrypts a snapshot file with `passphrase`, checks its records (`validate.ts`) and replaces this device's records
+ * with them (`restore.ts`). The key becomes this device's snapshot key, and a snapshot cycle is requested: a fork
+ * writes the new instance's first snapshot; otherwise the cycle takes the lease when it is free (or `takeOver` is set)
+ * and writes once the records change or were migrated from an older schema.
  *
  * @throws BackupError `format`, `unsupported_version`, `schema_version`, `wrong_passphrase`, `damaged`,
- *   `too_large`, `unsaved_changes` or `lease_conflict` (from `checkLease`)
+ *   `too_large`, `unsaved_changes`, `lease_conflict` (from `checkLease`) or `cluster_settings`
  */
 export async function restoreSnapshot(
     bytes: Uint8Array<ArrayBuffer>,
@@ -350,11 +464,8 @@ export async function restoreSnapshot(
     const now = options.now ?? Date.now;
     const file = readSnapshotFile(bytes);
     const { header } = file;
-    if (header.schema_version !== DB_VERSION) {
-        throw new BackupError(
-            "schema_version",
-            `The snapshot was written by a Planet with database schema ${header.schema_version}; this Planet uses schema ${DB_VERSION}. Restore it with a matching Planet build.`,
-        );
+    if (!restorableSchema(header.schema_version)) {
+        throw schemaError(header.schema_version);
     }
     const key = await unlockKey(
         passphrase,
@@ -367,9 +478,10 @@ export async function restoreSnapshot(
         now(),
     );
     const payload = parsePayload(await openSnapshot(file, key.key), await storeKeyPaths());
-    if (payload.instance_id !== header.instance_id) {
-        throw new BackupError("format", "The snapshot's header and records name different instances.");
+    if (payload.instance_id !== header.instance_id || payload.schema_version !== header.schema_version) {
+        throw new BackupError("format", "The snapshot's header and records describe different snapshots.");
     }
+    checkRecords(payload, await (options.builtInToolIds ?? builtInToolIds)());
     if (!options.replaceUnsaved && (await hasUnsavedChanges())) {
         throw new BackupError(
             "unsaved_changes",
@@ -379,9 +491,15 @@ export async function restoreSnapshot(
     if (!options.fork && !options.takeOver && options.checkLease) {
         await options.checkLease(header.instance_id);
     }
+    const useSnapshotEndpoints = await chooseEndpoints(payload, options.endpoints);
     const forkTo = options.fork ? (options.newInstanceId ?? newInstanceId)() : null;
-    const result = await importState(payload, { forkTo });
+    const result = await importState(payload, { forkTo, useSnapshotEndpoints, now: now() });
+    if (forkTo && options.s3) {
+        // The leader writes the marker when this fails.
+        await registerFork(options.s3).catch(() => false);
+    }
     await writeKey(key);
+    await writePreviousKeys([]);
     const [collected, stored] = await Promise.all([collectState(now()), settings.getStored()]);
     const state = emptyState(result.instance_id, bucketRef(stored.storage));
     await writeState({
@@ -395,6 +513,7 @@ export async function restoreSnapshot(
                   size: bytes.byteLength,
                   counts: collected.counts,
                   key_id: header.key_id,
+                  schema_version: header.schema_version,
               },
         digest: forkTo ? null : collected.digest,
         take_over: !forkTo && options.takeOver === true,
@@ -407,6 +526,7 @@ export async function restoreSnapshot(
         created: header.created,
         forked: Boolean(forkTo),
         failed_jobs: result.failed_jobs,
+        parked_jobs: result.parked_jobs,
         counts: collected.counts,
     };
 }

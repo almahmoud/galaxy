@@ -19,16 +19,49 @@ import type { PullPolicy } from "@/planet/jobs/runtime";
 import type { KubeClientConfig } from "@/planet/k8s";
 import { KubeError } from "@/planet/k8s";
 
-import { type HostWindow, LeaderHost } from "./host";
+import { type HostWindow, LeaderHost, type LeaseGate } from "./host";
 
 class FakeWindow extends EventTarget {
     document = Object.assign(new EventTarget(), { visibilityState: "visible" as DocumentVisibilityState });
 }
 
+/** A lease that allows jobs until told otherwise. */
+class FakeLease implements LeaseGate {
+    current: string | null = null;
+    refreshes = 0;
+    readonly epochs: number[] = [];
+    private readonly listeners = new Set<() => void>();
+
+    start(epoch: number): void {
+        this.epochs.push(epoch);
+    }
+
+    async stop(): Promise<void> {}
+
+    problem(): string | null {
+        return this.current;
+    }
+
+    async refresh(): Promise<void> {
+        this.refreshes++;
+    }
+
+    subscribe(listener: () => void): () => void {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
+    }
+
+    set(problem: string | null): void {
+        this.current = problem;
+        this.listeners.forEach((listener) => listener());
+    }
+}
+
 const hosts: LeaderHost[] = [];
 
-function host(options: { buildImage?: string | null; tagPullPolicy?: PullPolicy } = {}) {
+function host(options: { buildImage?: string | null; tagPullPolicy?: PullPolicy; lease?: FakeLease } = {}) {
     const window = new FakeWindow();
+    const lease = options.lease ?? new FakeLease();
     const kube = new FakeKube();
     const kubeConfigs: KubeClientConfig[] = [];
     const { deps } = fakeDeps();
@@ -49,9 +82,16 @@ function host(options: { buildImage?: string | null; tagPullPolicy?: PullPolicy 
         }),
         manager: { onError: () => undefined },
         backup: null,
+        lease,
     });
     hosts.push(created);
-    return { host: created, window, kube, kubeConfigs, createDeps };
+    return { host: created, window, kube, kubeConfigs, createDeps, lease };
+}
+
+/** Waits until `target` leads and its first start of the manager has run. */
+async function leading(target: LeaderHost): Promise<void> {
+    await vi.waitFor(() => expect(target.leaderStatus).not.toBeNull(), { timeout: 10_000, interval: 10 });
+    await settle(target);
 }
 
 async function settle(target: LeaderHost): Promise<void> {
@@ -80,7 +120,7 @@ describe("leader host", () => {
     it("runs the job manager only while leading with complete settings, and restarts it on changes", async () => {
         const { host: running, kube, kubeConfigs, createDeps } = host();
         running.start();
-        await settle(running);
+        await leading(running);
         expect(running.election.isLeader).toBe(true);
         expect(running.manager).toBeNull();
 
@@ -173,6 +213,7 @@ describe("leader host", () => {
             runtimeRetryMs: 50,
             manager: { onError: () => undefined },
             backup: null,
+            lease: new FakeLease(),
         });
         hosts.push(failing);
         await configure();
@@ -220,7 +261,7 @@ describe("leader host", () => {
     it("keeps the leader status record current for status pages", async () => {
         const { host: running, kube } = host();
         running.start();
-        await settle(running);
+        await leading(running);
         expect(await leader.readStatus()).toMatchObject({
             epoch: running.election.epoch,
             tab_id: running.election.tabId,
@@ -257,5 +298,60 @@ describe("leader host", () => {
             state: "blocked",
             blocked_reason: "The cluster could not be listed: Failed to fetch",
         });
+    });
+
+    it("runs jobs only while this device holds the instance's lease", async () => {
+        const lease = new FakeLease();
+        lease.current = "Another device runs jobs for this instance.";
+        const { host: running, kube } = host({ lease });
+        await configure();
+        running.start();
+        await settle(running);
+        expect(lease.epochs).toEqual([running.election.epoch]);
+        expect(running.manager).toBeNull();
+        expect(await leader.readStatus()).toMatchObject({
+            state: "blocked",
+            blocked_reason: "Another device runs jobs for this instance.",
+        });
+        const { history, input } = await seedHistory();
+        await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(kube.created).toEqual([]);
+
+        lease.set(null);
+        await settle(running);
+        expect(running.manager?.active).toBe(true);
+        expect(kube.created).toHaveLength(1);
+        expect(await leader.readStatus()).toMatchObject({ blocked_reason: null });
+
+        // Another device took the lease over: this one stops.
+        const manager = running.manager!;
+        lease.set("Another device runs jobs for this instance.");
+        await settle(running);
+        expect(manager.active).toBe(false);
+        expect(running.manager).toBeNull();
+        expect(kube.openWatches()).toBe(0);
+        expect(await leader.readStatus()).toMatchObject({
+            state: "blocked",
+            blocked_reason: "Another device runs jobs for this instance.",
+        });
+    });
+
+    it("stops the manager and reads the lease again when a write finds the lease no longer allows it", async () => {
+        const { host: running, kube, lease } = host();
+        await configure();
+        running.start();
+        await settle(running);
+        const manager = running.manager!;
+        expect(manager.active).toBe(true);
+        // The lease expired without a listener call, as when the device slept.
+        lease.current = "The bucket could not be read to confirm that this device runs this instance's jobs.";
+        const { history, input } = await seedHistory();
+        await seedJob(history.id, [input.id]);
+        await settle(running);
+        expect(kube.created).toEqual([]);
+        expect(manager.active).toBe(false);
+        expect(lease.refreshes).toBeGreaterThan(0);
+        expect((await leader.readStatus())?.blocked_reason).toMatch(/could not be read to confirm/);
     });
 });

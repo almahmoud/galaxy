@@ -16,6 +16,7 @@ export function backupStatus(extra: Partial<BackupStatus> = {}): BackupStatus {
         instance_id: INSTANCE,
         device_id: DEVICE,
         schema_version: 2,
+        min_schema_version: 1,
         interval_minutes: 15,
         keep: 10,
         last_snapshot: {
@@ -32,10 +33,13 @@ export function backupStatus(extra: Partial<BackupStatus> = {}): BackupStatus {
             device_id: DEVICE,
             renewed: "2026-10-13T12:00:00.000Z",
             checked: "2026-10-13T12:00:00.000Z",
+            jobs_start: null,
         },
         writer_active: true,
         local: { has_content: true, unfinished_jobs: 0 },
         restored: null,
+        parked_jobs: 0,
+        rekey: null,
         ...extra,
     };
 }
@@ -78,6 +82,7 @@ export const RESTORED: RestoreResponse = {
     created: "2026-10-13T12:00:00.000Z",
     forked: false,
     failed_jobs: 0,
+    parked_jobs: 0,
     counts: { histories: 3, hdas: 12, jobs: 4 },
 };
 

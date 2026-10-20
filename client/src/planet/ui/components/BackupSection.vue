@@ -6,12 +6,13 @@ import {
     faExchangeAlt,
     faInfoCircle,
     faKey,
+    faPlay,
     faSpinner,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 
-import { passphraseProblem } from "@/planet/backup/keys";
+import { passphraseProblem, passphraseStrength } from "@/planet/backup/keys";
 
 import {
     BACKUP_STATES,
@@ -25,6 +26,8 @@ import {
     formatSize,
     formatTime,
     offersRestore,
+    type OlderSnapshots,
+    rekeySummary,
     useBackupServices,
 } from "../lib/backup";
 
@@ -51,6 +54,9 @@ const actionError = ref("");
 const notice = ref("");
 const changing = ref(false);
 const confirmRemove = ref(false);
+const removeCurrent = ref("");
+const removeError = ref("");
+const older = ref<OlderSnapshots>("reencrypt");
 const form = reactive({ current: "", passphrase: "", confirm: "" });
 const errors = reactive({ current: "", passphrase: "", confirm: "" });
 const restorePanel = ref<InstanceType<typeof BackupRestore> | null>(null);
@@ -59,7 +65,12 @@ const ids = {
     current: "pw-backup-current",
     passphrase: "pw-backup-passphrase",
     confirm: "pw-backup-confirm",
+    strength: "pw-backup-strength",
+    older: "pw-backup-older",
+    removeCurrent: "pw-backup-remove-current",
 };
+
+const STRENGTH_LABELS = { weak: "Easy to guess", fair: "Fair", strong: "Strong" } as const;
 
 const state = computed(() => backupState(status.value, Boolean(loadError.value)));
 const pill = computed(() => BACKUP_STATES[state.value]);
@@ -68,14 +79,17 @@ const fresh = computed(() => offersRestore(status.value));
 const conflict = computed(() => (status.value?.lease?.state === "conflict" ? status.value.lease : null));
 const canSnapshot = computed(() => Boolean(status.value?.passphrase.set && status.value.storage_configured));
 const showForm = computed(() => !status.value?.passphrase.set || changing.value);
+const strength = computed(() => (form.passphrase ? passphraseStrength(form.passphrase) : null));
+const rekey = computed(() => rekeySummary(status.value?.rekey ?? null));
 
-/** Opens the section when something needs the user: setting it up, a conflict, a failure or a new device. */
+/** Opens the section when something needs the user: setting it up, a conflict, a failure, paused jobs or a new device. */
 function needsAttention(current: BackupStatus): boolean {
     return (
         !current.storage_configured ||
         !current.passphrase.set ||
         current.lease?.state === "conflict" ||
         current.last_error !== null ||
+        current.parked_jobs > 0 ||
         offersRestore(current)
     );
 }
@@ -106,7 +120,11 @@ async function act(action: BackupAction, done: string): Promise<boolean> {
         return true;
     } catch (error) {
         if (error instanceof BackupApiError && error.reason === "wrong_passphrase") {
-            errors.current = "This is not the current passphrase.";
+            if (action.action === "remove_passphrase") {
+                removeError.value = "This is not the current passphrase.";
+            } else {
+                errors.current = "This is not the current passphrase.";
+            }
         } else {
             actionError.value = errorText(error);
         }
@@ -129,15 +147,18 @@ async function savePassphrase() {
         return;
     }
     const replacing = Boolean(status.value?.passphrase.set);
+    const changed = {
+        reencrypt: "Passphrase changed. Older snapshots are re-encrypted with it after the next snapshot.",
+        delete: "Passphrase changed. Older snapshots are deleted after the next snapshot.",
+        keep: "Passphrase changed. Snapshots written before keep the old one.",
+    };
     const saved = await act(
         {
             action: "set_passphrase",
             passphrase: form.passphrase,
-            ...(replacing ? { current_passphrase: form.current } : {}),
+            ...(replacing ? { current_passphrase: form.current, older_snapshots: older.value } : {}),
         },
-        replacing
-            ? "Passphrase changed. Snapshots written before keep the old one."
-            : "Passphrase saved. The first snapshot follows shortly.",
+        replacing ? changed[older.value] : "Passphrase saved. The first snapshot follows shortly.",
     );
     if (saved) {
         form.current = form.passphrase = form.confirm = "";
@@ -147,13 +168,27 @@ async function savePassphrase() {
 
 function cancelChange() {
     changing.value = false;
+    older.value = "reencrypt";
     form.current = form.passphrase = form.confirm = "";
     errors.current = errors.passphrase = errors.confirm = "";
 }
 
+function cancelRemove() {
+    confirmRemove.value = false;
+    removeCurrent.value = removeError.value = "";
+}
+
 async function removePassphrase() {
-    if (await act({ action: "remove_passphrase" }, "Passphrase removed. This device writes no snapshots.")) {
-        confirmRemove.value = false;
+    removeError.value = removeCurrent.value ? "" : "Enter the current passphrase.";
+    if (removeError.value) {
+        return;
+    }
+    const removed = await act(
+        { action: "remove_passphrase", current_passphrase: removeCurrent.value },
+        "Passphrase removed. This device writes no snapshots.",
+    );
+    if (removed) {
+        cancelRemove();
         changing.value = false;
     }
 }
@@ -265,32 +300,65 @@ onBeforeUnmount(() => clearInterval(timer));
                     Planet keeps the newest {{ status.keep }} snapshots. Dataset contents are in the bucket already and
                     are not part of a snapshot.
                 </p>
+                <p v-if="rekey" class="pw-panel__text mt-2 mb-0">{{ rekey }}</p>
                 <div v-if="status.last_error" class="alert alert-danger mt-3 mb-0" role="alert">
                     <strong>The last snapshot failed</strong> ({{ formatTime(status.last_error.time) }}):
                     {{ status.last_error.message }}
                 </div>
             </div>
 
+            <section v-if="status.parked_jobs" class="pw-panel pw-conflict" aria-labelledby="pw-backup-parked-title">
+                <h3 id="pw-backup-parked-title" class="pw-panel__title">Restored jobs are paused</h3>
+                <p>
+                    {{ status.parked_jobs }} {{ status.parked_jobs === 1 ? "job" : "jobs" }} from the snapshot had not
+                    reached the cluster and {{ status.parked_jobs === 1 ? "is" : "are" }} paused. Resume them if you
+                    made this snapshot yourself; they then run tools on your cluster with your data.
+                </p>
+                <button
+                    type="button"
+                    class="btn btn-outline-primary"
+                    :disabled="busy !== null"
+                    @click="act({ action: 'resume_restored_jobs' }, 'Restored jobs resumed.')">
+                    <FontAwesomeIcon
+                        :icon="busy === 'resume_restored_jobs' ? faSpinner : faPlay"
+                        :spin="busy === 'resume_restored_jobs'"
+                        fixed-width
+                        aria-hidden="true" />
+                    Resume restored jobs
+                </button>
+            </section>
+
+            <p v-if="status.lease?.jobs_start" class="pw-note" role="status">
+                <FontAwesomeIcon :icon="faInfoCircle" class="pw-note__icon" aria-hidden="true" />
+                <span>
+                    This device took the instance over. Its jobs start here at
+                    {{ formatTime(status.lease.jobs_start) }}, once the other device has stopped running them.
+                </span>
+            </p>
+
             <section v-if="conflict" class="pw-panel pw-conflict" aria-labelledby="pw-backup-conflict-title">
                 <h3 id="pw-backup-conflict-title" class="pw-panel__title">
-                    Another device writes this instance's snapshots
+                    Another device runs jobs for this instance
                 </h3>
                 <p>
                     Device <code>{{ conflict.device_id }}</code> holds instance {{ status.instance_id }}'s
                     lease<template v-if="conflict.renewed">, last renewed {{ formatTime(conflict.renewed) }}</template
-                    >. To keep the two devices from overwriting each other's snapshots, this device writes none.
+                    >. So that the two devices do not run the same jobs or overwrite each other's snapshots, this device
+                    runs no jobs and writes no snapshots.
                 </p>
                 <ul class="pw-conflict__choices">
                     <li>
-                        <strong>Continue here</strong> if the other device is no longer used: this device's records
-                        become the instance's newest snapshot and the other device stops writing.
+                        <strong>Continue here</strong> if the other device is no longer used: this device runs the
+                        instance's jobs and writes its snapshots; the other device stops within a few minutes, and jobs
+                        start here once it has.
                     </li>
                     <li>
                         <strong>New instance</strong> if both devices stay in use: this device continues as a new
-                        instance with its own snapshots<template v-if="status.local.unfinished_jobs"
+                        instance with its own jobs and snapshots<template v-if="status.local.unfinished_jobs"
                             >; its {{ status.local.unfinished_jobs }} unfinished
                             {{ status.local.unfinished_jobs === 1 ? "job is" : "jobs are" }} marked failed</template
-                        >.
+                        >. Datasets made before stay shared with the other instance: purging them in either instance
+                        keeps their data in the bucket.
                     </li>
                 </ul>
                 <div class="pw-conflict__actions">
@@ -298,7 +366,12 @@ onBeforeUnmount(() => clearInterval(timer));
                         type="button"
                         class="btn btn-outline-primary"
                         :disabled="busy !== null"
-                        @click="act({ action: 'take_over' }, 'This device now writes the snapshots.')">
+                        @click="
+                            act(
+                                { action: 'take_over' },
+                                'This device now runs the instance; its jobs start here in a few minutes.',
+                            )
+                        ">
                         <FontAwesomeIcon
                             :icon="busy === 'take_over' ? faSpinner : faExchangeAlt"
                             :spin="busy === 'take_over'"
@@ -342,6 +415,18 @@ onBeforeUnmount(() => clearInterval(timer));
                         </button>
                         <span v-else class="pw-inline-actions__confirm">
                             Snapshots stop until a passphrase is set again.
+                            <label :for="ids.removeCurrent" class="sr-only">Current passphrase</label>
+                            <input
+                                :id="ids.removeCurrent"
+                                v-model="removeCurrent"
+                                type="password"
+                                class="form-control form-control-sm pw-inline-actions__input"
+                                :class="{ 'is-invalid': removeError }"
+                                placeholder="Current passphrase"
+                                autocomplete="current-password"
+                                :aria-invalid="removeError ? 'true' : undefined"
+                                :aria-describedby="removeError ? `${ids.removeCurrent}-error` : undefined"
+                                @keydown.enter.prevent="removePassphrase" />
                             <button
                                 type="button"
                                 class="btn btn-sm btn-danger"
@@ -349,9 +434,14 @@ onBeforeUnmount(() => clearInterval(timer));
                                 @click="removePassphrase">
                                 Remove passphrase
                             </button>
-                            <button type="button" class="btn btn-sm btn-link" @click="confirmRemove = false">
-                                Cancel
-                            </button>
+                            <button type="button" class="btn btn-sm btn-link" @click="cancelRemove">Cancel</button>
+                            <span
+                                v-if="removeError"
+                                :id="`${ids.removeCurrent}-error`"
+                                class="pw-inline-actions__error"
+                                role="alert"
+                                >{{ removeError }}</span
+                            >
                         </span>
                     </div>
                 </template>
@@ -382,7 +472,7 @@ onBeforeUnmount(() => clearInterval(timer));
                         <FormField
                             :id="ids.passphrase"
                             :label="status.passphrase.set ? 'New passphrase' : 'Passphrase'"
-                            help="At least 12 characters."
+                            help="At least 12 characters that are hard to guess."
                             :error="errors.passphrase">
                             <template v-slot="{ describedBy, invalid }">
                                 <input
@@ -392,8 +482,17 @@ onBeforeUnmount(() => clearInterval(timer));
                                     class="form-control"
                                     :class="{ 'is-invalid': invalid }"
                                     autocomplete="new-password"
-                                    :aria-describedby="describedBy"
+                                    :aria-describedby="[describedBy, ids.strength].filter(Boolean).join(' ')"
                                     :aria-invalid="invalid ? 'true' : undefined" />
+                                <div :id="ids.strength" class="pw-strength" aria-live="polite">
+                                    <template v-if="strength">
+                                        <span
+                                            class="pw-strength__bar"
+                                            :class="`pw-strength__bar--${strength.level}`"
+                                            aria-hidden="true" />
+                                        Strength: {{ STRENGTH_LABELS[strength.level] }}
+                                    </template>
+                                </div>
                             </template>
                         </FormField>
                         <FormField :id="ids.confirm" label="Repeat the passphrase" :error="errors.confirm">
@@ -410,6 +509,22 @@ onBeforeUnmount(() => clearInterval(timer));
                             </template>
                         </FormField>
                     </div>
+                    <fieldset v-if="status.passphrase.set" class="pw-older">
+                        <legend class="pw-older__legend">Snapshots written with the current passphrase</legend>
+                        <label class="pw-older__choice">
+                            <input v-model="older" type="radio" :name="ids.older" value="reencrypt" />
+                            Re-encrypt them with the new passphrase
+                        </label>
+                        <label class="pw-older__choice">
+                            <input v-model="older" type="radio" :name="ids.older" value="delete" />
+                            Delete them once a snapshot with the new passphrase is written
+                        </label>
+                        <label class="pw-older__choice">
+                            <input v-model="older" type="radio" :name="ids.older" value="keep" />
+                            Keep them; they still open with the current passphrase
+                        </label>
+                        <p class="pw-older__help">Downloaded copies keep the passphrase they were made with.</p>
+                    </fieldset>
                     <details class="pw-details">
                         <summary>What the key on this device protects</summary>
                         <p>
@@ -511,6 +626,71 @@ onBeforeUnmount(() => clearInterval(timer));
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.pw-inline-actions__input {
+    width: 14rem;
+    max-width: 100%;
+}
+
+.pw-inline-actions__error {
+    flex-basis: 100%;
+    color: darken($brand-danger, 8%);
+}
+
+.pw-strength {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 1.5rem;
+    margin-top: 0.375rem;
+    color: $text-light;
+    font-size: 0.875rem;
+}
+
+.pw-strength__bar {
+    width: 4.5rem;
+    height: 0.375rem;
+    border-radius: 999px;
+    background: $border-color;
+}
+
+.pw-strength__bar--weak {
+    background: linear-gradient(90deg, map-get(map-get($pw-tones, "danger"), "accent") 33%, $border-color 33%);
+}
+
+.pw-strength__bar--fair {
+    background: linear-gradient(90deg, map-get(map-get($pw-tones, "warning"), "accent") 66%, $border-color 66%);
+}
+
+.pw-strength__bar--strong {
+    background: map-get(map-get($pw-tones, "success"), "accent");
+}
+
+.pw-older {
+    margin: 0 0 1rem;
+    padding: 0;
+    border: 0;
+}
+
+.pw-older__legend {
+    margin-bottom: 0.375rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.pw-older__choice {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    margin: 0 0 0.25rem;
+    cursor: pointer;
+}
+
+.pw-older__help {
+    margin: 0.25rem 0 0;
+    color: $text-light;
     font-size: 0.875rem;
 }
 

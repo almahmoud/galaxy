@@ -86,7 +86,9 @@ describe("BackupSection", () => {
 
     it("asks for the current passphrase to change it", async () => {
         const wrong = new BackupApiError(403, "The current passphrase is wrong.", "wrong_passphrase");
-        const { wrapper, services } = await mountSection(backupStatus(), { act: vi.fn().mockRejectedValueOnce(wrong) });
+        const { wrapper, services } = await mountSection(backupStatus(), {
+            act: vi.fn().mockRejectedValueOnce(wrong).mockResolvedValue(backupStatus()),
+        });
         expect(wrapper.find("#pw-backup-current").exists()).toBe(false);
         await wrapper
             .findAll("button")
@@ -103,8 +105,60 @@ describe("BackupSection", () => {
             action: "set_passphrase",
             passphrase: "a brand new long passphrase",
             current_passphrase: "not the old one at all",
+            older_snapshots: "reencrypt",
         });
         expect(wrapper.find("#pw-backup-current-error").text()).toBe("This is not the current passphrase.");
+
+        await wrapper.find("input[type='radio'][value='delete']").setValue(true);
+        await wrapper.find("#pw-backup-current").setValue("the old passphrase it is");
+        await wrapper.find("form[aria-label='Backup passphrase']").trigger("submit");
+        await flushPromises();
+        expect(services.act).toHaveBeenLastCalledWith(expect.objectContaining({ older_snapshots: "delete" }));
+        expect(wrapper.find(".pw-backup-actions [role='status']").text()).toMatch(/deleted after the next snapshot/);
+    });
+
+    it("shows how hard the new passphrase is to guess", async () => {
+        const { wrapper } = await mountSection(freshStatus());
+        await wrapper.find("#pw-backup-passphrase").setValue("aaaaaaaaaaaa");
+        expect(wrapper.find("#pw-backup-strength").text()).toBe("Strength: Easy to guess");
+        await wrapper.find("form[aria-label='Backup passphrase']").trigger("submit");
+        expect(wrapper.find("#pw-backup-passphrase-error").text()).toMatch(/easy to guess/);
+        await wrapper.find("#pw-backup-passphrase").setValue("correct horse battery staple");
+        expect(wrapper.find("#pw-backup-strength").text()).toBe("Strength: Strong");
+    });
+
+    it("removes the passphrase only with the current one", async () => {
+        const wrong = new BackupApiError(403, "The current passphrase is wrong.", "wrong_passphrase");
+        const { wrapper, services } = await mountSection(backupStatus(), { act: vi.fn().mockRejectedValueOnce(wrong) });
+        await wrapper
+            .findAll("button")
+            .find((button) => button.text() === "Remove")!
+            .trigger("click");
+        const remove = () =>
+            wrapper
+                .findAll("button")
+                .find((button) => button.text() === "Remove passphrase")!
+                .trigger("click");
+        await remove();
+        expect(wrapper.find("#pw-backup-remove-current-error").text()).toBe("Enter the current passphrase.");
+        expect(services.act).not.toHaveBeenCalled();
+        await wrapper.find("#pw-backup-remove-current").setValue("a guess at the passphrase");
+        await remove();
+        await flushPromises();
+        expect(services.act).toHaveBeenCalledWith({
+            action: "remove_passphrase",
+            current_passphrase: "a guess at the passphrase",
+        });
+        expect(wrapper.find("#pw-backup-remove-current-error").text()).toBe("This is not the current passphrase.");
+    });
+
+    it("resumes the jobs a restore paused", async () => {
+        const { wrapper, services } = await mountSection(backupStatus({ parked_jobs: 2 }));
+        const panel = wrapper.find("[aria-labelledby='pw-backup-parked-title']");
+        expect(panel.text()).toContain("2 jobs from the snapshot had not reached the cluster and are paused");
+        await panel.find("button").trigger("click");
+        await flushPromises();
+        expect(services.act).toHaveBeenCalledWith({ action: "resume_restored_jobs" });
     });
 
     it("requests a snapshot and downloads an encrypted copy", async () => {
@@ -131,7 +185,13 @@ describe("BackupSection", () => {
 
     it("explains a lease conflict and offers to take over or fork", async () => {
         const conflict = backupStatus({
-            lease: { state: "conflict", device_id: OTHER_DEVICE, renewed: "2026-10-13T11:00:00.000Z", checked: "x" },
+            lease: {
+                state: "conflict",
+                device_id: OTHER_DEVICE,
+                renewed: "2026-10-13T11:00:00.000Z",
+                checked: "x",
+                jobs_start: null,
+            },
             local: { has_content: true, unfinished_jobs: 2 },
         });
         const { wrapper, services } = await mountSection(conflict);
@@ -147,6 +207,36 @@ describe("BackupSection", () => {
         await fork!.trigger("click");
         await flushPromises();
         expect(services.act).toHaveBeenLastCalledWith({ action: "fork" });
+    });
+
+    it("offers to take over when another device runs the instance, also without a passphrase", async () => {
+        const conflict = freshStatus({
+            lease: { state: "conflict", device_id: OTHER_DEVICE, renewed: null, checked: "x", jobs_start: null },
+            local: { has_content: true, unfinished_jobs: 0 },
+        });
+        const { wrapper, services } = await mountSection(conflict);
+        expect(wrapper.find(".pw-pill").text()).toBe("Another device");
+        const panel = wrapper.find(".pw-conflict");
+        expect(panel.text()).toContain("Another device runs jobs for this instance");
+        expect(panel.text()).toContain("purging them in either instance keeps their data in the bucket");
+        await panel.findAll("button")[0]!.trigger("click");
+        await flushPromises();
+        expect(services.act).toHaveBeenLastCalledWith({ action: "take_over" });
+    });
+
+    it("says when jobs start after a take-over", async () => {
+        const { wrapper } = await mountSection(
+            backupStatus({
+                lease: {
+                    state: "held",
+                    device_id: DEVICE,
+                    renewed: "2026-10-13T12:00:00.000Z",
+                    checked: "2026-10-13T12:00:00.000Z",
+                    jobs_start: "2026-10-13T12:03:30.000Z",
+                },
+            }),
+        );
+        expect(wrapper.text()).toContain("This device took the instance over. Its jobs start here at");
     });
 
     it("shows the last failure", async () => {
@@ -289,6 +379,58 @@ describe("BackupRestore", () => {
             expect.anything(),
             expect.objectContaining({ take_over: true }),
         );
+    });
+
+    it("shows the snapshot's cluster gateway and runtime image and keeps this device's unless chosen", async () => {
+        const cluster = { gateway_url: "https://k8s.example.org", runtime_image: "ghcr.io/example/runtime:1" };
+        const ask = new BackupApiError(409, "Confirm them.", "cluster_settings", null, cluster);
+        const { wrapper, services } = await openRestore(freshStatus(), {
+            restore: vi.fn().mockRejectedValueOnce(ask).mockRejectedValueOnce(ask).mockResolvedValue({
+                instance_id: INSTANCE,
+                source_instance_id: INSTANCE,
+                created: "2026-10-13T12:00:00.000Z",
+                forked: false,
+                failed_jobs: 0,
+                parked_jobs: 1,
+                counts: {},
+            }),
+        });
+        await wrapper.find("input[type='radio'][value='fork']").setValue(true);
+        await wrapper.find("#pw-restore-passphrase").setValue("correct horse battery staple");
+        await restoreForm(wrapper).trigger("submit");
+        await flushPromises();
+        const fieldset = wrapper.find(".pw-cluster");
+        expect(fieldset.text()).toContain("https://k8s.example.org");
+        expect(fieldset.text()).toContain("ghcr.io/example/runtime:1");
+        expect(fieldset.find("input[value='device']").element).toHaveProperty("checked", true);
+        await restoreForm(wrapper).trigger("submit");
+        await flushPromises();
+        expect(services.restore).toHaveBeenLastCalledWith(
+            expect.anything(),
+            expect.objectContaining({ cluster_settings: "device" }),
+        );
+        await wrapper.find(".pw-cluster input[value='snapshot']").setValue(true);
+        await restoreForm(wrapper).trigger("submit");
+        await flushPromises();
+        expect(services.restore).toHaveBeenLastCalledWith(
+            expect.anything(),
+            expect.objectContaining({ cluster_settings: cluster }),
+        );
+        expect(wrapper.find(".alert-success").text()).toContain("1 job waits until you resume restored jobs.");
+    });
+
+    it("offers snapshots of older schema versions", async () => {
+        const { wrapper, listing } = await mountSection(freshStatus());
+        listing.instances.splice(
+            0,
+            1,
+            bucketInstance({
+                latest: { snapshot: "x", time: "2026-10-13T12:00:00.000Z", size: 1, schema_version: 1, counts: {} },
+            }),
+        );
+        await wrapper.find(".pw-note button").trigger("click");
+        await flushPromises();
+        expect(wrapper.find("input[type='radio'][value='a1b2c3d4']").attributes("disabled")).toBeUndefined();
     });
 
     it("does not offer snapshots of another schema version", async () => {

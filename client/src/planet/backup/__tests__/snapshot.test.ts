@@ -1,15 +1,31 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closeDb, datasets, DB_VERSION, jobs, kv, LeaderFenceError, outbox, settings, tools } from "@/planet/db";
+import {
+    closeDb,
+    datasets,
+    DB_VERSION,
+    hdas,
+    JOB_STORES,
+    jobs,
+    kv,
+    LeaderFenceError,
+    MIGRATIONS,
+    outbox,
+    settings,
+    tools,
+    withTransaction,
+} from "@/planet/db";
 import { closeEvents } from "@/planet/util/events";
+import { parseGalaxyTime } from "@/planet/util/time";
 
 import { bucketRef, KEEP, latestKey, leaseKey, snapshotName } from "../bucket";
 import { BackupError, isBackupError } from "../errors";
+import { forkMarkerKey } from "../forks";
 import { fromUtf8, openSnapshot, readSnapshotFile, sealSnapshot, utf8 } from "../format";
 import { unlockKey } from "../keys";
-import { collectState, isLocalKvKey } from "../payload";
-import { FORK_KEY } from "../restore";
+import { collectState, isLocalKvKey, MIN_SCHEMA_VERSION, PAYLOAD_MIGRATIONS } from "../payload";
+import { FORK_KEY, PARKED_MESSAGE, parkedJobs, resumeParkedJobs } from "../restore";
 import { hasUnsavedChanges, localSummary, restoreSnapshot, runBackup } from "../snapshot";
 import { deviceId, readKey, readRequest, readState, requestSnapshot, updateState } from "../state";
 import {
@@ -117,7 +133,7 @@ describe("snapshot round trip", () => {
         expect(after.secrets).toEqual(secretsBefore);
         const running = await jobs.get(seeded.runningJobId);
         expect(running?.state).toBe("running");
-        expect(running?.k8s).toMatchObject({ name: "planet-a1b2c3d4-job-a1", pod_name: null, node_name: null });
+        expect(running?.k8s).toMatchObject({ name: `planet-${instanceId}-job-a1`, pod_name: null, node_name: null });
         const key = (await readKey())!;
         expect(key.key.extractable).toBe(false);
         expect((await unlockKey(PASSPHRASE, key)).key_id).toBe(key.key_id);
@@ -168,18 +184,57 @@ describe("snapshot round trip", () => {
         const payload = fromUtf8(await openSnapshot(readSnapshotFile(newestSnapshot(instanceId)), key.key));
         expect(payload).not.toContain(SECRET);
         expect(payload).not.toContain(TOKEN);
-        expect(payload).not.toContain("planet-a1b2c3d4-job-a1-xyz");
+        expect(payload).not.toContain(`planet-${instanceId}-job-a1-xyz`);
         expect(JSON.parse(payload).stores).not.toHaveProperty("secrets");
     });
 
-    it("takes the cluster settings from the snapshot when this device has no cluster token yet", async () => {
+    it("takes the snapshot's gateway and runtime image only once the user confirmed them", async () => {
+        const { instanceId } = await device(true);
+        await settings.update({
+            cluster: { runtime_image: "ghcr.io/example/runtime@sha256:" + "a".repeat(64), default_cpu: "2" },
+        });
+        expect(await backup()).toBe("written");
+        await newDevice(false);
+        const snapshot = newestSnapshot(instanceId);
+        const shown = {
+            gateway_url: "https://k8s.planet.test",
+            runtime_image: "ghcr.io/example/runtime@sha256:" + "a".repeat(64),
+        };
+        let refusal: unknown = null;
+        await restoreSnapshot(snapshot, PASSPHRASE).catch((error: unknown) => (refusal = error));
+        expect(refusal).toMatchObject({ code: "cluster_settings", details: { cluster: shown } });
+        expect((await settings.getStored()).instance_id).not.toBe(instanceId);
+        expect(
+            await errorCode(
+                restoreSnapshot(snapshot, PASSPHRASE, { endpoints: { ...shown, gateway_url: "https://evil.test" } }),
+            ),
+        ).toBe("cluster_settings");
+
+        await restoreSnapshot(snapshot, PASSPHRASE, { endpoints: "device" });
+        let restored = await settings.get();
+        expect(restored.cluster).toMatchObject({
+            gateway_url: "",
+            runtime_image: "",
+            default_cpu: "2",
+            has_token: false,
+        });
+        expect(restored.storage).toMatchObject({ bucket: "planet-data", has_secret: true });
+
+        await restoreSnapshot(snapshot, PASSPHRASE, { endpoints: shown, replaceUnsaved: true });
+        restored = await settings.get();
+        expect(restored.cluster).toMatchObject({ ...shown, has_token: false });
+    });
+
+    it("keeps this device's cluster settings when it has a cluster token", async () => {
         const { instanceId } = await device(true);
         expect(await backup()).toBe("written");
         await newDevice(false);
-        await restoreSnapshot(newestSnapshot(instanceId), PASSPHRASE);
-        const restored = await settings.get();
-        expect(restored.cluster).toMatchObject({ gateway_url: "https://k8s.planet.test", has_token: false });
-        expect(restored.storage).toMatchObject({ bucket: "planet-data", has_secret: true });
+        await settings.update({ cluster: { gateway_url: "https://k8s.other.test", token: "another-token" } });
+        await restoreSnapshot(newestSnapshot(instanceId), PASSPHRASE, { replaceUnsaved: true });
+        expect((await settings.get()).cluster).toMatchObject({
+            gateway_url: "https://k8s.other.test",
+            has_token: true,
+        });
     });
 
     it("refuses a wrong passphrase and leaves the records alone", async () => {
@@ -202,7 +257,7 @@ describe("snapshot round trip", () => {
         expect(await errorCode(restoreSnapshot(bytes, PASSPHRASE))).toBe("damaged");
     });
 
-    it("refuses snapshots of another database schema version", async () => {
+    it("refuses snapshots of a newer database schema and of a header that disagrees with its records", async () => {
         const { instanceId } = await device();
         const key = (await readKey())!;
         const collected = await collectState(START);
@@ -211,15 +266,59 @@ describe("snapshot round trip", () => {
         expect(await errorCode(restoreSnapshot(newer, PASSPHRASE, { replaceUnsaved: true }))).toBe("schema_version");
 
         const payload = JSON.parse(fromUtf8(collected.bytes)) as Record<string, unknown>;
+        const newerRecords = await sealSnapshot(
+            utf8(JSON.stringify({ ...payload, schema_version: DB_VERSION + 1 })),
+            key.key,
+            key,
+            { ...meta, schema_version: DB_VERSION },
+        );
+        expect(await errorCode(restoreSnapshot(newerRecords, PASSPHRASE, { replaceUnsaved: true }))).toBe(
+            "schema_version",
+        );
         const mislabeled = await sealSnapshot(
             utf8(JSON.stringify({ ...payload, schema_version: DB_VERSION - 1 })),
             key.key,
             key,
             { ...meta, schema_version: DB_VERSION },
         );
-        expect(await errorCode(restoreSnapshot(mislabeled, PASSPHRASE, { replaceUnsaved: true }))).toBe(
-            "schema_version",
+        expect(await errorCode(restoreSnapshot(mislabeled, PASSPHRASE, { replaceUnsaved: true }))).toBe("format");
+    });
+
+    it("restores snapshots of older schema versions and writes the next snapshot in this build's schema", async () => {
+        const { instanceId, seeded } = await device();
+        const key = (await readKey())!;
+        const collected = await collectState(START);
+        const payload = JSON.parse(fromUtf8(collected.bytes)) as Record<string, unknown>;
+        const older = await sealSnapshot(
+            utf8(JSON.stringify({ ...payload, schema_version: MIN_SCHEMA_VERSION })),
+            key.key,
+            key,
+            { instance_id: instanceId, created: collected.created, schema_version: MIN_SCHEMA_VERSION },
         );
+        await newDevice();
+        await restoreSnapshot(older, PASSPHRASE);
+        expect((await jobs.get(seeded.finishedJobId))?.state).toBe("ok");
+        expect((await readState())?.last_snapshot?.schema_version).toBe(MIN_SCHEMA_VERSION);
+
+        // The records did not change, but the bucket's newest snapshot has an older schema.
+        clock += 16 * MINUTE;
+        await updateState(instanceId, (await readState())!.bucket, (state) => ({ ...state, take_over: true }));
+        expect(await backup()).toBe("written");
+        const latest = readSnapshotFile(newestSnapshot(instanceId));
+        expect(latest.header.schema_version).toBe(DB_VERSION);
+        clock += 16 * MINUTE;
+        expect(await backup()).toBe("unchanged");
+    });
+
+    it("has a payload migration for every database migration", () => {
+        const versions = Object.keys(MIGRATIONS)
+            .map(Number)
+            .filter((version) => version > MIN_SCHEMA_VERSION);
+        expect(versions.length).toBeGreaterThan(0);
+        for (const version of versions) {
+            expect(PAYLOAD_MIGRATIONS[version], `payload migration to schema ${version}`).toBeTypeOf("function");
+        }
+        expect(Math.max(...Object.keys(MIGRATIONS).map(Number))).toBe(DB_VERSION);
     });
 
     it("refuses payloads whose records have no valid keys", async () => {
@@ -274,7 +373,139 @@ describe("snapshot round trip", () => {
     });
 });
 
+describe("restored jobs", () => {
+    async function undispatched(historyId: string): Promise<{ jobId: string; outputDatasetId: string }> {
+        return withTransaction(JOB_STORES, "readwrite", async (tx) => {
+            const job = await jobs.create(
+                { tool_id: "cat1", tool_version: "1.0.0", history_id: historyId, state: "queued" },
+                tx,
+            );
+            const { hda, dataset } = await hdas.createWithDataset(
+                { history_id: historyId, name: "pending", creating_job_id: job.id },
+                { state: "queued", job_id: job.id },
+                tx,
+            );
+            await jobs.update(job.id, { outputs: [{ name: "out_file1", src: "hda", id: hda.id }] }, tx);
+            await outbox.enqueue({ kind: "dispatch", job_id: job.id }, tx);
+            await outbox.enqueue({ kind: "cleanup", payload: { k8s_jobs: ["planet-0badc0de-x-a1"] } }, tx);
+            return { jobId: job.id, outputDatasetId: dataset.id };
+        });
+    }
+
+    it("pauses jobs that had not reached the cluster until the user resumes them", async () => {
+        const { instanceId, seeded } = await device();
+        const pending = await undispatched(seeded.historyId);
+        expect(await backup()).toBe("written");
+        await newDevice();
+        const result = await restoreSnapshot(newestSnapshot(instanceId), PASSPHRASE);
+        expect(result.parked_jobs).toBe(1);
+
+        expect(await jobs.get(pending.jobId)).toMatchObject({ state: "paused", info: PARKED_MESSAGE });
+        expect((await datasets.get(pending.outputDatasetId))?.state).toBe("paused");
+        // Jobs in the cluster continue; the writing device's dispatches and cleanups are gone, its purges stay.
+        expect((await jobs.get(seeded.runningJobId))?.state).toBe("running");
+        expect((await outbox.list()).map((entry) => entry.kind)).toEqual(["purge"]);
+        expect(await parkedJobs(instanceId)).toEqual([pending.jobId]);
+
+        expect(await resumeParkedJobs("ffffffff")).toBe(0);
+        expect(await resumeParkedJobs(instanceId)).toBe(1);
+        expect(await jobs.get(pending.jobId)).toMatchObject({ state: "new", info: null });
+        expect((await datasets.get(pending.outputDatasetId))?.state).toBe("new");
+        expect(await parkedJobs(instanceId)).toEqual([]);
+        expect(await resumeParkedJobs(instanceId)).toBe(0);
+    });
+
+    it("leaves jobs the user resumed or deleted in the meantime alone", async () => {
+        const { instanceId, seeded } = await device();
+        const pending = await undispatched(seeded.historyId);
+        expect(await backup()).toBe("written");
+        await newDevice();
+        await restoreSnapshot(newestSnapshot(instanceId), PASSPHRASE);
+        await jobs.update(pending.jobId, { state: "deleted" });
+        expect(await parkedJobs(instanceId)).toEqual([]);
+        expect(await resumeParkedJobs(instanceId)).toBe(0);
+        expect((await jobs.get(pending.jobId))?.state).toBe("deleted");
+    });
+});
+
+describe("record checks", () => {
+    async function sealed(change: (stores: Record<string, Record<string, unknown>[]>) => void) {
+        const { instanceId } = await device();
+        const key = (await readKey())!;
+        const collected = await collectState(START);
+        const payload = JSON.parse(fromUtf8(collected.bytes)) as { stores: Record<string, Record<string, unknown>[]> };
+        change(payload.stores);
+        return sealSnapshot(utf8(JSON.stringify(payload)), key.key, key, {
+            instance_id: instanceId,
+            created: collected.created,
+            schema_version: DB_VERSION,
+        });
+    }
+
+    it("refuses records that name objects, Jobs or tools Planet does not write for them", async () => {
+        const changes: [string, (stores: Record<string, Record<string, unknown>[]>) => void][] = [
+            ["a dataset key of another dataset", (stores) => (stores.datasets![0]!.object_key = "uploads/x")],
+            [
+                "a Kubernetes Job of another instance",
+                (stores) => {
+                    const running = stores.jobs!.find((job) => job.k8s)!;
+                    (running.k8s as Record<string, unknown>).name = "planet-ffffffff-job-a1";
+                },
+            ],
+            ["a purge by uuid", (stores) => (stores.outbox![0]!.payload = { uuids: [stores.datasets![0]!.uuid] })],
+            ["a curated tool record", (stores) => (stores.tools![0]!.source = "curated")],
+        ];
+        for (const [what, change] of changes) {
+            await resetDb();
+            const bytes = await sealed(change);
+            const before = await dump();
+            expect(await errorCode(restoreSnapshot(bytes, PASSPHRASE, { replaceUnsaved: true })), what).toBe("format");
+            expect(await dump(), what).toEqual(before);
+        }
+    });
+
+    it("refuses installed tools with the id of a built-in tool", async () => {
+        const bytes = await sealed(() => undefined);
+        const tool = (await tools.list())[0]!;
+        const builtInToolIds = async () => new Set([tool.tool_id]);
+        expect(await errorCode(restoreSnapshot(bytes, PASSPHRASE, { replaceUnsaved: true, builtInToolIds }))).toBe(
+            "format",
+        );
+    });
+});
+
 describe("restoring as a new instance", () => {
+    it("writes the marker that tells the original instance which datasets it shares", async () => {
+        const { instanceId } = await device();
+        expect(await backup()).toBe("written");
+        await newDevice();
+        await restoreSnapshot(newestSnapshot(instanceId), PASSPHRASE, {
+            fork: true,
+            newInstanceId: () => "0badc0de",
+            s3: bucket.client(),
+        });
+        const fork = (await kv.get(FORK_KEY as never)) as unknown as {
+            clock: number;
+            registered: boolean;
+            time: string;
+        };
+        expect(fork).toMatchObject({ registered: true });
+        expect(bucket.json(forkMarkerKey(instanceId, "0badc0de"))).toEqual({
+            format: "planet-instance-fork",
+            version: 1,
+            from: instanceId,
+            to: "0badc0de",
+            time: fork.time,
+            clock: fork.clock,
+        });
+        // Every restored dataset was created at or before the boundary.
+        const restored = (await dump()).datasets as [string, { create_time: string }][];
+        expect(restored.length).toBeGreaterThan(0);
+        for (const [, dataset] of restored) {
+            expect(parseGalaxyTime(dataset.create_time)).toBeLessThanOrEqual(fork.clock);
+        }
+    });
+
     it("fails unfinished jobs and their outputs, empties the outbox and records the fork", async () => {
         const { instanceId, seeded } = await device();
         expect(await backup()).toBe("written");
@@ -294,7 +525,12 @@ describe("restoring as a new instance", () => {
         expect((await jobs.get(seeded.finishedJobId))?.state).toBe("ok");
         expect((await datasets.get(seeded.runningOutputDatasetId))?.state).toBe("error");
         expect(await outbox.list()).toEqual([]);
-        expect(await kv.get(FORK_KEY as never)).toMatchObject({ from: instanceId, to: "0badc0de" });
+        expect(await kv.get(FORK_KEY as never)).toMatchObject({
+            from: instanceId,
+            to: "0badc0de",
+            clock: expect.any(Number),
+            registered: false,
+        });
 
         expect(await backup()).toBe("written");
         expect(snapshotKeys("0badc0de")).toHaveLength(1);

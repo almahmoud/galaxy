@@ -1,8 +1,10 @@
 import {
     backupClient,
     BackupError,
+    type BackupKey,
     bucketRef,
     buildSnapshot,
+    type ClusterEndpoints,
     createBackupKey,
     deviceId,
     emptyState,
@@ -19,19 +21,27 @@ import {
     matchesPassphrase,
     MAX_PASSPHRASE_LENGTH,
     MAX_SNAPSHOT_BYTES,
+    MIN_SCHEMA_VERSION,
+    parkedJobs,
     passphraseProblem,
     readKey,
     readLatest,
     readLease,
+    readPreviousKeys,
     readRequest,
     readSnapshotObject,
     readState,
+    type RekeyRequest,
     requestSnapshot,
     restoreSnapshot,
+    resumeParkedJobs,
+    TAKE_OVER_GRACE_MS,
     updateState,
     writeKey,
+    writePreviousKeys,
     writeState,
 } from "@/planet/backup";
+import { registerFork } from "@/planet/backup/forks";
 import { DB_VERSION, leader, settings } from "@/planet/db";
 import { STALE_MS } from "@/planet/jobs/leader";
 import type { S3Client, S3Config } from "@/planet/s3";
@@ -54,6 +64,8 @@ export interface BackupClients {
     now?: () => number;
     /** The id of a forked instance. */
     newInstanceId?: () => string;
+    /** Ids of the tools built into this build (tests). */
+    builtInToolIds?: () => Promise<ReadonlySet<string>>;
 }
 
 /** Instances listed by `GET /api/planet/backup/snapshots`. */
@@ -64,7 +76,9 @@ const ACTIONS: readonly BackupAction["action"][] = [
     "remove_passphrase",
     "take_over",
     "fork",
+    "resume_restored_jobs",
 ];
+const OLDER_SNAPSHOTS = ["reencrypt", "delete", "keep"] as const;
 const MAX_SNAPSHOT_BASE64 = Math.ceil(MAX_SNAPSHOT_BYTES / 3) * 4;
 
 function iso(time: number | null | undefined): string | null {
@@ -125,6 +139,19 @@ async function client(clients: BackupClients): Promise<S3Client | null> {
     return backupClient(stored, secrets, clients.s3Client);
 }
 
+function rekeyStatus(rekey: RekeyRequest | null | undefined, keyId: string | null): BackupStatus["rekey"] {
+    if (!rekey || rekey.key_id !== keyId) {
+        return null;
+    }
+    return {
+        mode: rekey.mode,
+        done: rekey.done,
+        skipped: rekey.skipped,
+        finished: iso(rekey.finished),
+        last_error: rekey.last_error,
+    };
+}
+
 async function status(clients: BackupClients): Promise<BackupStatus> {
     const now = (clients.now ?? Date.now)();
     const [key, saved, request, current, heartbeat, local, device] = await Promise.all([
@@ -139,12 +166,16 @@ async function status(clients: BackupClients): Promise<BackupStatus> {
     const bucket = bucketRef(current.storage);
     const state = saved?.instance_id === current.instance_id && saved.bucket === bucket ? saved : null;
     const snapshot = state?.last_snapshot ?? null;
+    const takenOver = state?.lease?.state === "held" ? (state.lease.taken_over ?? null) : null;
+    const jobsStart =
+        takenOver !== null && takenOver + TAKE_OVER_GRACE_MS > now ? takenOver + TAKE_OVER_GRACE_MS : null;
     return {
         passphrase: { set: Boolean(key), key_id: key?.key_id ?? null, created: key?.created ?? null },
         storage_configured: settings.configured(current).storage,
         instance_id: current.instance_id,
         device_id: device,
         schema_version: DB_VERSION,
+        min_schema_version: MIN_SCHEMA_VERSION,
         interval_minutes: INTERVAL_MS / 60_000,
         keep: KEEP,
         last_snapshot: snapshot
@@ -161,8 +192,11 @@ async function status(clients: BackupClients): Promise<BackupStatus> {
                   device_id: state.lease.device_id,
                   renewed: state.lease.renewed,
                   checked: iso(state.lease.checked) ?? "",
+                  jobs_start: iso(jobsStart),
               }
             : null,
+        parked_jobs: (await parkedJobs(current.instance_id)).length,
+        rekey: rekeyStatus(state?.rekey, key?.key_id ?? null),
         writer_active: typeof heartbeat?.heartbeat === "number" && now - heartbeat.heartbeat < STALE_MS,
         local,
         restored: saved?.restored
@@ -205,15 +239,8 @@ function booleanField(body: Record<string, unknown>, name: string): boolean {
     return value === true;
 }
 
-async function setPassphrase(body: Record<string, unknown>, now: number): Promise<void> {
-    const passphrase = stringField(body, "passphrase")!;
-    const problem = passphraseProblem(passphrase);
-    if (problem) {
-        throw new ApiError(400, problem, ErrorCodes.USER_OBJECT_ATTRIBUTE_INVALID, {
-            reason: "weak_passphrase",
-            err_data: { passphrase: problem },
-        });
-    }
+/** The stored key, after checking that `current_passphrase` derives it; null when no passphrase is set. */
+async function verifiedKey(body: Record<string, unknown>): Promise<BackupKey | null> {
     const existing = await readKey();
     if (existing) {
         const currentPassphrase = stringField(body, "current_passphrase", true);
@@ -224,7 +251,43 @@ async function setPassphrase(body: Record<string, unknown>, now: number): Promis
             });
         }
     }
-    await writeKey(await createBackupKey(passphrase, now));
+    return existing;
+}
+
+/** Records what the leader does with snapshots of earlier passphrases, and keeps the keys re-encrypting needs. */
+async function planRekey(
+    mode: (typeof OLDER_SNAPSHOTS)[number],
+    previous: BackupKey | null,
+    next: BackupKey | null,
+    now: number,
+): Promise<void> {
+    const keys = mode === "reencrypt" && previous ? [...(await readPreviousKeys()), previous] : [];
+    await writePreviousKeys(keys);
+    const stored = await settings.getStored();
+    const rekey: RekeyRequest | null =
+        next && previous && mode !== "keep"
+            ? { mode, key_id: next.key_id, time: now, done: 0, skipped: 0, last_error: null, finished: null }
+            : null;
+    await updateState(stored.instance_id, bucketRef(stored.storage), (current) => ({ ...current, rekey }));
+}
+
+async function setPassphrase(body: Record<string, unknown>, now: number): Promise<void> {
+    const passphrase = stringField(body, "passphrase")!;
+    const problem = passphraseProblem(passphrase);
+    if (problem) {
+        throw new ApiError(400, problem, ErrorCodes.USER_OBJECT_ATTRIBUTE_INVALID, {
+            reason: "weak_passphrase",
+            err_data: { passphrase: problem },
+        });
+    }
+    const older = body.older_snapshots ?? "keep";
+    if (!OLDER_SNAPSHOTS.includes(older as (typeof OLDER_SNAPSHOTS)[number])) {
+        throw ApiError.badRequest(`older_snapshots must be one of ${OLDER_SNAPSHOTS.join(", ")}.`);
+    }
+    const existing = await verifiedKey(body);
+    const key = await createBackupKey(passphrase, now);
+    await writeKey(key);
+    await planRekey(older as (typeof OLDER_SNAPSHOTS)[number], existing, key, now);
     const current = await settings.get();
     if (settings.configured(current).storage) {
         await requestSnapshot(true, now);
@@ -246,10 +309,14 @@ async function act(body: Record<string, unknown>, clients: BackupClients): Promi
             await setPassphrase(body, now);
             break;
         case "remove_passphrase":
+            await verifiedKey(body);
             await writeKey(null);
+            await planRekey("keep", null, null, now);
             break;
         case "take_over": {
-            await requireWriter();
+            if (!settings.configured(await settings.get()).storage) {
+                throw new BackupError("not_configured", "Set up the storage bucket first.");
+            }
             const stored = await settings.getStored();
             await updateState(stored.instance_id, bucketRef(stored.storage), (current) => ({
                 ...current,
@@ -262,9 +329,17 @@ async function act(body: Record<string, unknown>, clients: BackupClients): Promi
             const fork = await forkInstance((clients.newInstanceId ?? newInstanceId)());
             const stored = await settings.getStored();
             await writeState(emptyState(fork.to, bucketRef(stored.storage)));
+            const s3 = await client(clients);
+            if (s3) {
+                // The leader writes the marker when this fails.
+                await registerFork(s3).catch(() => false);
+            }
             await requestSnapshot(true, now);
             break;
         }
+        case "resume_restored_jobs":
+            await resumeParkedJobs((await settings.getStored()).instance_id);
+            break;
     }
     return status(clients);
 }
@@ -373,17 +448,39 @@ async function snapshotBytes(body: Record<string, unknown>, clients: BackupClien
     }
 }
 
+/** `cluster_settings`: "device", or the snapshot's gateway and runtime image the user confirmed. */
+function endpointsField(body: Record<string, unknown>): "device" | ClusterEndpoints | undefined {
+    const value = body.cluster_settings;
+    if (value === undefined || value === "device") {
+        return value;
+    }
+    const endpoints = value as Partial<ClusterEndpoints> | null;
+    if (
+        typeof endpoints !== "object" ||
+        endpoints === null ||
+        typeof endpoints.gateway_url !== "string" ||
+        typeof endpoints.runtime_image !== "string"
+    ) {
+        throw ApiError.badRequest('cluster_settings must be "device" or {gateway_url, runtime_image}.');
+    }
+    return { gateway_url: endpoints.gateway_url, runtime_image: endpoints.runtime_image };
+}
+
 async function restore(body: Record<string, unknown>, clients: BackupClients): Promise<RestoreResponse> {
     const passphrase = stringField(body, "passphrase")!;
     const fork = booleanField(body, "fork");
     const replaceUnsaved = booleanField(body, "replace_unsaved");
     const takeOver = booleanField(body, "take_over");
+    const endpoints = endpointsField(body);
     const bytes = await snapshotBytes(body, clients);
     return restoreSnapshot(bytes, passphrase, {
         fork,
         replaceUnsaved,
         takeOver,
+        endpoints,
         checkLease: await leaseCheck(clients),
+        s3: await client(clients),
+        builtInToolIds: clients.builtInToolIds,
         now: clients.now,
         newInstanceId: clients.newInstanceId,
     });
@@ -411,13 +508,15 @@ async function exportSnapshot(clients: BackupClients): Promise<Response> {
  *
  * - `GET /api/planet/backup`: `BackupStatus` (`@/planet/ui/lib/backup`).
  * - `POST /api/planet/backup`: a `BackupAction`: request a snapshot now, set or change the passphrase (changing
- *   it needs the current one), remove it, take the instance's lease over from another device, or fork this
- *   device's records into a new instance. Answers with the new status.
+ *   or removing it needs the current one; `older_snapshots` re-encrypts, deletes or keeps the snapshots of the old
+ *   one), take the instance's lease over from another device, fork this device's records into a new instance, or
+ *   resume the jobs a restore paused. Answers with the new status.
  * - `GET /api/planet/backup/snapshots`: the instances and snapshots under `state/` in the bucket (`SnapshotListing`).
  * - `POST /api/planet/backup/restore`: a `RestoreRequest`; replaces this device's records with the snapshot. Fails
  *   with 409 `reason: "unsaved_changes"` when records in no snapshot would be lost, unless `replace_unsaved`, and
  *   with 409 `reason: "lease_conflict"` (and `lease`) when another device writes the instance's snapshots, unless
- *   `take_over` or `fork`.
+ *   `take_over` or `fork`, and with 409 `reason: "cluster_settings"` (and `cluster`) when the snapshot's gateway or
+ *   runtime image would replace this device's, unless `cluster_settings` keeps this device's or confirms them.
  * - `GET /api/planet/backup/export`: an encrypted snapshot of this device's records as a file.
  *
  * Errors carry `reason`, a backup error code (`@/planet/backup/errors`), or `bucket` when the bucket failed.

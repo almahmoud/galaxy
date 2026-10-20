@@ -9,6 +9,7 @@ import {
     describeCounts,
     formatSize,
     offersRestore,
+    rekeySummary,
 } from "./backup";
 
 afterEach(() => {
@@ -23,7 +24,18 @@ describe("backup status", () => {
         expect(backupState(backupStatus({ storage_configured: false }), false)).toBe("not_set_up");
         expect(
             backupState(
-                backupStatus({ lease: { state: "conflict", device_id: OTHER_DEVICE, renewed: null, checked: "" } }),
+                backupStatus({
+                    lease: { state: "conflict", device_id: OTHER_DEVICE, renewed: null, checked: "", jobs_start: null },
+                }),
+                false,
+            ),
+        ).toBe("conflict");
+        // Another device runs the instance's jobs even when this one has no passphrase.
+        expect(
+            backupState(
+                freshStatus({
+                    lease: { state: "conflict", device_id: OTHER_DEVICE, renewed: null, checked: "", jobs_start: null },
+                }),
                 false,
             ),
         ).toBe("conflict");
@@ -49,6 +61,20 @@ describe("backup status", () => {
         expect(backupSummary(freshStatus())).toMatch(/Choose a passphrase/);
         expect(backupSummary(backupStatus({ writer_active: false }))).toMatch(/while a Planet tab is open/);
         expect(backupSummary(backupStatus({ requested: true }))).toMatch(/being written/);
+    });
+
+    it("reports what happened to the snapshots of the old passphrase", () => {
+        const rekey = { mode: "reencrypt" as const, done: 0, skipped: 0, finished: null, last_error: null };
+        expect(rekeySummary(null)).toBeNull();
+        expect(rekeySummary(rekey)).toMatch(/re-encrypted after the next snapshot/);
+        expect(rekeySummary({ ...rekey, mode: "delete" })).toMatch(/deleted after the next snapshot/);
+        expect(rekeySummary({ ...rekey, done: 3, finished: "2026-10-13T12:00:00.000Z" })).toBe(
+            "3 older snapshots re-encrypted.",
+        );
+        expect(rekeySummary({ ...rekey, done: 1, skipped: 2, finished: "x" })).toBe(
+            "1 older snapshot re-encrypted. 2 older snapshots kept an earlier passphrase.",
+        );
+        expect(rekeySummary({ ...rekey, last_error: "Failed to fetch" })).toMatch(/could not be re-encrypted yet/);
     });
 
     it("formats sizes and counts", () => {
@@ -103,6 +129,19 @@ describe("browserBackupServices", () => {
             reason: "lease_conflict",
             lease: { device_id: OTHER_DEVICE },
         });
+    });
+
+    it("carries the snapshot's cluster settings of a cluster_settings refusal", async () => {
+        const cluster = { gateway_url: "https://k8s.example.org", runtime_image: "" };
+        stubFetch(
+            new Response(JSON.stringify({ err_msg: "Confirm them.", reason: "cluster_settings", cluster }), {
+                status: 409,
+            }),
+        );
+        const error = await browserBackupServices()
+            .restore({ file: new Uint8Array([1]) }, { passphrase: "p" })
+            .catch((caught: unknown) => caught);
+        expect(error).toMatchObject({ reason: "cluster_settings", cluster });
     });
 
     it("reports an unreachable Service Worker", async () => {

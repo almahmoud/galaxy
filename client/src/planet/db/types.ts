@@ -322,10 +322,9 @@ export interface CleanupPayload {
     multipart?: JobMultipartUpload[];
 }
 
-/** Payload of a `purge` entry: datasets whose bucket objects are deleted. */
+/** Payload of a `purge` entry: purged datasets whose bucket objects are deleted. */
 export interface PurgePayload {
     dataset_ids?: string[];
-    uuids?: string[];
 }
 
 /** Work for the leader tab (dispatch, cancel, cleanup, purge). */

@@ -13,6 +13,23 @@ import { fromBase64, fromUtf8, type KeyParams, PBKDF2_ITERATIONS, randomBytes, t
 
 export const MIN_PASSPHRASE_LENGTH = 12;
 export const MAX_PASSPHRASE_LENGTH = 1024;
+/** Passphrases with a lower {@link passphraseStrength} estimate are refused. */
+export const MIN_PASSPHRASE_BITS = 50;
+const STRONG_PASSPHRASE_BITS = 80;
+
+/** Words people put in passphrases first; each counts as a single guess. */
+const COMMON_WORDS = [
+    "password",
+    "passphrase",
+    "passwort",
+    "qwerty",
+    "azerty",
+    "letmein",
+    "welcome",
+    "planet",
+    "galaxy",
+];
+const COMMON_WORD_BITS = 10;
 
 const SALT_BYTES = 16;
 
@@ -21,6 +38,68 @@ export interface BackupKey extends KeyParams {
     key: CryptoKey;
     /** ISO 8601 UTC time the passphrase was set on this device. */
     created: string;
+}
+
+function poolSize(characters: readonly string[]): number {
+    const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[\x20-\x7e]/];
+    const sizes = [26, 26, 10, 33];
+    let size = 0;
+    let other = false;
+    const seen = new Set<number>();
+    for (const character of characters) {
+        const index = classes.findIndex((pattern) => pattern.test(character));
+        if (index < 0) {
+            other = true;
+        } else if (!seen.has(index)) {
+            seen.add(index);
+            size += sizes[index]!;
+        }
+    }
+    return size + (other ? 100 : 0);
+}
+
+/** The shortest unit `characters` repeats, and how often. */
+function repeatedUnit(characters: readonly string[]): { unit: string[]; count: number } {
+    for (let length = 1; length <= characters.length / 2; length++) {
+        if (characters.length % length === 0) {
+            const unit = characters.slice(0, length);
+            if (characters.every((character, index) => character === unit[index % length])) {
+                return { unit, count: characters.length / length };
+            }
+        }
+    }
+    return { unit: [...characters], count: 1 };
+}
+
+function sequenceBits(characters: readonly string[]): number {
+    let text = characters.join("");
+    let bits = 0;
+    for (const word of COMMON_WORDS) {
+        while (text.toLowerCase().includes(word)) {
+            const at = text.toLowerCase().indexOf(word);
+            text = `${text.slice(0, at)}\u0000${text.slice(at + word.length)}`;
+            bits += COMMON_WORD_BITS;
+        }
+    }
+    const rest = [...text].filter((character) => character !== "\u0000");
+    const perCharacter = Math.log2(Math.max(2, poolSize(rest)));
+    rest.forEach((character, index) => {
+        const previous = index > 0 ? rest[index - 1]!.codePointAt(0)! : null;
+        const step = previous === null ? Number.NaN : character.codePointAt(0)! - previous;
+        // Repeated characters and runs such as "abc" or "321" add little.
+        bits += Math.abs(step) <= 1 ? 1 : perCharacter;
+    });
+    return bits;
+}
+
+/**
+ * A rough estimate of how hard `passphrase` is to guess, in bits: characters count by the variety of the passphrase,
+ * repeated characters, runs, repetitions of a shorter unit and common words little. A guide, not a measurement.
+ */
+export function passphraseStrength(passphrase: string): { bits: number; level: "weak" | "fair" | "strong" } {
+    const { unit, count } = repeatedUnit([...passphrase.normalize("NFC")]);
+    const bits = Math.round(sequenceBits(unit) + Math.log2(count));
+    return { bits, level: bits < MIN_PASSPHRASE_BITS ? "weak" : bits < STRONG_PASSPHRASE_BITS ? "fair" : "strong" };
 }
 
 /** Why `passphrase` cannot be used, or null. */
@@ -34,6 +113,9 @@ export function passphraseProblem(passphrase: unknown): string | null {
     }
     if (length > MAX_PASSPHRASE_LENGTH) {
         return `Use at most ${MAX_PASSPHRASE_LENGTH} characters.`;
+    }
+    if (passphraseStrength(passphrase).level === "weak") {
+        return "This passphrase is easy to guess: avoid repeated characters, runs such as 1234 and common words. Several unrelated words work well.";
     }
     return null;
 }

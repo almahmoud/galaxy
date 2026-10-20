@@ -7,6 +7,7 @@ import {
     BackupApiError,
     type BackupStatus,
     type BucketInstance,
+    type ClusterEndpoints,
     describeCounts,
     errorText,
     formatSize,
@@ -33,6 +34,7 @@ const ids = {
     file: "pw-restore-file",
     passphrase: "pw-restore-passphrase",
     mode: "pw-restore-mode",
+    cluster: "pw-restore-cluster",
 };
 
 const root = ref<HTMLElement | null>(null);
@@ -50,6 +52,9 @@ const confirmTakeOver = ref(false);
 /** Set when the Service Worker refused because of unsaved records or another device's lease. */
 const askReplace = ref(false);
 const askTakeOver = ref<{ device_id: string; renewed: string } | null>(null);
+/** The snapshot's gateway and runtime image, once the Service Worker asked for a decision on them. */
+const askCluster = ref<ClusterEndpoints | null>(null);
+const clusterChoice = ref<"device" | "snapshot">("device");
 const restoring = ref(false);
 const error = ref("");
 const passphraseError = ref("");
@@ -60,7 +65,10 @@ const instance = computed<BucketInstance | null>(
 );
 
 function compatible(each: BucketInstance): boolean {
-    return each.latest === null || each.latest.schema_version === props.status.schema_version;
+    const version = each.latest?.schema_version;
+    return (
+        version === undefined || (version >= props.status.min_schema_version && version <= props.status.schema_version)
+    );
 }
 
 /** The lease holder of the chosen bucket instance when it is another device. */
@@ -96,6 +104,8 @@ watch([source, instanceId, snapshotName, file, mode], () => {
     error.value = "";
     askTakeOver.value = null;
     confirmTakeOver.value = false;
+    askCluster.value = null;
+    clusterChoice.value = "device";
 });
 
 watch(instanceId, () => {
@@ -139,11 +149,13 @@ async function restore() {
         } else {
             from = { file: await services.readFile(file.value!) };
         }
+        const cluster = askCluster.value;
         const restored = await services.restore(from, {
             passphrase: passphrase.value,
             fork: mode.value === "fork",
             replace_unsaved: askReplace.value && confirmReplace.value,
             take_over: needsTakeOver.value && confirmTakeOver.value,
+            ...(cluster ? { cluster_settings: clusterChoice.value === "snapshot" ? cluster : "device" } : {}),
         });
         result.value = restored;
         passphrase.value = "";
@@ -158,6 +170,9 @@ async function restore() {
         } else if (reason === "lease_conflict" && caught instanceof BackupApiError && caught.lease) {
             askTakeOver.value = caught.lease;
             confirmTakeOver.value = false;
+        } else if (reason === "cluster_settings" && caught instanceof BackupApiError && caught.cluster) {
+            askCluster.value = caught.cluster;
+            clusterChoice.value = "device";
         } else {
             error.value = errorText(caught);
         }
@@ -194,6 +209,10 @@ defineExpose({ start });
             <template v-if="result.failed_jobs">
                 {{ result.failed_jobs }} unfinished {{ result.failed_jobs === 1 ? "job was" : "jobs were" }} marked
                 failed; they continue with instance {{ result.source_instance_id }}.
+            </template>
+            <template v-if="result.parked_jobs">
+                {{ result.parked_jobs }} {{ result.parked_jobs === 1 ? "job waits" : "jobs wait" }} until you resume
+                restored jobs.
             </template>
             Reloading Planet…
         </div>
@@ -273,8 +292,8 @@ defineExpose({ start });
                             </span>
                             <span v-else class="pw-instance__meta">No snapshots.</span>
                             <span v-if="!compatible(each)" class="pw-instance__meta">
-                                Written by a Planet version with database schema {{ each.latest?.schema_version }}; this
-                                Planet restores schema {{ status.schema_version }}.
+                                Written by a newer Planet version (database schema {{ each.latest?.schema_version }});
+                                this Planet restores schemas up to {{ status.schema_version }}.
                             </span>
                             <span v-else-if="each.lease && !each.lease.this_device" class="pw-instance__meta">
                                 Written by another device, last on {{ formatTime(each.lease.renewed) }}.
@@ -340,8 +359,9 @@ defineExpose({ start });
                     <span>
                         <span class="pw-mode__title">{{ continueLabel }}</span>
                         <span class="pw-mode__help">
-                            For a new device or a browser that lost Planet's data. Jobs that were running continue, and
-                            this device writes the instance's snapshots from now on.
+                            For a new device or a browser that lost Planet's data. Jobs that were running continue; jobs
+                            that had not started wait until you resume them. This device runs the instance's jobs and
+                            writes its snapshots from now on.
                         </span>
                     </span>
                 </label>
@@ -351,7 +371,8 @@ defineExpose({ start });
                         <span class="pw-mode__title">Restore as a new instance</span>
                         <span class="pw-mode__help">
                             For a copy next to a device that keeps using the original instance. Jobs that had not
-                            finished stay with the original and are marked failed here.
+                            finished stay with the original and are marked failed here. Datasets in the snapshot stay
+                            shared with the original: purging them in either instance keeps their data in the bucket.
                         </span>
                     </span>
                 </label>
@@ -385,6 +406,32 @@ defineExpose({ start });
                     <label for="pw-restore-replace" class="custom-control-label">Replace this device's records</label>
                 </div>
             </div>
+
+            <fieldset v-if="askCluster" class="pw-confirm pw-cluster" aria-describedby="pw-restore-cluster-help">
+                <legend class="pw-instances__legend">Cluster settings in the snapshot</legend>
+                <p id="pw-restore-cluster-help" class="mb-2">
+                    The cluster token you enter next is sent to this gateway, and every job's data links go to this
+                    runtime image. Use them only if you recognize them.
+                </p>
+                <dl class="pw-cluster__values">
+                    <dt>Gateway</dt>
+                    <dd>
+                        <code>{{ askCluster.gateway_url || "none" }}</code>
+                    </dd>
+                    <dt>Runtime image</dt>
+                    <dd>
+                        <code>{{ askCluster.runtime_image || "this Planet's own" }}</code>
+                    </dd>
+                </dl>
+                <label class="pw-mode">
+                    <input v-model="clusterChoice" type="radio" :name="ids.cluster" value="device" />
+                    <span class="pw-mode__title">Keep this device's cluster settings</span>
+                </label>
+                <label class="pw-mode">
+                    <input v-model="clusterChoice" type="radio" :name="ids.cluster" value="snapshot" />
+                    <span class="pw-mode__title">Use the snapshot's gateway and runtime image</span>
+                </label>
+            </fieldset>
 
             <div class="pw-actions">
                 <button type="submit" class="btn btn-primary" :disabled="!ready">
@@ -501,6 +548,27 @@ defineExpose({ start });
     border-radius: 0.5rem;
     background: map-get(map-get($pw-tones, "warning"), "background");
     color: map-get(map-get($pw-tones, "warning"), "text");
+}
+
+.pw-cluster {
+    border: 0;
+}
+
+.pw-cluster__values {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    margin: 0 0 0.75rem;
+
+    dt {
+        font-weight: 600;
+    }
+
+    dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
 }
 
 .pw-restore__error {

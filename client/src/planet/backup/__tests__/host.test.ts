@@ -1,9 +1,9 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { leader } from "@/planet/db";
 import { Bus, fakeDeps, FakeKube, FakeLocks, FakeProtocol, resetDb, waitFor } from "@/planet/jobs/__tests__/fakes";
-import { type HostWindow, LeaderHost } from "@/planet/leader/host";
+import { type HostWindow, LeaderHost, type LeaseGate } from "@/planet/leader/host";
 
 import type { LeaderTask } from "../scheduler";
 
@@ -25,6 +25,14 @@ class RecordingTask implements LeaderTask {
 
 const hosts: LeaderHost[] = [];
 
+const allowAll: LeaseGate = {
+    start: () => undefined,
+    stop: async () => undefined,
+    problem: () => null,
+    refresh: async () => undefined,
+    subscribe: () => () => undefined,
+};
+
 function host(task: LeaderTask, locks = new FakeLocks(), bus = new Bus()) {
     const { deps } = fakeDeps();
     const created = new LeaderHost({
@@ -37,6 +45,7 @@ function host(task: LeaderTask, locks = new FakeLocks(), bus = new Bus()) {
         loadBuildRuntime: async () => ({ image: null, tagPullPolicy: "Always" }),
         manager: { onError: () => undefined },
         backup: task,
+        lease: allowAll,
     });
     hosts.push(created);
     return created;
@@ -60,6 +69,7 @@ describe("leader host backups", () => {
         const task = new RecordingTask();
         const first = host(task);
         first.start();
+        await vi.waitFor(() => expect(task.events).toHaveLength(1), { timeout: 10_000, interval: 10 });
         await settle();
         const epoch = await leader.currentEpoch();
         expect(task.events).toEqual([`start ${epoch}`]);

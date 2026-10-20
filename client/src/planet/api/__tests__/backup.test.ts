@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { leaseKey, readState, runBackup, toBase64 } from "@/planet/backup";
+import { leaseKey, readKey, readSnapshotFile, readState, restoreSnapshot, runBackup, toBase64 } from "@/planet/backup";
 import {
     configureStorage,
     MemoryBucket,
@@ -11,7 +11,7 @@ import {
     setPassphrase,
     unreachable,
 } from "@/planet/backup/__tests__/helpers";
-import { closeDb, kv, settings } from "@/planet/db";
+import { closeDb, jobs, kv, settings } from "@/planet/db";
 import { Router } from "@/planet/sw/router";
 import type { BackupStatus, SnapshotListing } from "@/planet/ui/lib/backup";
 import { closeEvents } from "@/planet/util/events";
@@ -63,6 +63,11 @@ async function snapshotNow(): Promise<void> {
 async function newDevice(): Promise<void> {
     await resetDb();
     await configureStorage(true);
+}
+
+/** Restores a snapshot file on this device, taking its instance over. */
+async function restoreSnapshotFrom(bytes: Uint8Array<ArrayBuffer>, passphrase: string): Promise<void> {
+    await restoreSnapshot(bytes, passphrase, { takeOver: true, replaceUnsaved: true });
 }
 
 beforeEach(async () => {
@@ -151,10 +156,98 @@ describe("POST /api/planet/backup", () => {
         expect((right.body as unknown as BackupStatus).passphrase.key_id).not.toBe(key.key_id);
     });
 
-    it("removes the passphrase", async () => {
+    it("removes the passphrase only with the current one", async () => {
         await setPassphrase();
-        const answer = await send(router(), "POST", "/api/planet/backup", { action: "remove_passphrase" });
+        const missing = await send(router(), "POST", "/api/planet/backup", { action: "remove_passphrase" });
+        expect(missing).toMatchObject({ status: 403, body: { reason: "wrong_passphrase" } });
+        const wrong = await send(router(), "POST", "/api/planet/backup", {
+            action: "remove_passphrase",
+            current_passphrase: "nope nope nope",
+        });
+        expect(wrong.status).toBe(403);
+        expect((await status()).passphrase.set).toBe(true);
+        const answer = await send(router(), "POST", "/api/planet/backup", {
+            action: "remove_passphrase",
+            current_passphrase: PASSPHRASE,
+        });
         expect((answer.body as unknown as BackupStatus).passphrase.set).toBe(false);
+    });
+
+    it("refuses passphrases that are easy to guess", async () => {
+        const answer = await send(router(), "POST", "/api/planet/backup", {
+            action: "set_passphrase",
+            passphrase: "aaaaaaaaaaaaaaaa",
+        });
+        expect(answer).toMatchObject({ status: 400, body: { reason: "weak_passphrase" } });
+    });
+
+    it("re-encrypts the snapshots of the old passphrase after a change", async () => {
+        await configureStorage(true);
+        await setPassphrase();
+        await seed();
+        await snapshotNow();
+        clock += 60_000;
+        await kv.set("preferences", { theme: "light" });
+        clock += 15 * 60_000;
+        await snapshotNow();
+        const instanceId = (await settings.getStored()).instance_id;
+        const prefix = `state/${instanceId}/snapshots/`;
+        const oldKeyId = (await readKey())!.key_id;
+        const NEW = "an entirely different passphrase";
+
+        const bad = await send(router(), "POST", "/api/planet/backup", {
+            action: "set_passphrase",
+            passphrase: NEW,
+            current_passphrase: PASSPHRASE,
+            older_snapshots: "shred",
+        });
+        expect(bad.status).toBe(400);
+        const changed = await send(router(), "POST", "/api/planet/backup", {
+            action: "set_passphrase",
+            passphrase: NEW,
+            current_passphrase: PASSPHRASE,
+            older_snapshots: "reencrypt",
+        });
+        expect(changed.body).toMatchObject({ rekey: { mode: "reencrypt", finished: null } });
+        clock += 60_000;
+        await snapshotNow();
+        const newKeyId = (await readKey())!.key_id;
+        const names = bucket.keys(prefix);
+        expect(names).toHaveLength(3);
+        for (const key of names) {
+            const file = readSnapshotFile(bucket.objects.get(key)!.slice());
+            expect(file.header.key_id).toBe(newKeyId);
+        }
+        expect(newKeyId).not.toBe(oldKeyId);
+        expect(await status()).toMatchObject({ rekey: { mode: "reencrypt", done: 2, skipped: 0 } });
+        expect((await status()).rekey?.finished).toEqual(expect.any(String));
+        expect(await kv.get("backup:previous_keys" as never)).toBeUndefined();
+        // The re-encrypted snapshots restore with the new passphrase on another device.
+        const oldest = bucket.objects.get(names[0]!)!.slice();
+        await newDevice();
+        await restoreSnapshotFrom(oldest, NEW);
+    });
+
+    it("deletes the snapshots of the old passphrase after a change when asked to", async () => {
+        const NEW = "an entirely different passphrase";
+        await configureStorage(true);
+        await setPassphrase();
+        await seed();
+        await snapshotNow();
+        const deleted = await send(router(), "POST", "/api/planet/backup", {
+            action: "set_passphrase",
+            passphrase: NEW,
+            current_passphrase: PASSPHRASE,
+            older_snapshots: "delete",
+        });
+        expect(deleted.status).toBe(200);
+        clock += 60_000;
+        await snapshotNow();
+        const remaining = bucket.keys(`state/${(await settings.getStored()).instance_id}/snapshots/`);
+        expect(remaining).toHaveLength(1);
+        expect(readSnapshotFile(bucket.objects.get(remaining[0]!)!.slice()).header.key_id).toBe(
+            (await readKey())!.key_id,
+        );
     });
 
     it("asks the leading tab for a snapshot", async () => {
@@ -170,9 +263,10 @@ describe("POST /api/planet/backup", () => {
         expect(answer).toMatchObject({ status: 200, body: { requested: true } });
     });
 
-    it("takes the lease over or forks a new instance", async () => {
+    it("takes the lease over, also without a passphrase, or forks a new instance", async () => {
+        const unset = await send(router(), "POST", "/api/planet/backup", { action: "take_over" });
+        expect(unset).toMatchObject({ status: 409, body: { reason: "not_configured" } });
         await configureStorage(true);
-        await setPassphrase();
         await seed();
         const taken = await send(router(), "POST", "/api/planet/backup", { action: "take_over" });
         expect(taken.status).toBe(200);
@@ -182,7 +276,34 @@ describe("POST /api/planet/backup", () => {
         const forked = await send(router(), "POST", "/api/planet/backup", { action: "fork" });
         expect(forked.status).toBe(200);
         expect(forked.body).toMatchObject({ instance_id: "0badc0de", requested: true, local: { unfinished_jobs: 0 } });
-        expect(await kv.get("instance_fork" as never)).toMatchObject({ from: before, to: "0badc0de" });
+        expect(await kv.get("instance_fork" as never)).toMatchObject({
+            from: before,
+            to: "0badc0de",
+            registered: true,
+        });
+        expect(bucket.json(`state/${before}/forks/0badc0de.json`)).toMatchObject({ from: before, to: "0badc0de" });
+    });
+
+    it("resumes the jobs a restore paused", async () => {
+        await configureStorage(true);
+        await setPassphrase();
+        const { historyId } = await seed();
+        const pending = await jobs.create({ tool_id: "cat1", tool_version: "1.0.0", history_id: historyId });
+        await snapshotNow();
+        const instanceId = (await settings.getStored()).instance_id;
+        const snapshot = bucket.objects.get(bucket.keys(`state/${instanceId}/snapshots/`)[0]!)!.slice();
+        await newDevice();
+        const restored = await send(router(), "POST", "/api/planet/backup/restore", {
+            passphrase: PASSPHRASE,
+            snapshot: toBase64(snapshot),
+            take_over: true,
+        });
+        expect(restored.body).toMatchObject({ parked_jobs: 1 });
+        expect(await status()).toMatchObject({ parked_jobs: 1 });
+        expect((await jobs.get(pending.id))?.state).toBe("paused");
+        const resumed = await send(router(), "POST", "/api/planet/backup", { action: "resume_restored_jobs" });
+        expect(resumed.body).toMatchObject({ parked_jobs: 0 });
+        expect((await jobs.get(pending.id))?.state).toBe("new");
     });
 
     it("refuses unknown actions and bodies that are not JSON objects", async () => {
@@ -315,12 +436,28 @@ describe("POST /api/planet/backup/restore", () => {
         );
         const file = new Uint8Array(await response.arrayBuffer());
         await resetDb();
+        const request = { passphrase: PASSPHRASE, snapshot: toBase64(file) };
+        // This device has no cluster settings; the snapshot's gateway is shown before it is used.
+        const asked = await send(router(), "POST", "/api/planet/backup/restore", request);
+        expect(asked).toMatchObject({
+            status: 409,
+            body: {
+                reason: "cluster_settings",
+                cluster: { gateway_url: "https://k8s.planet.test", runtime_image: "" },
+            },
+        });
+        const malformed = await send(router(), "POST", "/api/planet/backup/restore", {
+            ...request,
+            cluster_settings: { gateway_url: "https://k8s.planet.test" },
+        });
+        expect(malformed.status).toBe(400);
         const answer = await send(router(), "POST", "/api/planet/backup/restore", {
-            passphrase: PASSPHRASE,
-            snapshot: toBase64(file),
+            ...request,
+            cluster_settings: { gateway_url: "https://k8s.planet.test", runtime_image: "" },
         });
         expect(answer.status).toBe(200);
         expect((await status()).local.has_content).toBe(true);
+        expect((await settings.get()).cluster.gateway_url).toBe("https://k8s.planet.test");
     });
 
     it("explains a wrong passphrase, a damaged file and a missing snapshot", async () => {

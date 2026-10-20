@@ -22,8 +22,9 @@ export interface BackupStatus {
     storage_configured: boolean;
     instance_id: string;
     device_id: string;
-    /** IndexedDB schema version of this build; only snapshots of the same version can be restored. */
+    /** IndexedDB schema version of this build; snapshots from `min_schema_version` to it can be restored. */
     schema_version: number;
+    min_schema_version: number;
     interval_minutes: number;
     /** Snapshots kept per instance. */
     keep: number;
@@ -33,12 +34,31 @@ export interface BackupStatus {
     last_error: { message: string; time: string } | null;
     /** A snapshot was requested and not written yet. */
     requested: boolean;
-    /** The lease as this device last read it: `conflict` when another device writes the instance's snapshots. */
-    lease: { state: "held" | "conflict"; device_id: string; renewed: string | null; checked: string } | null;
+    /**
+     * The lease as this device last read it: `conflict` when another device runs the instance's jobs and writes its
+     * snapshots. `jobs_start`: after this device took the lease over, when its jobs start.
+     */
+    lease: {
+        state: "held" | "conflict";
+        device_id: string;
+        renewed: string | null;
+        checked: string;
+        jobs_start: string | null;
+    } | null;
     /** A Planet tab leads job processing, so snapshots are written. */
     writer_active: boolean;
     local: { has_content: boolean; unfinished_jobs: number };
     restored: { instance_id: string; created: string; time: string; forked_to: string | null } | null;
+    /** Restored jobs that wait for `resume_restored_jobs`. */
+    parked_jobs: number;
+    /** Work on the snapshots of the previous passphrase after a change. */
+    rekey: {
+        mode: "reencrypt" | "delete";
+        done: number;
+        skipped: number;
+        finished: string | null;
+        last_error: string | null;
+    } | null;
 }
 
 export interface BucketSnapshot {
@@ -72,13 +92,28 @@ export interface SnapshotListing {
     truncated: boolean;
 }
 
+/** What a passphrase change does with the snapshots written with the old passphrase. */
+export type OlderSnapshots = "reencrypt" | "delete" | "keep";
+
 /** Body of `POST /api/planet/backup`. */
 export type BackupAction =
     | { action: "snapshot" }
-    | { action: "set_passphrase"; passphrase: string; current_passphrase?: string }
-    | { action: "remove_passphrase" }
+    | {
+          action: "set_passphrase";
+          passphrase: string;
+          current_passphrase?: string;
+          older_snapshots?: OlderSnapshots;
+      }
+    | { action: "remove_passphrase"; current_passphrase: string }
     | { action: "take_over" }
-    | { action: "fork" };
+    | { action: "fork" }
+    | { action: "resume_restored_jobs" };
+
+/** The cluster gateway and runtime image a snapshot names. */
+export interface ClusterEndpoints {
+    gateway_url: string;
+    runtime_image: string;
+}
 
 /** Where a restore reads its snapshot from. */
 export type RestoreSource = { file: Uint8Array } | { bucket: { instance_id: string; name: string } };
@@ -91,6 +126,8 @@ export interface RestoreOptions {
     replace_unsaved?: boolean;
     /** Continue the instance here although another device holds its lease. */
     take_over?: boolean;
+    /** Keep this device's gateway and runtime image, or take the snapshot's the user was shown. */
+    cluster_settings?: "device" | ClusterEndpoints;
 }
 
 /** Body of `POST /api/planet/backup/restore`: `snapshot` (the file as base64) or `bucket`. */
@@ -105,20 +142,33 @@ export interface RestoreResponse {
     created: string;
     forked: boolean;
     failed_jobs: number;
+    /** Jobs paused until the user resumes restored jobs. */
+    parked_jobs: number;
     counts: Record<string, number>;
 }
 
-/** Why a backup request failed: `reason` is a backup error code; `lease` comes with `lease_conflict`. */
+/**
+ * Why a backup request failed: `reason` is a backup error code; `lease` comes with `lease_conflict`, `cluster` with
+ * `cluster_settings`.
+ */
 export class BackupApiError extends PlanetApiError {
     constructor(
         status: number,
         message: string,
         readonly reason: string | null,
         readonly lease: { device_id: string; renewed: string } | null = null,
+        readonly cluster: ClusterEndpoints | null = null,
     ) {
         super(status, message);
         this.name = "BackupApiError";
     }
+}
+
+function clusterOf(value: unknown): ClusterEndpoints | null {
+    const cluster = value as Partial<ClusterEndpoints> | null | undefined;
+    return typeof cluster?.gateway_url === "string" && typeof cluster.runtime_image === "string"
+        ? { gateway_url: cluster.gateway_url, runtime_image: cluster.runtime_image }
+        : null;
 }
 
 function leaseOf(value: unknown): { device_id: string; renewed: string } | null {
@@ -133,12 +183,14 @@ async function failure(response: Response): Promise<BackupApiError> {
         err_msg?: unknown;
         reason?: unknown;
         lease?: unknown;
+        cluster?: unknown;
     } | null;
     return new BackupApiError(
         response.status,
         typeof envelope?.err_msg === "string" ? envelope.err_msg : `Planet answered with HTTP ${response.status}.`,
         typeof envelope?.reason === "string" ? envelope.reason : null,
         leaseOf(envelope?.lease),
+        clusterOf(envelope?.cluster),
     );
 }
 
@@ -302,11 +354,11 @@ export function backupState(status: BackupStatus | null, failed: boolean): Backu
     if (!status) {
         return failed ? "unavailable" : "loading";
     }
+    if (status.storage_configured && status.lease?.state === "conflict") {
+        return "conflict";
+    }
     if (!status.passphrase.set || !status.storage_configured) {
         return "not_set_up";
-    }
-    if (status.lease?.state === "conflict") {
-        return "conflict";
     }
     if (status.last_error) {
         return "error";
@@ -327,11 +379,11 @@ export function backupSummary(status: BackupStatus): string {
     if (!status.storage_configured) {
         return "Set up the storage bucket; snapshots are written there.";
     }
+    if (status.lease?.state === "conflict") {
+        return "Another device runs this instance's jobs and writes its snapshots, so this device does neither.";
+    }
     if (!status.passphrase.set) {
         return "Choose a passphrase to encrypt snapshots of Planet's records in your bucket.";
-    }
-    if (status.lease?.state === "conflict") {
-        return "Another device writes this instance's snapshots, so this device does not.";
     }
     const last = status.last_snapshot
         ? `Last snapshot ${formatTime(status.last_snapshot.time)}, ${formatSize(status.last_snapshot.size)}.`
@@ -343,6 +395,24 @@ export function backupSummary(status: BackupStatus): string {
         return `${last} A snapshot is being written.`;
     }
     return `${last} Checked for changes every ${status.interval_minutes} minutes.`;
+}
+
+/** "Older snapshots were re-encrypted" and the like, or null when there is nothing to report. */
+export function rekeySummary(rekey: BackupStatus["rekey"]): string | null {
+    if (!rekey) {
+        return null;
+    }
+    const count = (n: number) => (n === 1 ? "1 older snapshot" : `${n} older snapshots`);
+    if (rekey.last_error) {
+        return `Older snapshots could not be ${rekey.mode === "delete" ? "deleted" : "re-encrypted"} yet: ${rekey.last_error}`;
+    }
+    if (!rekey.finished) {
+        return rekey.mode === "delete"
+            ? "Snapshots of the old passphrase are deleted after the next snapshot."
+            : "Snapshots of the old passphrase are re-encrypted after the next snapshot.";
+    }
+    const done = rekey.mode === "delete" ? `${count(rekey.done)} deleted.` : `${count(rekey.done)} re-encrypted.`;
+    return rekey.skipped ? `${done} ${count(rekey.skipped)} kept an earlier passphrase.` : done;
 }
 
 /** The message to show for a failed request. */

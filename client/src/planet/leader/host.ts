@@ -1,13 +1,14 @@
 /**
- * Runs job processing in a Planet tab: joins the leader election and, while this tab leads and the cluster and
- * storage settings are complete, runs a {@link JobManager}. Settings changes restart it; visibility and network
- * changes trigger a reconciliation. The leader keeps the status record (`kv` `leader_status`) current. Without its
- * build's runtime data (`runtime.json`) a leader runs no jobs and tries again every {@link RUNTIME_RETRY_MS}. While
- * it leads, the tab also writes the bucket snapshots of `@/planet/backup`.
+ * Runs job processing in a Planet tab: joins the leader election and, while this tab leads, the cluster and storage
+ * settings are complete and this device holds the instance's lease (`InstanceLease`), runs a {@link JobManager}.
+ * Settings and lease changes restart or stop it; visibility and network changes trigger a reconciliation. The leader
+ * keeps the status record (`kv` `leader_status`) current. Without its build's runtime data (`runtime.json`) a leader
+ * runs no jobs and tries again every {@link RUNTIME_RETRY_MS}. While it leads, the tab also writes the bucket
+ * snapshots of `@/planet/backup`.
  */
 
-import { BackupScheduler, type LeaderTask } from "@/planet/backup";
-import { settings } from "@/planet/db";
+import { BackupScheduler, InstanceLease, type LeaderTask } from "@/planet/backup";
+import { LeaseFenceError, settings, type StoredSettings } from "@/planet/db";
 import { resolveToolImage } from "@/planet/jobs/containers";
 import { createJobDeps, type JobDeps, type JobDepsOptions } from "@/planet/jobs/deps";
 import { errorMessage } from "@/planet/jobs/failures";
@@ -48,11 +49,24 @@ export interface LeaderHostOptions {
     manager?: Partial<Pick<JobManagerOptions, "now" | "sleep" | "onError">>;
     /** Writes bucket snapshots while this tab leads; defaults to a `BackupScheduler`, null turns snapshots off. */
     backup?: LeaderTask | null;
+    /** Tells whether this device may run the instance's jobs; defaults to an `InstanceLease` (tests replace it). */
+    lease?: LeaseGate;
+}
+
+/** What the host needs of an `InstanceLease`. */
+export interface LeaseGate extends LeaderTask {
+    /** Why this device may not run `stored`'s jobs now, or null. */
+    problem(stored: StoredSettings): string | null;
+    /** Reads the lease again. */
+    refresh(): Promise<void>;
+    /** Calls `listener` whenever what `problem` answers may have changed. */
+    subscribe(listener: () => void): () => void;
 }
 
 export class LeaderHost {
     readonly election: LeaderElection;
     private readonly backup: LeaderTask | null;
+    private readonly lease: LeaseGate;
     private current: JobManager | null = null;
     private status: LeaderStatus | null = null;
     private controller: AbortController | null = null;
@@ -77,6 +91,12 @@ export class LeaderHost {
 
     constructor(private readonly options: LeaderHostOptions) {
         this.backup = options.backup === undefined ? new BackupScheduler() : options.backup;
+        this.lease = options.lease ?? new InstanceLease();
+        this.lease.subscribe(() => {
+            if (this.election.isLeader) {
+                void this.enqueue(() => this.applyLease());
+            }
+        });
         this.election = new LeaderElection({
             locks: options.locks,
             channel: options.channel,
@@ -86,12 +106,17 @@ export class LeaderHost {
                     console.warn(`Planet job status: ${errorMessage(error)}`),
                 );
                 this.backup?.start(epoch);
+                this.lease.start(epoch);
                 return this.enqueue(() => this.startManager());
             },
             // The election installs this tab's next fence only once this resolves, after the manager stopped.
             onDemote: () => {
                 this.status = null;
-                return Promise.all([this.backup?.stop(), this.enqueue(() => this.stopManager())]).then(() => undefined);
+                return Promise.all([
+                    this.backup?.stop(),
+                    this.lease.stop(),
+                    this.enqueue(() => this.stopManager()),
+                ]).then(() => undefined);
             },
             onOutdated: (error) => console.warn(`Planet: ${error.message}`),
             onHeartbeat: (epoch) => {
@@ -192,6 +217,12 @@ export class LeaderHost {
             this.retryLater(epoch);
             return;
         }
+        // The lease's next check starts the manager once it allows it.
+        const leaseProblem = this.lease.problem(stored);
+        if (leaseProblem) {
+            await status?.setBlocked(leaseProblem);
+            return;
+        }
         const controller = new AbortController();
         const runtime = runtimeImage(stored.cluster, build.image);
         const deps = await (this.options.createDeps ?? createJobDeps)({
@@ -221,7 +252,14 @@ export class LeaderHost {
             buildRuntimeImage: build.image,
             runtimeTagPullPolicy: build.tagPullPolicy,
             epoch,
-            onFenced: () => void this.enqueue(() => this.stopManager()),
+            leaseProblem: () => this.lease.problem(stored),
+            onFenced: (error) => {
+                void this.enqueue(() => this.stopManager());
+                if (error instanceof LeaseFenceError) {
+                    void status?.setBlocked(error.message);
+                    void this.lease.refresh();
+                }
+            },
             onError: (error, context, jobId) => {
                 if (onError) {
                     onError(error, context, jobId);
@@ -235,6 +273,22 @@ export class LeaderHost {
         });
         this.current.start();
         void status?.setBlocked(null);
+    }
+
+    /** Stops the manager when the lease no longer allows it, and starts it when the lease now does. */
+    private async applyLease(): Promise<void> {
+        if (!this.election.isLeader) {
+            return;
+        }
+        if (!this.current) {
+            await this.startManager();
+            return;
+        }
+        const problem = this.lease.problem(await settings.getStored());
+        if (problem) {
+            await this.stopManager();
+            await this.status?.setBlocked(problem);
+        }
     }
 
     /** Starts the manager again later, if this tab still leads with `epoch` and runs none. */

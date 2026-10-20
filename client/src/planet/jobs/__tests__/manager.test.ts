@@ -12,6 +12,7 @@ import {
     jobs,
     kv,
     leader,
+    LeaseFenceError,
     outbox,
     setLeaderFence,
     settings,
@@ -19,6 +20,7 @@ import {
     withTransaction,
 } from "@/planet/db";
 import { KubeError } from "@/planet/k8s";
+import { parseGalaxyTime } from "@/planet/util/time";
 
 import { addOutput, addUpload, type FakeS3, testDeps } from "../__fixtures__/setup";
 import type { JobDeps } from "../deps";
@@ -66,12 +68,19 @@ interface Harness {
     errors: unknown[];
     stored: StoredSettings;
     fenced: number[];
+    fencedErrors: unknown[];
     clock: { now: number };
     settle(): Promise<void>;
 }
 
 async function start(
-    setup: { kube?: FakeKube; protocol?: FakeProtocol | JobProtocol; deps?: JobDeps; epoch?: number } = {},
+    setup: {
+        kube?: FakeKube;
+        protocol?: FakeProtocol | JobProtocol;
+        deps?: JobDeps;
+        epoch?: number;
+        leaseProblem?: () => string | null;
+    } = {},
 ): Promise<Harness> {
     const kube = setup.kube ?? new FakeKube();
     const protocol = setup.protocol ?? new FakeProtocol();
@@ -81,6 +90,7 @@ async function start(
     const stored = await settings.getStored();
     const errors: unknown[] = [];
     const fenced: number[] = [];
+    const fencedErrors: unknown[] = [];
     const clock = { now: Date.now() };
     const created = new JobManager({
         kube,
@@ -88,9 +98,13 @@ async function start(
         protocol,
         settings: stored,
         epoch: setup.epoch,
+        leaseProblem: setup.leaseProblem,
         now: () => Math.max(clock.now, Date.now()),
         onError: (error) => errors.push(error),
-        onFenced: () => fenced.push(1),
+        onFenced: (error) => {
+            fenced.push(1);
+            fencedErrors.push(error);
+        },
     });
     manager = created;
     const settle = async () => {
@@ -101,7 +115,18 @@ async function start(
     };
     created.start();
     await settle();
-    return { manager: created, kube, protocol: protocol as FakeProtocol, s3, stored, errors, fenced, clock, settle };
+    return {
+        manager: created,
+        kube,
+        protocol: protocol as FakeProtocol,
+        s3,
+        stored,
+        errors,
+        fenced,
+        fencedErrors,
+        clock,
+        settle,
+    };
 }
 
 async function jobState(id: string) {
@@ -968,7 +993,8 @@ describe("outbox maintenance", () => {
         expect(harness.s3.listObjects).toHaveBeenCalledWith(`datasets/${dataset.uuid}/`, {
             continuationToken: undefined,
         });
-        expect(harness.s3.listObjects).toHaveBeenCalledTimes(1);
+        // The dataset's prefix and the markers of forks of this instance.
+        expect(harness.s3.listObjects).toHaveBeenCalledTimes(2);
         expect(harness.s3.abortMultipartUpload).toHaveBeenCalledWith("datasets/u/data", "up1");
         expect(harness.kube.deleted).toEqual([ours]);
         expect(await outbox.list()).toEqual([]);
@@ -993,12 +1019,12 @@ describe("purging datasets", () => {
         const kube = new FakeKube();
         const { deps, s3 } = fakeDeps();
         const keys = [`datasets/${dataset.uuid}/data`, `datasets/${dataset.uuid}/meta.json`];
-        s3.listObjects.mockResolvedValueOnce({
-            objects: keys.map((key) => ({ key })),
+        s3.listObjects.mockImplementation((async (prefix: string) => ({
+            objects: prefix === `datasets/${dataset.uuid}/` ? keys.map((key) => ({ key })) : [],
             commonPrefixes: [],
             isTruncated: false,
             nextContinuationToken: null,
-        } as never);
+        })) as never);
         await start({ kube, deps });
         expect(s3.listObjects).toHaveBeenCalledWith(`datasets/${dataset.uuid}/`, { continuationToken: undefined });
         expect(s3.deleteObject.mock.calls.map(([key]) => key)).toEqual(keys);
@@ -1057,6 +1083,125 @@ describe("purging outputs of jobs that may still write them", () => {
         clock.now = Date.now() + POD_GONE_MS + 1000;
         await running.drainOutbox();
         expect(listedPrefixes(s3)).toContain(prefix);
+    });
+});
+
+describe("forks", () => {
+    async function purgedDataset(name: string) {
+        const { history } = await seedHistory();
+        const { dataset } = await hdas.createWithDataset({ history_id: history.id, name }, { state: "ok" });
+        await datasets.update(dataset.id, { purged: true, deleted: true });
+        return (await datasets.get(dataset.id))!;
+    }
+
+    function deletedPrefixes(s3: ReturnType<typeof fakeDeps>["s3"]): string[] {
+        return s3.listObjects.mock.calls
+            .map((call) => (call as unknown as [string])[0])
+            .filter((prefix) => prefix.startsWith("datasets/"));
+    }
+
+    it("keeps the objects of datasets a fork shares with its origin", async () => {
+        const shared = await purgedDataset("before the fork");
+        const instanceId = (await settings.getStored()).instance_id;
+        await kv.set(
+            "instance_fork" as never,
+            {
+                from: "a1b2c3d4",
+                to: instanceId,
+                time: shared.create_time,
+                clock: parseGalaxyTime(shared.create_time),
+            } as never,
+        );
+        const own = await purgedDataset("after the fork");
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: [shared.id, own.id] } });
+        const { s3 } = await start();
+        expect(deletedPrefixes(s3)).toEqual([`datasets/${own.uuid}/`]);
+        expect(await outbox.list()).toEqual([]);
+    });
+
+    it("keeps the objects of datasets a fork of this instance shares", async () => {
+        const shared = await purgedDataset("before the fork");
+        const own = await purgedDataset("after the fork");
+        const instanceId = (await settings.getStored()).instance_id;
+        const { deps, s3 } = fakeDeps();
+        const marker = `state/${instanceId}/forks/0badc0de.json`;
+        s3.listObjects.mockImplementation((async (prefix: string) => ({
+            objects: prefix === `state/${instanceId}/forks/` ? [{ key: marker }] : [],
+            commonPrefixes: [],
+            isTruncated: false,
+            nextContinuationToken: null,
+        })) as never);
+        (s3 as unknown as Record<string, unknown>).getObject = async (key: string) =>
+            new Response(
+                JSON.stringify({
+                    format: "planet-instance-fork",
+                    version: 1,
+                    from: instanceId,
+                    to: "0badc0de",
+                    time: shared.create_time,
+                    clock: parseGalaxyTime(shared.create_time),
+                }),
+                { headers: { "x-key": key } },
+            );
+        await outbox.enqueue({ kind: "purge", payload: { dataset_ids: [shared.id, own.id] } });
+        await start({ deps });
+        expect(deletedPrefixes(s3)).toEqual([`datasets/${own.uuid}/`]);
+    });
+
+    it("ignores purges by uuid", async () => {
+        const dataset = await purgedDataset("named by uuid");
+        await outbox.enqueue({ kind: "purge", payload: { uuids: [dataset.uuid] } as never });
+        const { s3 } = await start();
+        expect(deletedPrefixes(s3)).toEqual([]);
+        expect(await outbox.list()).toEqual([]);
+    });
+});
+
+describe("the instance lease", () => {
+    it("writes nothing to the cluster or the bucket while the lease does not allow it", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id]);
+        let problem: string | null = "Another device runs jobs for this instance.";
+        const { kube, fenced, fencedErrors, manager: running, settle } = await start({ leaseProblem: () => problem });
+        expect(kube.created).toEqual([]);
+        expect(fenced.length).toBeGreaterThan(0);
+        expect(fencedErrors[0]).toBeInstanceOf(LeaseFenceError);
+        expect((fencedErrors[0] as Error).message).toBe("Another device runs jobs for this instance.");
+        expect(await jobState(job.id)).toBe("new");
+
+        problem = null;
+        await running.reconcile();
+        await settle();
+        expect(kube.created).toHaveLength(1);
+    });
+
+    it("never deletes Kubernetes Jobs of other instances", async () => {
+        const { history, input } = await seedHistory();
+        const { job } = await seedJob(history.id, [input.id], { enqueue: false });
+        await jobs.update(job.id, {
+            state: "deleting",
+            k8s: {
+                namespace: "planet",
+                name: "planet-ffffffff-0123456789abcdef-a1",
+                uid: null,
+                attempt: 1,
+                spec_hash: null,
+                pod_name: null,
+                node_name: null,
+                image: null,
+                kind: "tool",
+                created: null,
+                prepared: false,
+                tool_termination: null,
+                multipart: [],
+            },
+        });
+        const { kube, errors } = await start();
+        expect(kube.deleted).toEqual([]);
+        expect(await jobState(job.id)).toBe("deleted");
+        expect(errors.map((error) => String(error))).toContainEqual(
+            expect.stringMatching(/not one of this instance's/),
+        );
     });
 });
 

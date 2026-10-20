@@ -32,6 +32,7 @@ import {
 } from "@/planet/db";
 import type { NewCollectionTree, NewElement } from "@/planet/db/collections";
 import { ingestToolInstall } from "@/planet/install/ingest";
+import { isNotFound } from "@/planet/s3";
 
 import type { JobDeps } from "./deps";
 import { datasetObjectKeys, jobObjectKeys, metadataFileKey } from "./keys";
@@ -416,7 +417,9 @@ export async function ingestResults(job: JobRecord, deps: JobDeps): Promise<Inge
 
 /**
  * Completes the multipart uploads the pod used and aborts the others, and those of purged datasets; returns errors by
- * output name.
+ * output name. A completed object must have the size the pod reports: an upload completed by an earlier ingest (one
+ * whose records were lost, then restored from a snapshot) answers NoSuchUpload, and only its object's size shows that
+ * it holds the pod's data.
  */
 async function settleMultipart(
     deps: JobDeps,
@@ -444,10 +447,29 @@ async function settleMultipart(
             }
             const reason = error instanceof Error ? error.message : String(error);
             errors.set(upload.output, `The dataset's data could not be stored: ${redactSignedUrls(reason)}`);
+            continue;
+        }
+        const problem = await sizeProblem(deps, upload.key, data.size);
+        if (problem) {
+            errors.set(upload.output, `The dataset's data could not be stored: ${problem}`);
         }
     }
     await abortMultipartUploads(deps.s3, unused, deps.signal);
     return errors;
+}
+
+/** Why the object at `key` does not hold `size` bytes, or null when it does. Other failures throw (ingest retries). */
+async function sizeProblem(deps: JobDeps, key: string, size: number): Promise<string | null> {
+    let stored: number | null;
+    try {
+        stored = (await deps.s3.headObject(key, { signal: deps.signal })).contentLength;
+    } catch (error) {
+        if (isNotFound(error)) {
+            return "the completed object is missing from the bucket";
+        }
+        throw error;
+    }
+    return stored === size ? null : `the bucket holds ${stored ?? "an unknown number of"} bytes, the job wrote ${size}`;
 }
 
 interface ResultsContext {
