@@ -7,6 +7,7 @@ from the bucket. A pod never calls the browser.
 
 JSON Schemas: [`planet/runtime/schemas/`](../runtime/schemas): `manifest`,
 `prepare` and `results` (draft 2020-12). This page describes protocol version 1.
+[Architecture](architecture.md#data-flows) shows where the protocol fits in a tool run.
 
 ## Objects
 

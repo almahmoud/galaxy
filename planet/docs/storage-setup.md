@@ -13,7 +13,7 @@ All objects live under the prefix set in Planet:
 | `<prefix>/jobs/` | job manifests, results and logs | deleted after 60 days |
 | `<prefix>/uploads/` | uploads in progress | deleted after 7 days |
 | `<prefix>/tools/` | installed tool bundles | kept |
-| `<prefix>/state/` | encrypted snapshots of the browser's database | kept |
+| `<prefix>/state/` | encrypted snapshots of the browser's database, the instance lease and fork markers | kept |
 
 Incomplete multipart uploads are aborted after 30 days (7 days under `uploads/`). Job outputs
 larger than 4.99 GiB are multipart uploads that Planet completes when it collects the job, which

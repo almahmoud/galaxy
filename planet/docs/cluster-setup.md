@@ -162,6 +162,8 @@ new one.
 
 ## Security
 
+[Security](security.md) describes Planet's security model as a whole.
+
 **Token.** It can create, read, list, watch and delete Jobs, read pods and their logs, and list
 events in the namespace, nothing else. Whoever holds it can run containers in the namespace
 within the quota.
