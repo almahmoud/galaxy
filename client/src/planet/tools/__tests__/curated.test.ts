@@ -2,10 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { fetchJson, resetPlanet, send, teardownPlanet } from "../../api/__tests__/contents.fixtures";
+import type { ToolBundle } from "../bundle";
+import { isCollectionOperation } from "../operations";
 import {
     formDataFromModel,
     generatedBundlePaths,
     hasGeneratedData,
+    type HistoryFixture,
     makeToolRouter,
     readGenerated,
     seedHistory,
@@ -28,6 +31,16 @@ const UNSATISFIED: Record<string, string[]> = {
     column_order_header_sort: ["key_column"],
 };
 
+/**
+ * Inputs set instead of the form's defaults. Galaxy's initial collection is the newest one whose datasets match,
+ * whatever its type, and the test history's newest collection is a list.
+ */
+const OVERRIDES: Record<string, (fixture: HistoryFixture) => Record<string, unknown>> = {
+    __UNZIP_COLLECTION__: (fixture) => ({
+        input: { values: [{ id: fixture.readsPair.id, src: "hdca" }], batch: false },
+    }),
+};
+
 beforeEach(async () => {
     await resetPlanet();
     stubData();
@@ -42,7 +55,7 @@ describe.skipIf(!available)("curated tool bundles", () => {
     });
 
     it.each(paths)("builds, refreshes, runs, summarizes and reruns %s", async (path) => {
-        const bundle = readGenerated<{ id: string; old_id: string; version: string; inputs: unknown[] }>(path);
+        const bundle = readGenerated<ToolBundle>(path);
         const fixture = await seedHistory();
         const router = makeToolRouter();
         const query = `tool_version=${encodeURIComponent(bundle.version)}&history_id=${fixture.historyId}`;
@@ -63,7 +76,7 @@ describe.skipIf(!available)("curated tool bundles", () => {
         });
         expect(Object.values(form.errors).every((message) => typeof message === "string")).toBe(true);
 
-        const inputs = formDataFromModel(form.inputs);
+        const inputs = { ...formDataFromModel(form.inputs), ...OVERRIDES[bundle.old_id]?.(fixture) };
         const refreshed = await fetchJson<Model>(router, "POST", `/api/tools/${bundle.id}/build`, {
             tool_id: bundle.id,
             tool_version: bundle.version,
@@ -93,8 +106,12 @@ describe.skipIf(!available)("curated tool bundles", () => {
         }
         expect(response.status, JSON.stringify(body)).toBe(200);
         expect(body.jobs).toHaveLength(1);
+        // Collection operations run in the Service Worker; their dataset outputs are copies of the inputs.
+        const created = isCollectionOperation({ tool: bundle })
+            ? { state: "ok" }
+            : { state: "new", misc_blurb: "queued" };
         for (const output of body.outputs) {
-            expect(output).toMatchObject({ state: "new", misc_blurb: "queued" });
+            expect(output).toMatchObject(created);
             expect(typeof output.hid).toBe("number");
             expect(output.name).toBeTruthy();
             expect(output.file_ext).toBeTruthy();

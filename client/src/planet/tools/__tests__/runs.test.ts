@@ -1,12 +1,15 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { collections, hdas, histories, jobs, outbox } from "@/planet/db";
+import { collections, hdas, histories, jobs, outbox, tools } from "@/planet/db";
+import { installSlotKeys } from "@/planet/install/keys";
 import { Router } from "@/planet/sw/router";
 import { resetStaticData } from "@/planet/util/staticData";
 
 import { fetchJson, resetPlanet, send, teardownPlanet } from "../../api/__tests__/contents.fixtures";
 import { register as registerDatasets } from "../../api/datasets";
+import { getToolBundle, toolRequestContext } from "../../api/tools";
+import { runTool } from "../submit";
 import { kitchenSinkBundle, output, TOOL_ID, toolboxFiles } from "./bundles.fixtures";
 import { formDataFromModel, type HistoryFixture, makeToolRouter, seedHistory, stubData } from "./fixtures";
 
@@ -463,5 +466,59 @@ describe("labels and limits", () => {
             400,
         );
         expect(error.err_msg).toBe("This run would create 1600 jobs; Planet runs at most 1000 jobs at once.");
+    });
+});
+
+describe("runs of installed tools", () => {
+    const INSTALLED_ID = TOOL_ID.replace(/1\.1$/, "1.2");
+
+    async function installKitchenSink(): Promise<void> {
+        const bundle = kitchenSinkBundle("1.2");
+        const repoTar = installSlotKeys("0123456789abcdef", 1, 0).repoTar;
+        await tools.put({
+            tool_id: bundle.id,
+            tool_version: bundle.version,
+            source: "installed",
+            status: "ready",
+            message: null,
+            bundle: { ...bundle, source: { repo_tar: { path: repoTar, sha256: "0".repeat(64), size: 10 } } },
+            bundle_url: null,
+            panel_section_id: "planet_installed",
+            panel_section_name: "Installed tools",
+            hidden: false,
+        });
+    }
+
+    it("creates jobs of an installed version while it is installed", async () => {
+        await installKitchenSink();
+        const response = await fetchJson(makeToolRouter(), "POST", "/api/tools", {
+            tool_id: INSTALLED_ID,
+            tool_version: "1.2",
+            history_id: fixture.historyId,
+            inputs: { ...defaults, mode: "fast" },
+        });
+        expect(response.jobs).toMatchObject([{ tool_id: INSTALLED_ID, tool_version: "1.2" }]);
+    });
+
+    it("creates no job of a version uninstalled after its form was read", async () => {
+        await installKitchenSink();
+        const tool = (await getToolBundle(INSTALLED_ID, "1.2"))!;
+        expect(tool.version).toBe("1.2");
+        const history = await histories.getOrThrow(fixture.historyId);
+        const rc = await toolRequestContext(
+            tool,
+            history,
+            [{ src: "hda", id: fixture.table.id }],
+            "https://planet.test",
+        );
+        await tools.remove(INSTALLED_ID, "1.2");
+        const before = {
+            jobs: (await jobs.listForHistory(fixture.historyId)).length,
+            outbox: (await outbox.list()).length,
+        };
+        const run = runTool(rc, { ...defaults, mode: "fast" }, { tags: [], request: {} });
+        await expect(run).rejects.toMatchObject({ status: 404, message: `Tool ${INSTALLED_ID} 1.2 is not installed.` });
+        expect(await jobs.listForHistory(fixture.historyId)).toHaveLength(before.jobs);
+        expect(await outbox.list()).toHaveLength(before.outbox);
     });
 });

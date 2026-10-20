@@ -33,13 +33,15 @@ import {
     type WriteTx,
 } from "@/planet/db";
 import type { NewElement } from "@/planet/db/collections";
+import { isInstalledArchiveKey } from "@/planet/install/keys";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { newId } from "@/planet/util/ids";
 
 import { expandIncoming } from "./batch";
+import type { BundleOutput } from "./bundle";
 import { emptyDict, InputError, ParameterValueError, type RequestContext, type StateDict } from "./context";
 import { collectionDatasets, type CollectionItem, isHistoryItem } from "./history";
-import type { MapOver, Structure } from "./mapover";
+import { compatibleShape, type MapOver, type Structure, structureOf } from "./mapover";
 import { checkOperationAvailable, isCollectionOperation, planOperation } from "./operations";
 import {
     implicitCollectionName,
@@ -77,6 +79,9 @@ export interface RunResult {
 
 /** `finalize_dataset_collections`: the state message of a map-over's collections when some jobs were not created. */
 export const POPULATION_FAILED = "One or more jobs failed during dataset initialization.";
+
+/** Job creation also reads `tools`, so an uninstall commits either before it or after the jobs it must wait for. */
+const RUN_STORES = [...JOB_STORES, "tools"] as const;
 
 /** `handle_incoming_errors`: one 400 response listing every rejected parameter of every job. */
 function incomingError(allErrors: readonly StateErrors[]): ApiError {
@@ -200,6 +205,17 @@ async function createDataset(
     return { hda, dataset };
 }
 
+/** Refuses jobs of an installed tool version (one with an install archive) that is no longer installed. */
+async function checkInstalled(rc: RequestContext, tx: WriteTx): Promise<void> {
+    if (!isInstalledArchiveKey(rc.tool.source?.repo_tar?.path)) {
+        return;
+    }
+    const record = await tx.store("tools").get([rc.tool.id, rc.tool.version]);
+    if (record?.source !== "installed" || record.status !== "ready") {
+        throw ApiError.notFound(`Tool ${rc.tool.id} ${rc.tool.version} is not installed.`);
+    }
+}
+
 /** Creates one job with its outputs and, unless it is a collection operation, its dispatch entry in `tx`. */
 async function createJob(
     rc: RequestContext,
@@ -211,6 +227,7 @@ async function createJob(
     kind: JobKind,
     tx: WriteTx,
 ): Promise<CreatedJob> {
+    await checkInstalled(rc, tx);
     await checkInputs(plan, tx);
     const jobId = newId();
     const mapped = kind.implicitCollectionJobsId !== null;
@@ -398,6 +415,21 @@ async function insertStructure(
     return collection;
 }
 
+/**
+ * `_structure_for_output`: a data output's implicit collection takes its identifiers from the mapped collection its
+ * `default_identifier_source` names, when that collection has the run's shape.
+ */
+function identifierStructure(mapOver: MapOver, definition: BundleOutput): Structure {
+    const source = definition.default_identifier_source;
+    const input = typeof source === "string" ? mapOver.inputs.find((item) => item.key === source) : undefined;
+    if (!input) {
+        return mapOver.structure;
+    }
+    const content = input.item.collection;
+    const own = structureOf(content, content.collectionType);
+    return compatibleShape(mapOver.structure, own) ? own : mapOver.structure;
+}
+
 /** `auto_propagated_tags` of the collections a run maps over: their `name:` tags (a DCE's are its first dataset's). */
 function mappedTags(items: readonly CollectionItem[]): string[] {
     const tags = items.flatMap((item) =>
@@ -454,13 +486,14 @@ async function createMapOver(
             const collection = job.collections.find((item) => item.name === output.name);
             return collection ? { child_collection_id: collection.hdca.collection_id } : null;
         };
-        const collection = await insertStructure(mapOver.structure, output.leafType, leaf, { next: 0 }, tx);
+        const definition = rc.tool.outputs.find((item) => item.name === output.name)!;
+        const structure = output.leafType === null ? identifierStructure(mapOver, definition) : mapOver.structure;
+        const collection = await insertStructure(structure, output.leafType, leaf, { next: 0 }, tx);
         if (failed) {
             await tx
                 .store("collections")
                 .put({ ...collection, populated_state: "failed", populated_state_message: POPULATION_FAILED });
         }
-        const definition = rc.tool.outputs.find((item) => item.name === output.name)!;
         const { hdca } = await collections.createHdca(
             {
                 hdca: {
@@ -530,7 +563,7 @@ export async function runTool(
         const mapOver = expanded.mapOver;
         Object.assign(
             result,
-            await withTransaction(JOB_STORES, "readwrite", (tx) =>
+            await withTransaction(RUN_STORES, "readwrite", (tx) =>
                 createMapOver(rc, history.id, mapOver, planned, options, operation, tx),
             ),
         );
@@ -541,7 +574,7 @@ export async function runTool(
                 continue;
             }
             try {
-                const created = await withTransaction(JOB_STORES, "readwrite", (tx) =>
+                const created = await withTransaction(RUN_STORES, "readwrite", (tx) =>
                     createJob(rc, history.id, job.state, toJson(job.values), job.plan, options, kind, tx),
                 );
                 result.jobs.push(created);

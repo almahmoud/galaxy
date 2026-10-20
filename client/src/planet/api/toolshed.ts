@@ -4,18 +4,22 @@
  * `api/tools.ts` lists them. The browser never reads the repository or its tool XML.
  *
  * - `POST /api/planet/tools/install` `{source}`: an {@link InstallView}; an unfinished installation of the same
- *   source is returned instead of a second one.
+ *   source is returned instead of a second one. A GitHub commit must be on a branch or tag of its repository
+ *   (`install/github.ts`).
  * - `GET /api/planet/tools/installs`: installations, newest first, without dismissed ones.
  * - `DELETE /api/planet/tools/installs/{job_id}`: dismisses a finished installation from that list.
  * - `GET /api/planet/tools/installed`: {@link InstalledToolView}s, by name.
  * - `DELETE /api/planet/tools/{tool_id}/{version}`: uninstalls a tool version (the id percent-encoded); refused while
- *   jobs of it are unfinished. Its bucket objects are kept.
+ *   jobs of it are unfinished, paused ones included. Its bucket objects are kept.
  *
  * The Tool Shed itself is searched by the page (`install/toolshed.ts`).
  */
 
-import { type JobRecord, jobs, outbox, readTx, tools, writeTx } from "@/planet/db";
+import { type JobRecord, jobs, type JobState, outbox, readTx, tools, writeTx } from "@/planet/db";
+import { GitHubCommitError, GitHubUnavailableError, verifyGitHubCommit } from "@/planet/install/github";
 import {
+    type GitHubSource,
+    type InstallSource,
     InstallSourceError,
     parseInstallSource,
     TOOL_INSTALL_TOOL_ID,
@@ -59,8 +63,25 @@ function isUnfinished(job: JobRecord): boolean {
     return UNFINISHED_STATES.includes(job.state);
 }
 
+/** Jobs in these states may still be dispatched: unfinished ones, and paused ones once resumed. */
+const DISPATCHABLE_STATES: readonly JobState[] = [...UNFINISHED_STATES, "paused"];
+
 function installJobs(all: JobRecord[]): JobRecord[] {
     return all.sort((a, b) => (a.create_time < b.create_time ? 1 : a.create_time > b.create_time ? -1 : 0));
+}
+
+async function verifiedGitHubSource(source: GitHubSource): Promise<GitHubSource> {
+    try {
+        return await verifyGitHubCommit(source);
+    } catch (error) {
+        if (error instanceof GitHubCommitError) {
+            throw invalid(error.message);
+        }
+        if (error instanceof GitHubUnavailableError) {
+            throw new ApiError(502, error.message, ErrorCodes.UPSTREAM_PROXY_ERROR);
+        }
+        throw error;
+    }
 }
 
 async function install(request: PlanetRequest): Promise<InstallView> {
@@ -72,11 +93,14 @@ async function install(request: PlanetRequest): Promise<InstallView> {
     if (unknown !== undefined) {
         throw invalid(`Unknown install option ${unknown}.`);
     }
-    let source;
+    let source: InstallSource;
     try {
         source = parseInstallSource((body as { source?: unknown }).source);
     } catch (error) {
         throw invalid(error instanceof InstallSourceError ? error.message : String(error));
+    }
+    if (source.type === "github") {
+        source = await verifiedGitHubSource(source);
     }
     const job = await writeTx(["jobs", "outbox"], async (tx) => {
         const existing = await tx.store("jobs").index("tool_id").getAll(TOOL_INSTALL_TOOL_ID);
@@ -148,7 +172,7 @@ async function uninstall(toolId: string, version: string): Promise<{ id: string;
             throw ApiError.notFound(`Tool ${toolId} ${version} is not installed.`);
         }
         const running = (await tx.store("jobs").index("tool_id").getAll(toolId)).filter(
-            (job) => job.tool_version === version && isUnfinished(job),
+            (job) => job.tool_version === version && DISPATCHABLE_STATES.includes(job.state),
         );
         if (running.length) {
             throw ApiError.conflict(

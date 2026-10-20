@@ -5,7 +5,7 @@ import { createWhooshQuery } from "@/components/Panels/utilities";
 import { tools, writeTx } from "@/planet/db";
 import { Router } from "@/planet/sw/router";
 
-import { bundlePath, parseToolQuery, register, type ToolEntry } from "../tools";
+import { bundlePath, getToolBundle, parseToolQuery, register, type ToolEntry } from "../tools";
 import { fetchJson, resetPlanet, send, teardownPlanet } from "./contents.fixtures";
 import { FakeBucket, stubNetwork } from "./datasets.fixtures";
 
@@ -24,7 +24,6 @@ function entry(fields: Partial<ToolEntry> & { id: string; name: string }): ToolE
         hidden: false,
         is_workflow_compatible: true,
         xrefs: [],
-        versions: ["1.0"],
         hidden_versions: [],
         link: `/tool_runner?tool_id=${encodeURIComponent(fields.id)}`,
         has_parameters: true,
@@ -32,6 +31,7 @@ function entry(fields: Partial<ToolEntry> & { id: string; name: string }): ToolE
         panel_section_name: "Text Manipulation",
         form_style: "regular",
         ...fields,
+        versions: fields.versions ?? [fields.version ?? "1.0"],
     };
 }
 
@@ -247,6 +247,113 @@ describe("tool panels", () => {
         expect(await fetchJson(router, "GET", "/api/tool_panels/ontology:edam_topics")).toEqual(TOPIC_PANEL);
         const sections = await fetchJson(router, "GET", "/api/tools");
         expect(sections.at(-1)).toMatchObject({ id: "planet_installed", elems: [installed] });
+    });
+});
+
+const DEMO = "github.com/repos/planet/demo/concat_demo";
+
+/** Stores a ready installed tool version whose bundle has no parameters. */
+function installVersion(id: string, version: string, fields: Partial<ToolEntry> = {}) {
+    const panelEntry = entry({
+        id,
+        name: "Concat",
+        version,
+        panel_section_id: "planet_installed",
+        panel_section_name: "Installed tools",
+        ...fields,
+    });
+    return tools.put({
+        tool_id: id,
+        tool_version: version,
+        source: "installed",
+        status: "ready",
+        message: null,
+        bundle: {
+            id,
+            old_id: "concat_demo",
+            version,
+            name: panelEntry.name,
+            profile: "23.0",
+            inputs: [],
+            outputs: [],
+            panel_entry: panelEntry,
+        },
+        bundle_url: null,
+        panel_section_id: "planet_installed",
+        panel_section_name: "Installed tools",
+        hidden: false,
+    });
+}
+
+describe("tool lineages", () => {
+    it("shows each lineage once with its newest version and lists every version for the form", async () => {
+        await installVersion(`${DEMO}/1.10`, "1.10");
+        await installVersion(`${DEMO}/1.9`, "1.9");
+        const router = makeRouter();
+        const panel = await fetchJson(router, "GET", "/api/tool_panels/default");
+        expect(panel.planet_installed.tools).toEqual([`${DEMO}/1.10`]);
+        const sections = await fetchJson(router, "GET", "/api/tools");
+        expect(sections.at(-1).elems.map((tool: ToolEntry) => tool.id)).toEqual([`${DEMO}/1.10`]);
+        const listed: ToolEntry[] = await fetchJson(router, "GET", "/api/tools?in_panel=false");
+        expect(listed.filter((tool) => tool.id.startsWith(DEMO)).map((tool) => [tool.id, tool.versions])).toEqual([
+            [`${DEMO}/1.10`, ["1.9", "1.10"]],
+            [`${DEMO}/1.9`, ["1.9", "1.10"]],
+        ]);
+        expect(await fetchJson(router, "GET", `/api/tools?tool_id=${encodeURIComponent(`${DEMO}/1.9`)}`)).toEqual([
+            "1.9",
+            "1.10",
+        ]);
+        expect(await fetchJson(router, "GET", "/api/tools?q=concat")).toEqual([`${DEMO}/1.10`]);
+        expect((await fetchJson(router, "GET", `/api/tools/${DEMO}/1.9`)).version).toBe("1.9");
+        expect((await fetchJson(router, "GET", `/api/tools/${DEMO}/1.9?tool_version=1.10`)).id).toBe(`${DEMO}/1.10`);
+
+        const form = await fetchJson(router, "GET", `/api/tools/${DEMO}/1.9/build`);
+        expect(form).toMatchObject({ id: `${DEMO}/1.9`, version: "1.9", versions: ["1.9", "1.10"] });
+        const switched = await fetchJson(router, "GET", `/api/tools/${DEMO}/1.9/build?tool_version=1.10`);
+        expect(switched).toMatchObject({ id: `${DEMO}/1.10`, version: "1.10", versions: ["1.9", "1.10"] });
+    });
+
+    it("shows a newer installed version of a built-in tool in the built-in tool's place", async () => {
+        const newer = DATAMASH.replace(/1\.8\+galaxy0$/, "1.9+galaxy0");
+        await installVersion(newer, "1.9+galaxy0", { name: "Datamash" });
+        const router = makeRouter();
+        const panel = await fetchJson(router, "GET", "/api/tool_panels/default");
+        expect(panel.datamash.tools).toEqual([newer]);
+        expect(panel.planet_installed).toBeUndefined();
+        const topics = await fetchJson(router, "GET", "/api/tool_panels/ontology:edam_topics");
+        expect(topics.topic_2269.tools).toEqual([newer]);
+        const listed: ToolEntry[] = await fetchJson(router, "GET", "/api/tools?in_panel=false");
+        expect(listed.find((tool) => tool.id === newer)).toMatchObject({
+            panel_section_id: "datamash",
+            panel_section_name: "Datamash",
+            versions: ["1.8+galaxy0", "1.9+galaxy0"],
+        });
+        expect(listed.find((tool) => tool.id === DATAMASH)!.versions).toEqual(["1.8+galaxy0", "1.9+galaxy0"]);
+        const sections = await fetchJson(router, "GET", "/api/tools");
+        const datamash = sections.find((section: { id: string }) => section.id === "datamash");
+        expect(datamash.elems.map((tool: ToolEntry) => tool.id)).toEqual([newer]);
+        expect((await fetchJson(router, "GET", `/api/tools/${DATAMASH}/build`)).versions).toEqual([
+            "1.8+galaxy0",
+            "1.9+galaxy0",
+        ]);
+    });
+
+    it("falls back to another version of the lineage when a version is gone, as Galaxy's toolbox does", async () => {
+        await installVersion(`${DEMO}/1.10`, "1.10");
+        // Reruns and job pages ask for the job's own version.
+        expect((await getToolBundle(`${DEMO}/1.9`, "1.9"))?.id).toBe(`${DEMO}/1.10`);
+        expect((await getToolBundle(`${DEMO}/1.9`))?.id).toBe(`${DEMO}/1.10`);
+        expect(await getToolBundle("github.com/repos/planet/other/concat_demo/1.0", "1.0")).toBeUndefined();
+        expect((await getToolBundle(DATAMASH, "0.1"))?.version).toBe("1.8+galaxy0");
+    });
+
+    it("never lets a stored record replace a built-in tool", async () => {
+        await installVersion(DATAMASH, "1.8+galaxy0", { name: "Impostor" });
+        const router = makeRouter();
+        expect((await getToolBundle(DATAMASH, "1.8+galaxy0"))?.name).toBe("Datamash");
+        const listed: ToolEntry[] = await fetchJson(router, "GET", "/api/tools?in_panel=false");
+        expect(listed.filter((tool) => tool.id === DATAMASH).map((tool) => tool.name)).toEqual(["Datamash"]);
+        expect((await fetchJson(router, "GET", "/api/tool_panels/default")).planet_installed).toBeUndefined();
     });
 });
 

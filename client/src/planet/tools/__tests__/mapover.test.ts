@@ -344,6 +344,42 @@ describe("collection map-over", () => {
         expect(await jobs.listForHistory(fixture.historyId)).toHaveLength(before);
     });
 
+    it("takes a data output's identifiers from the collection its default_identifier_source names", async () => {
+        const bundle = kitchenSinkBundle();
+        bundle.outputs = bundle.outputs.map((item) =>
+            item.name === "out" ? { ...item, default_identifier_source: "queries_0|table" } : item,
+        );
+        resetPlanetData([bundle]);
+        const renamed = (
+            await collections.createHdca({
+                hdca: { history_id: fixture.historyId, name: "renamed tables" },
+                collection: {
+                    collection_type: "list",
+                    elements: tableElements.map((hda, index) => ({ identifier: `u${index + 1}`, hda_id: hda.id })),
+                },
+            })
+        ).hdca;
+        const identifiers = (response: Model, name: string) =>
+            response.implicit_collections
+                .find((item: Model) => item.output_name === name)
+                .elements.map((element: Model) => element.element_identifier);
+
+        const linked = await run({ ...defaults, input: mapOver(tables), "queries_0|table": mapOver(renamed) });
+        expect(linked.jobs).toHaveLength(2);
+        expect(identifiers(linked, "out")).toEqual(["u1", "u2"]);
+        // Other outputs keep the identifiers of the first collection by parameter name.
+        expect(identifiers(linked, "aligned")).toEqual(["t1", "t2"]);
+
+        // A run over both collections unlinked has another shape than the named collection, so nothing changes.
+        const unlinked = await run({
+            ...defaults,
+            input: mapOver(tables, null, false),
+            "queries_0|table": mapOver(renamed, null, false),
+        });
+        expect(unlinked.jobs).toHaveLength(4);
+        expect(identifiers(unlinked, "out")).toEqual(["t1", "t2"]);
+    });
+
     it("multiplies unlinked collections into nested implicit collections", async () => {
         const response = await run({
             ...defaults,

@@ -5,7 +5,12 @@ import os
 import shutil
 import subprocess
 import tarfile
+import threading
 import urllib.request
+from http.server import (
+    BaseHTTPRequestHandler,
+    ThreadingHTTPServer,
+)
 from pathlib import Path
 
 import pytest
@@ -248,6 +253,55 @@ def test_github_archive_of_another_commit_is_refused(s3, layout, transfers, tmp_
     assert "is for commit 'ffff" in results["errors"][0]
 
 
+def test_github_archive_must_be_the_named_repositorys(s3, layout, transfers, tmp_path, monkeypatch, codeload):
+    # codeload names the top-level directory after the repository it serves.
+    codeload(github_archive(demo_files("tools/demo/"), top=f"other-{COMMIT}"))
+    results = run_install(s3, layout, transfers, tmp_path, monkeypatch, install_manifest(s3, github_source()))
+    assert results["state"] == "error"
+    assert f"is in 'other-{COMMIT}', not in 'demo-{COMMIT}'" in results["errors"][0]
+    codeload(github_archive(demo_files("tools/demo/"), top=f"Demo-{COMMIT}"))
+    results = run_install(s3, layout, transfers, tmp_path, monkeypatch, install_manifest(s3, github_source()))
+    assert results["state"] == "ok"
+
+
+@pytest.fixture
+def redirecting_codeload(monkeypatch):
+    """A codeload that redirects planet/demo to someone/demo, which serves the demo archive."""
+    archive = github_archive(demo_files("tools/demo/"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/planet/demo/"):
+                self.send_response(302)
+                self.send_header("Location", self.path.replace("/planet/demo/", "/someone/demo/", 1))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(archive)))
+            self.end_headers()
+            self.wfile.write(archive)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(repositories, "CODELOAD_BASE", f"http://127.0.0.1:{server.server_address[1]}")
+    yield
+    server.shutdown()
+
+
+def test_github_redirects_to_another_repository_are_refused(
+    s3, layout, transfers, tmp_path, monkeypatch, redirecting_codeload
+):
+    results = run_install(s3, layout, transfers, tmp_path, monkeypatch, install_manifest(s3, github_source()))
+    assert results["state"] == "error"
+    assert "was redirected to http://127.0.0.1:" in results["errors"][0]
+    assert "/someone/demo/tar.gz/" in results["errors"][0]
+
+
 def test_github_missing_commit_or_directory(s3, layout, transfers, tmp_path, monkeypatch, codeload):
     missing = run_install(
         s3, layout, transfers, tmp_path, monkeypatch, install_manifest(s3, github_source(ref="e" * 40))
@@ -277,6 +331,8 @@ def test_worker_gets_no_manifest_location(s3, layout, transfers, tmp_path, monke
     def spy(command, **kwargs):
         if command[-1] == "planet_runtime.install_worker":
             seen.update(kwargs["env"])
+            seen["command"] = command
+            seen["cwd"] = sorted(Path(kwargs["cwd"]).iterdir())
         return real_run(command, **kwargs)
 
     manifest = install_manifest(s3, toolshed_source(toolshed_repository))
@@ -287,8 +343,26 @@ def test_worker_gets_no_manifest_location(s3, layout, transfers, tmp_path, monke
     assert install.run(layout, transfers) == 0
     assert s3.json(f"jobs/{manifest['job']['id']}/a1/results.json")["state"] == "ok"
     assert seen and "PLANET_MANIFEST_URL" not in seen and "PLANET_MANIFEST_FILE" not in seen
+    assert seen["command"][1:3] == ["-I", "-B"] and seen["cwd"] == []
     hg_environment = repositories.hg_environment(tmp_path)
     assert hg_environment["HGRCPATH"] == "" and not [key for key in hg_environment if key.startswith("PLANET")]
+
+
+def test_worker_does_not_import_modules_from_its_directory(layout, tmp_path):
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    marker = tmp_path / "imported"
+    (neutral / "json.py").write_text(f"open({str(marker)!r}, 'w').close()\nraise SystemExit('planted json imported')\n")
+    with pytest.raises(install.InstallError, match="KeyError: 'repository_root'"):
+        install.run_worker({}, layout, neutral)
+    assert not marker.exists()
+
+
+def test_only_the_browsers_tool_sheds_are_cloned():
+    test_shed = {**toolshed_source("a" * 12), "tool_shed_url": "https://testtoolshed.g2.bx.psu.edu/"}
+    assert repositories.parse_source(test_shed)["tool_shed_url"] == "https://testtoolshed.g2.bx.psu.edu"
+    with pytest.raises(repositories.RepositoryError, match="can only be installed from"):
+        repositories.parse_source({**toolshed_source("a" * 12), "tool_shed_url": "https://toolshed.example"})
 
 
 @pytest.mark.parametrize(

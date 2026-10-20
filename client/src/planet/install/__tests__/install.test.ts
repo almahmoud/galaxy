@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type JobRecord, jobs, tools } from "@/planet/db";
 import { resultsDocument } from "@/planet/jobs/__fixtures__/results";
@@ -15,8 +15,9 @@ import { ingestResults } from "@/planet/jobs/ingest";
 import { buildJobSpec } from "@/planet/jobs/k8sJob";
 import { jobKind, prepareDispatch } from "@/planet/jobs/manifest";
 import type { Manifest, ToolBundle } from "@/planet/jobs/schemas";
-import { readBundle } from "@/planet/tools/bundle";
+import { bundlePath, readBundle } from "@/planet/tools/bundle";
 import { sha256Hex } from "@/planet/util/digest";
+import { resetStaticData } from "@/planet/util/staticData";
 
 import { INSTALL_SLOT_COUNT, installSlotKeys } from "../keys";
 import {
@@ -130,8 +131,15 @@ const rejected = {
     warnings: [],
 };
 
-beforeEach(resetDb);
-afterEach(teardownDb);
+beforeEach(async () => {
+    resetStaticData();
+    await resetDb();
+});
+afterEach(async () => {
+    vi.unstubAllGlobals();
+    resetStaticData();
+    await teardownDb();
+});
 
 describe("tool_install dispatch", () => {
     it("writes a manifest with the source and a slot pool, without tool or datasets", async () => {
@@ -323,28 +331,30 @@ describe("tool_install ingest", () => {
         expect((await jobs.get(job.id))!.params.tools).toBeUndefined();
     });
 
-    it("does not replace a built-in tool record of the same version", async () => {
+    it("refuses a version the build has built in, whose bundle and archive stay in use", async () => {
         const deps = testDeps();
-        const bundle = datamashBundle();
-        await tools.put({
-            tool_id: bundle.id,
-            tool_version: bundle.version,
-            source: "curated",
-            status: "ready",
-            message: null,
-            bundle,
-            bundle_url: null,
-            panel_section_id: null,
-            panel_section_name: null,
-            hidden: false,
-        });
+        const builtIn = { ...datamashBundle(), name: "Built-in Datamash" };
+        const path = decodeURIComponent(`/static/planet/data/${bundlePath(builtIn.id, builtIn.version)}`);
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async (input: RequestInfo | URL) =>
+                decodeURIComponent(new URL(String(input), "https://planet.test").pathname) === path
+                    ? new Response(JSON.stringify(builtIn))
+                    : new Response("not found", { status: 404 }),
+            ),
+        );
         const { job } = await dispatched(deps);
         await podInstalls(deps, job, [{ slot: 0 }]);
         await ingestResults(job, deps);
-        expect((await tools.get(bundle.id, bundle.version))!.source).toBe("curated");
-        expect(installView((await jobs.get(job.id))!).tools[0]!.errors).toEqual([
-            "A built-in tool has the same id and version.",
-        ]);
+        expect(await tools.list()).toEqual([]);
+        const updated = (await jobs.get(job.id))!;
+        expect(updated.state).toBe("error");
+        expect(installView(updated)).toMatchObject({ phase: "failed" });
+        expect(installView(updated).tools[0]).toMatchObject({
+            state: "failed",
+            errors: ["Planet has this tool version built in, so the built-in tool is used."],
+        });
+        expect((await readBundle(builtIn.id, builtIn.version))?.name).toBe("Built-in Datamash");
     });
 
     it("keeps the pod's failure when it installed nothing", async () => {

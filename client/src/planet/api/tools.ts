@@ -23,6 +23,7 @@ import {
     type StaticToolData,
     type ToolBundle,
 } from "@/planet/tools";
+import { compareToolVersions } from "@/planet/tools/version";
 import { ApiError, ErrorCodes } from "@/planet/util/errors";
 import { stringAsBool } from "@/planet/util/query";
 import { loadOptionalStaticData } from "@/planet/util/staticData";
@@ -132,64 +133,133 @@ async function installedEntries(): Promise<ToolEntry[]> {
         return [];
     }
     return records
-        .filter((record) => record.status === "ready" && !record.hidden)
+        .filter((record) => record.source === "installed" && record.status === "ready" && !record.hidden)
         .map((record) => (isRecord(record.bundle) ? record.bundle.panel_entry : undefined))
         .filter(isToolEntry);
 }
 
-/** Every tool listed by `/api/tools?in_panel=false`: the built-in toolbox, the upload tool and installed tools. */
-export async function listToolEntries(): Promise<ToolEntry[]> {
+/** Galaxy's `remove_version_from_guid` for Tool Shed and GitHub GUIDs; other tool ids are lineages of their own. */
+export function lineageOf(toolId: string): string {
+    return toolId.includes("/repos/") ? toolId.slice(0, toolId.lastIndexOf("/")) : toolId;
+}
+
+/** The listed tools: every version of each lineage, and each lineage's versions oldest first. */
+interface Toolbox {
+    entries: ToolEntry[];
+    byId: Map<string, ToolEntry>;
+    lineages: Map<string, ToolEntry[]>;
+    /** Ids of the build's tools and the upload tool. */
+    builtIn: Set<string>;
+}
+
+/**
+ * The built-in toolbox, the upload tool and installed tools. Installed versions never replace a built-in id. Each
+ * entry's `versions` lists its lineage; installed versions of a lineage with a built-in version take its panel section.
+ */
+async function loadToolbox(): Promise<Toolbox> {
     const [curated, installed] = await Promise.all([
         loadOptionalStaticData<unknown[]>("toolbox/tools.json"),
         installedEntries(),
     ]);
-    const entries = (Array.isArray(curated) ? curated : []).filter(isToolEntry);
-    const seen = new Set(entries.map((entry) => entry.id));
+    const builtIn = (Array.isArray(curated) ? curated : []).filter(isToolEntry);
+    const seen = new Set(builtIn.map((entry) => entry.id));
     if (!seen.has(UPLOAD_TOOL_ID)) {
-        entries.unshift(UPLOAD_ENTRY);
+        builtIn.unshift(UPLOAD_ENTRY);
         seen.add(UPLOAD_TOOL_ID);
     }
+    const sections = new Map<string, Pick<ToolEntry, "panel_section_id" | "panel_section_name">>();
+    for (const entry of builtIn) {
+        const lineage = lineageOf(entry.id);
+        if (!sections.has(lineage)) {
+            sections.set(lineage, {
+                panel_section_id: entry.panel_section_id,
+                panel_section_name: entry.panel_section_name,
+            });
+        }
+    }
+    const listed = [...builtIn];
     for (const entry of installed) {
         if (!seen.has(entry.id)) {
-            entries.push(entry);
+            listed.push({ ...entry, ...sections.get(lineageOf(entry.id)) });
             seen.add(entry.id);
         }
     }
-    return entries;
+    const versions = new Map<string, string[]>();
+    for (const entry of listed) {
+        const lineage = lineageOf(entry.id);
+        versions.set(lineage, [...(versions.get(lineage) ?? []), entry.version].sort(compareToolVersions));
+    }
+    const entries = listed.map((entry) => ({ ...entry, versions: [...versions.get(lineageOf(entry.id))!] }));
+    const lineages = new Map<string, ToolEntry[]>();
+    for (const entry of entries) {
+        const lineage = lineageOf(entry.id);
+        lineages.set(
+            lineage,
+            [...(lineages.get(lineage) ?? []), entry].sort((a, b) => compareToolVersions(a.version, b.version)),
+        );
+    }
+    return {
+        entries,
+        byId: new Map(entries.map((entry) => [entry.id, entry])),
+        lineages,
+        builtIn: new Set(builtIn.map((entry) => entry.id)),
+    };
 }
 
-/** Returns the panel entry of a tool, or undefined. */
-export async function getToolEntry(toolId: string): Promise<ToolEntry | undefined> {
-    return (await listToolEntries()).find((entry) => entry.id === toolId);
+/** The newest listed version of the lineage of `toolId`. */
+function lineageHead(toolbox: Toolbox, toolId: string): ToolEntry | undefined {
+    return toolbox.lineages.get(lineageOf(toolId))?.at(-1);
 }
 
 /**
- * Returns the tool bundle of a tool version, from IndexedDB for installed tools or the build's static data for
- * built-in ones. Without `version`, or when that version is not available, the latest listed version is used, as
- * Galaxy's toolbox does.
+ * Galaxy's `ToolBox.get_tool`: the tool `toolId` names at `version`, else the version `version` of its lineage, else
+ * the lineage's newest version. Without `version`, the tool with that exact id comes first.
  */
-export async function getToolBundle(toolId: string, version?: string | null): Promise<ToolBundle | undefined> {
-    if (version) {
-        // A Tool Shed GUID ends with its version, so other versions of the lineage have other ids.
-        const lineageId = toolId.includes("/repos/")
-            ? `${toolId.slice(0, toolId.lastIndexOf("/"))}/${version}`
-            : toolId;
-        const exact =
-            (await readBundle(toolId, version)) ??
-            (lineageId !== toolId ? await readBundle(lineageId, version) : undefined);
-        if (exact) {
-            return exact;
-        }
+function resolveEntry(toolbox: Toolbox, toolId: string, version?: string | null): ToolEntry | undefined {
+    const exact = toolbox.byId.get(toolId);
+    if (exact && (!version || exact.version === version)) {
+        return exact;
     }
-    const latest = (await getToolEntry(toolId))?.version;
-    return latest && latest !== version ? readBundle(toolId, latest) : undefined;
+    const members = toolbox.lineages.get(lineageOf(toolId)) ?? [];
+    return (version ? members.find((member) => member.version === version) : undefined) ?? members.at(-1);
 }
 
-/** The versions of a tool lineage, as the tool form lists them. */
+/** Every tool listed by `/api/tools?in_panel=false`: the built-in toolbox, the upload tool and installed tools. */
+export async function listToolEntries(): Promise<ToolEntry[]> {
+    return (await loadToolbox()).entries;
+}
+
+/** Returns the panel entry of a tool version, or undefined. */
+export async function getToolEntry(toolId: string): Promise<ToolEntry | undefined> {
+    return (await loadToolbox()).byId.get(toolId);
+}
+
+/**
+ * Returns the tool bundle of a tool version, from the build's static data for built-in tools or IndexedDB for
+ * installed ones, found as Galaxy's toolbox finds tools: the exact id and version, the same version of the id's
+ * lineage, or the lineage's newest version.
+ */
+export async function getToolBundle(toolId: string, version?: string | null): Promise<ToolBundle | undefined> {
+    const toolbox = await loadToolbox();
+    const exact = toolbox.byId.get(toolId);
+    if (version && !(exact && exact.version === version)) {
+        // Unlisted versions (hidden tools) are found by id; a GUID ends with its version.
+        const unlisted =
+            (await readBundle(toolId, version)) ??
+            (lineageOf(toolId) !== toolId ? await readBundle(`${lineageOf(toolId)}/${version}`, version) : undefined);
+        if (unlisted) {
+            return unlisted;
+        }
+    }
+    const entry = resolveEntry(toolbox, toolId, version);
+    return entry ? readBundle(entry.id, entry.version) : undefined;
+}
+
+/** The versions of a tool's lineage, oldest first, as the tool form lists them. */
 export async function toolVersions(bundle: ToolBundle): Promise<string[]> {
-    const entry = await getToolEntry(bundle.id);
-    const versions = entry && Array.isArray(entry.versions) ? (entry.versions as string[]) : bundle.versions;
-    return versions?.length ? versions : [bundle.version];
+    const members = (await loadToolbox()).lineages.get(lineageOf(bundle.id)) ?? [];
+    const versions = new Set([...members.map((member) => member.version), bundle.version]);
+    return [...versions].sort(compareToolVersions);
 }
 
 async function panelViews(): Promise<PanelViews> {
@@ -207,7 +277,42 @@ function containsTool(panel: Record<string, PanelElement>, toolId: string): bool
     );
 }
 
-/** `/api/tool_panels/{view}`: `{element id: tool entry | section with tool ids | label}`. */
+/** `panel` with each listed tool replaced by the newest version of its lineage, shown once per section. */
+function withNewestVersions(panel: Record<string, PanelElement>, toolbox: Toolbox): Record<string, PanelElement> {
+    const out: Record<string, PanelElement> = {};
+    for (const [key, element] of Object.entries(panel)) {
+        if (Array.isArray(element.tools)) {
+            const tools = (element.tools as unknown[]).map((item) =>
+                typeof item === "string" && toolbox.byId.has(item) ? lineageHead(toolbox, item)!.id : item,
+            );
+            out[key] = { ...element, tools: [...new Set(tools)] };
+            continue;
+        }
+        const head =
+            typeof element.id === "string" && toolbox.byId.has(element.id)
+                ? lineageHead(toolbox, element.id)
+                : undefined;
+        if (!head) {
+            out[key] = element;
+        } else if (!Object.hasOwn(out, head.id)) {
+            out[head.id] =
+                head.id === element.id
+                    ? element
+                    : {
+                          ...head,
+                          panel_section_id: element.panel_section_id,
+                          panel_section_name: element.panel_section_name,
+                      };
+        }
+    }
+    return out;
+}
+
+/**
+ * `/api/tool_panels/{view}`: `{element id: tool entry | section with tool ids | label}`, each lineage shown with its
+ * newest version. The default view adds the upload tool when the build lacks it and an "Installed tools" section with
+ * the installed lineages no other section shows.
+ */
 async function panelView(view: string): Promise<Record<string, PanelElement>> {
     const views = await panelViews();
     const viewId = view === "default_panel_view" ? views.default_panel_view : view;
@@ -221,7 +326,8 @@ async function panelView(view: string): Promise<Record<string, PanelElement>> {
         (viewId === DEFAULT_PANEL_VIEW
             ? await loadOptionalStaticData<Record<string, PanelElement>>("toolbox/panel.json")
             : undefined);
-    let panel: Record<string, PanelElement> = isRecord(stored) ? { ...(stored as Record<string, PanelElement>) } : {};
+    const toolbox = await loadToolbox();
+    let panel = withNewestVersions(isRecord(stored) ? (stored as Record<string, PanelElement>) : {}, toolbox);
     if (viewId !== DEFAULT_PANEL_VIEW) {
         return panel;
     }
@@ -233,9 +339,12 @@ async function panelView(view: string): Promise<Record<string, PanelElement>> {
             panel = { [UPLOAD_SECTION.id]: panelSection(UPLOAD_SECTION, [UPLOAD_TOOL_ID]), ...panel };
         }
     }
-    const installed = (await installedEntries()).map((entry) => entry.id).filter((id) => !containsTool(panel, id));
+    const installed = [...toolbox.lineages.values()]
+        .filter((members) => !members.some((member) => toolbox.builtIn.has(member.id)))
+        .map((members) => members.at(-1)!.id)
+        .filter((id) => !containsTool(panel, id));
     if (installed.length && !Object.hasOwn(panel, INSTALLED_PANEL_SECTION.id)) {
-        panel[INSTALLED_PANEL_SECTION.id] = panelSection(INSTALLED_PANEL_SECTION, [...new Set(installed)]);
+        panel[INSTALLED_PANEL_SECTION.id] = panelSection(INSTALLED_PANEL_SECTION, installed);
     }
     return panel;
 }
@@ -516,15 +625,15 @@ function scoreNode(node: QueryNode, doc: SearchDocument): number {
     }
 }
 
-/** Tool ids matching `query`, best match first (ties by id), like Galaxy's tool search. */
+/** Tool ids matching `query`, best match first (ties by id), like Galaxy's index of each lineage's newest version. */
 export async function searchTools(query: string): Promise<string[]> {
     const tree = parseToolQuery(query);
     if (!tree) {
         return [];
     }
-    const [entries, tags] = await Promise.all([listToolEntries(), toolTags()]);
+    const [toolbox, tags] = await Promise.all([loadToolbox(), toolTags()]);
     const scored: { id: string; score: number }[] = [];
-    for (const entry of entries) {
+    for (const entry of [...toolbox.lineages.values()].map((members) => members.at(-1)!)) {
         const score = scoreNode(tree, searchDocument(entry, tags[entry.id] ?? entry.tool_tags ?? []));
         if (score > 0) {
             scored.push({ id: entry.id, score });
@@ -847,8 +956,8 @@ async function runToolRequest(request: PlanetRequest): Promise<Record<string, un
 // ---------------------------------------------------------------------------------------------------------
 // Handlers
 
-async function showTool(toolId: string): Promise<ToolEntry> {
-    const entry = await getToolEntry(toolId);
+async function showTool(toolId: string, version: string | null): Promise<ToolEntry> {
+    const entry = resolveEntry(await loadToolbox(), toolId, version);
     if (!entry) {
         throw ApiError.notFound(`Could not find tool with id '${toolId}'.`);
     }
@@ -862,8 +971,8 @@ async function toolsIndex({ query }: PlanetRequest): Promise<unknown> {
     }
     const toolId = query.get("tool_id") ?? "";
     if (toolId) {
-        const entry = await getToolEntry(toolId);
-        return entry ? [entry.version] : [];
+        // `_detect`: every version of the tool's lineage.
+        return ((await loadToolbox()).lineages.get(lineageOf(toolId)) ?? []).map((entry) => entry.version);
     }
     if (stringAsBool(query.get("in_panel") ?? "True")) {
         return toolsInPanel(query.get("view"));
@@ -893,7 +1002,9 @@ export function register(router: Router): void {
         if (action === "build") {
             return buildForm(request, toolId);
         }
-        return action === "citations" ? toolCitations(toolId) : showTool(toolId);
+        return action === "citations"
+            ? toolCitations(toolId)
+            : showTool(toolId, request.query.get("tool_version") || null);
     });
     router.untyped("/api/tools/{tool_path:path}", "post", (request) => {
         const { toolId, action } = toolAction(request.params.tool_path!);

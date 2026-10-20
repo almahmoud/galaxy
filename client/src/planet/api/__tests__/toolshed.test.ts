@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { IDBFactory } from "fake-indexeddb";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { closeDb, jobs, outbox, tools } from "@/planet/db";
 import { TOOL_INSTALL_TOOL_ID } from "@/planet/install/source";
@@ -57,8 +57,32 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+    vi.unstubAllGlobals();
     await closeDb();
 });
+
+const GITHUB = { type: "github", repository: "galaxyproject/tools-iuc", ref: "a".repeat(40), path: "tools/datamash" };
+
+/** GitHub's API for galaxyproject/tools-iuc, whose default branch holds `onMain` commits. */
+function stubGitHub(onMain: string[]) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input)).pathname;
+        const json = (body: unknown) => new Response(JSON.stringify(body));
+        if (path === "/repos/galaxyproject/tools-iuc") {
+            return json({ full_name: "galaxyproject/tools-iuc", default_branch: "main" });
+        }
+        const compare = /\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(path);
+        if (compare) {
+            return json({ status: onMain.includes(compare[1]!) ? "behind" : "diverged" });
+        }
+        if (path.endsWith("/branches") || path.endsWith("/tags")) {
+            return json([]);
+        }
+        return json({ sha: "exists" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+}
 
 describe("POST /api/planet/tools/install", () => {
     it("creates a tool_install job and its dispatch entry", async () => {
@@ -118,6 +142,33 @@ describe("POST /api/planet/tools/install", () => {
         expect(await jobs.listByState(["new"])).toEqual([]);
     });
 
+    it("installs a GitHub commit only when it is on a branch or tag of the repository", async () => {
+        const fetchMock = stubGitHub([GITHUB.ref]);
+        const accepted = await call<InstallView>("POST", "/api/planet/tools/install", { source: GITHUB });
+        expect(accepted.status).toBe(200);
+        expect(accepted.body).toMatchObject({ label: "galaxyproject/tools-iuc", phase: "queued" });
+        expect(String(fetchMock.mock.calls[1]![0])).toContain(
+            `/repos/galaxyproject/tools-iuc/compare/main...${GITHUB.ref}`,
+        );
+
+        const fork = { ...GITHUB, ref: "b".repeat(40) };
+        const refused = await call<{ err_msg: string }>("POST", "/api/planet/tools/install", { source: fork });
+        expect(refused.status).toBe(400);
+        expect(refused.body.err_msg).toMatch(/is not on a branch or tag of galaxyproject\/tools-iuc/);
+        expect((await jobs.listByState(["new"])).map((job) => job.id)).toEqual([accepted.body.id]);
+    });
+
+    it("refuses GitHub installs while GitHub cannot be asked", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0" } })),
+        );
+        const refused = await call<{ err_msg: string }>("POST", "/api/planet/tools/install", { source: GITHUB });
+        expect(refused.status).toBe(502);
+        expect(refused.body.err_msg).toMatch(/limit of API requests/);
+        expect(await jobs.listByState(["new"])).toEqual([]);
+    });
+
     it("requires a JSON request", async () => {
         const response = await router.handle(
             new Request(`${ORIGIN}/api/planet/tools/install`, {
@@ -131,17 +182,9 @@ describe("POST /api/planet/tools/install", () => {
 
 describe("installations", () => {
     it("lists them newest first and dismisses finished ones", async () => {
+        stubGitHub([GITHUB.ref]);
         const first = (await call<InstallView>("POST", "/api/planet/tools/install", { source: SOURCE })).body;
-        const second = (
-            await call<InstallView>("POST", "/api/planet/tools/install", {
-                source: {
-                    type: "github",
-                    repository: "galaxyproject/tools-iuc",
-                    ref: "a".repeat(40),
-                    path: "tools/datamash",
-                },
-            })
-        ).body;
+        const second = (await call<InstallView>("POST", "/api/planet/tools/install", { source: GITHUB })).body;
         const listed = await call<InstallView[]>("GET", "/api/planet/tools/installs");
         expect(listed.body.map((view) => view.id)).toEqual([second.id, first.id]);
         expect(listed.body[0]).toMatchObject({ label: "galaxyproject/tools-iuc", phase: "queued" });
@@ -189,6 +232,17 @@ describe("installed tools", () => {
         expect((await call("DELETE", path)).status).toBe(200);
         expect(await tools.get(TOOL_ID, VERSION)).toBeUndefined();
         expect((await call("DELETE", path)).status).toBe(404);
+    });
+
+    it("keeps a tool version that paused jobs may still run once resumed", async () => {
+        await installedTool();
+        const path = `/api/planet/tools/${encodeURIComponent(TOOL_ID)}/${encodeURIComponent(VERSION)}`;
+        const job = await jobs.create({ tool_id: TOOL_ID, tool_version: VERSION, state: "paused" });
+        const busy = await call<{ err_msg: string }>("DELETE", path);
+        expect(busy.status).toBe(409);
+        expect(await tools.get(TOOL_ID, VERSION)).toBeDefined();
+        await jobs.update(job.id, { state: "deleted" });
+        expect((await call("DELETE", path)).status).toBe(200);
     });
 
     it("does not uninstall built-in tools", async () => {

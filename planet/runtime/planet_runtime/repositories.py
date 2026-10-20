@@ -3,8 +3,14 @@
 Both end up as a tar that is extracted with the ``data`` filter of :mod:`tarfile`, without test data and
 version control files and within size limits. ``hg`` runs without any configuration file, with subrepositories
 disabled and without the manifest URL in its environment. The changeset ``hg`` checked out must start with the
-requested revision, and a GitHub archive must name the requested commit in its pax header, which ``git
-archive`` writes.
+requested revision. Only the Tool Sheds the browser installs from (``TOOL_SHEDS``) are cloned.
+
+A GitHub archive comes from ``codeload.github.com/<owner>/<name>/tar.gz/<commit>``. The pod checks that no
+redirect led elsewhere, that the archive's top-level directory is ``<name>-<commit>`` and that its pax header,
+which ``git archive`` writes, names the requested commit. That proves GitHub served this commit as the archive
+of ``<owner>/<name>``. It does not prove that the commit belongs to that repository: codeload serves the commits
+of a whole fork network under the name of each repository in it. The browser checks that the commit is on a
+branch or tag of the repository with GitHub's API before it creates the installation.
 """
 
 import logging
@@ -34,6 +40,8 @@ from planet_runtime.transfer import (
 log = logging.getLogger(__name__)
 
 CODELOAD_BASE = "https://codeload.github.com"
+# The browser's list (client/src/planet/install/source.ts).
+TOOL_SHEDS = frozenset({"toolshed.g2.bx.psu.edu", "testtoolshed.g2.bx.psu.edu"})
 USER_AGENT = f"planet-stager/{__version__}"
 # Directories and files left out of extracted repositories and tool archives.
 EXCLUDED_NAMES = frozenset({"test-data", ".hg", ".git", ".hgtags", ".hgsub", ".hgsubstate", ".hg_archival.txt"})
@@ -92,6 +100,8 @@ def parse_source(value: Any) -> dict[str, Any]:
             or parsed.fragment
         ):
             raise RepositoryError(f"Tool Shed URL {url!r} must be https://<host>")
+        if host not in TOOL_SHEDS:
+            raise RepositoryError(f"Tools can only be installed from {' or '.join(sorted(TOOL_SHEDS))}, not {host}")
         source = {
             "type": "toolshed",
             "tool_shed_url": f"https://{host}",
@@ -247,8 +257,11 @@ def _fetch_toolshed(source: dict[str, Any], work: Path) -> Checkout:
 # --- GitHub -------------------------------------------------------------------------------------------------
 
 
-def download(url: str, destination: Path, retry: RetryPolicy, limit: int = MAX_ARCHIVE_BYTES) -> int:
-    """GET ``url`` into ``destination``, refusing more than ``limit`` bytes."""
+def download(
+    url: str, destination: Path, retry: RetryPolicy, limit: int = MAX_ARCHIVE_BYTES, prefix: str | None = None
+) -> int:
+    """GET ``url`` into ``destination``, refusing more than ``limit`` bytes and, with ``prefix``, redirects to URLs
+    that do not start with it (compared without case)."""
 
     scheme = urllib.parse.urlsplit(url).scheme
 
@@ -257,8 +270,11 @@ def download(url: str, destination: Path, retry: RetryPolicy, limit: int = MAX_A
         size = 0
         try:
             with urllib.request.urlopen(request, timeout=120) as response, open(destination, "wb") as out:
-                if urllib.parse.urlsplit(response.geturl()).scheme != scheme:
+                final = response.geturl()
+                if urllib.parse.urlsplit(final).scheme != scheme:
                     raise TransferError(f"GET {url} was redirected to another scheme", status=400)
+                if prefix is not None and not final.lower().startswith(prefix.lower()):
+                    raise TransferError(f"GET {url} was redirected to {redact(final)}", status=400)
                 while chunk := response.read(1024 * 1024):
                     size += len(chunk)
                     if size > limit:
@@ -276,12 +292,14 @@ def download(url: str, destination: Path, retry: RetryPolicy, limit: int = MAX_A
 def _fetch_github(source: dict[str, Any], work: Path, retry: RetryPolicy) -> Checkout:
     archive = work / "repository.tar.gz"
     url = codeload_url(source)
+    owner, _, name = source["repository"].partition("/")
     try:
-        download(url, archive, retry)
+        download(url, archive, retry, prefix=f"{CODELOAD_BASE}/{owner}/{name}/")
     except TransferError as e:
         raise RepositoryError(str(e)) from None
     root = work / "repository"
-    headers, warnings = extract(archive, root)
+    # codeload names the directory <repository>-<ref>.
+    headers, warnings = extract(archive, root, expected_top=f"{name}-{source['ref']}")
     archive.unlink()
     if headers.get("comment") != source["ref"]:
         raise RepositoryError(
@@ -291,7 +309,6 @@ def _fetch_github(source: dict[str, Any], work: Path, retry: RetryPolicy) -> Che
     tools_root = root / prefix if prefix else root
     if not tools_root.is_dir() or tools_root.is_symlink():
         raise RepositoryError(f"{source['repository']} has no directory {prefix!r} at {source['ref']}")
-    owner, _, name = source["repository"].partition("/")
     return Checkout(
         repository_root=root,
         root=tools_root,
@@ -316,11 +333,12 @@ def extract(
     destination: Path,
     max_bytes: int = MAX_EXTRACTED_BYTES,
     max_members: int = MAX_MEMBERS,
+    expected_top: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Extract a tar with one top-level directory into ``destination``, without that directory.
 
-    Returns the archive's global pax headers and warnings for members left out: hard links, special files and
-    links the ``data`` filter refuses.
+    With ``expected_top``, that directory must have this name (compared without case). Returns the archive's global pax
+    headers and warnings for members left out: hard links, special files and links the ``data`` filter refuses.
     """
     destination.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -335,6 +353,8 @@ def extract(
                 if not parts or parts == (".",):
                     continue
                 if top is None:
+                    if expected_top is not None and parts[0].lower() != expected_top.lower():
+                        raise RepositoryError(f"The repository archive is in {parts[0]!r}, not in {expected_top!r}")
                     top = parts[0]
                 if parts[0] != top or parts[0] in ("/", ".."):
                     raise RepositoryError("The repository archive does not have a single top-level directory")

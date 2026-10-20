@@ -181,6 +181,8 @@ export interface BundleOutput {
     output_type: string;
     format?: string | null;
     format_source?: string | null;
+    /** The mapped input whose element identifiers a data output's implicit collection takes. */
+    default_identifier_source?: string | null;
     metadata_source?: string | null;
     from_work_dir?: string | null;
     filters: (string | null)[];
@@ -235,6 +237,8 @@ export interface ToolBundle {
     data_tables?: BundleDataTable[];
     tool_shed_repository?: { name?: string; owner?: string; tool_shed?: string } | null;
     panel_entry?: Record<string, unknown>;
+    /** Where the tool came from; `repo_tar` is the archive of its directory. */
+    source?: { repo_tar?: { path: string; sha256: string; size: number } | null } | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -289,17 +293,31 @@ export function isBundleName(toolId: string, version: string): boolean {
     );
 }
 
-/** Reads a tool version's bundle from IndexedDB (installed tools) or the build's static data, or undefined. */
+/** Reads a built-in tool version's bundle from the build's static data, or undefined. */
+export async function readBuiltInBundle(toolId: string, version: string): Promise<ToolBundle | undefined> {
+    if (!isBundleName(toolId, version)) {
+        return undefined;
+    }
+    const bundle = await loadOptionalStaticData<unknown>(bundlePath(toolId, version));
+    return isToolBundle(bundle) ? bundle : undefined;
+}
+
+/**
+ * Reads a tool version's bundle from the build's static data (built-in tools) or IndexedDB (installed tools), or
+ * undefined. A stored record never replaces a built-in bundle.
+ */
 export async function readBundle(toolId: string, version: string): Promise<ToolBundle | undefined> {
     if (!isBundleName(toolId, version)) {
         return undefined;
     }
-    const record = await db.tools.get(toolId, version).catch(() => undefined);
-    if (record && isToolBundle(record.bundle)) {
-        return record.bundle;
+    const builtIn = await readBuiltInBundle(toolId, version);
+    if (builtIn) {
+        return builtIn;
     }
-    const bundle = await loadOptionalStaticData<unknown>(bundlePath(toolId, version));
-    return isToolBundle(bundle) ? bundle : undefined;
+    const record = await db.tools.get(toolId, version).catch(() => undefined);
+    return record?.source === "installed" && record.status === "ready" && isToolBundle(record.bundle)
+        ? record.bundle
+        : undefined;
 }
 
 /** The XML id of a tool: the second to last segment of a Tool Shed GUID, else the id itself. */

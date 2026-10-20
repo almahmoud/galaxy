@@ -4,6 +4,7 @@
  * It never reads or evaluates tool XML (architecture invariant 1).
  */
 
+export * from "./github";
 export { ingestToolInstall } from "./ingest";
 export { INSTALL_SLOT_COUNT, installSlotKeys, isInstalledArchiveKey } from "./keys";
 export * from "./source";

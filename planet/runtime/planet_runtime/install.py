@@ -60,7 +60,11 @@ def tool_message(path: str, text: str) -> dict[str, Any]:
 
 
 def run_worker(request: Mapping[str, Any], layout: Layout, cwd: Path) -> dict[str, Any]:
-    """Run ``install_worker`` with an environment without the manifest and return its report."""
+    """Run ``install_worker`` with an environment without the manifest and return its report.
+
+    The worker runs isolated (``-I``: no ``PYTHON*`` variables, user site or current directory on its path) in
+    ``cwd``, which must be an empty directory outside the repository.
+    """
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -69,7 +73,7 @@ def run_worker(request: Mapping[str, Any], layout: Layout, cwd: Path) -> dict[st
     environment["HOME"] = str(layout.stager_home)
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "planet_runtime.install_worker"],
+            [sys.executable, "-I", "-B", "-m", "planet_runtime.install_worker"],
             input=json.dumps(request),
             capture_output=True,
             text=True,
@@ -180,6 +184,8 @@ def install(manifest: Mapping[str, Any], layout: Layout, transfers: Transfers, r
         )
         out = work / "tools"
         out.mkdir(parents=True)
+        neutral = work / "worker"
+        neutral.mkdir()
         report = run_worker(
             {
                 "repository_root": str(checkout.repository_root),
@@ -195,7 +201,7 @@ def install(manifest: Mapping[str, Any], layout: Layout, transfers: Transfers, r
                 "archive_keys": [slot["repo_tar"]["key"] for slot in slots],
             },
             layout,
-            work,
+            neutral,
         )
     tools: list[dict[str, Any]] = report.get("tools") or []
     for entry in tools:

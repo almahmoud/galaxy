@@ -2,15 +2,16 @@
  * Ingest of tool installations (`tool_install` jobs). `jobs/ingest.ts` calls {@link ingestToolInstall} with the job's
  * checked `results.json` before it applies the results. Each tool the install pod reports installed is checked
  * against the objects of its slot: the bundle's SHA-256 and size, its id under the source's id prefix, and its
- * archive key, digest and size. Tools that pass are stored in the `tools` store (`source: "installed"`), and every
- * tool's outcome in the job's `params.tools`, in one transaction fenced like other job writes.
+ * archive key, digest and size. Versions the build has built in are refused. Tools that pass are stored in the `tools`
+ * store (`source: "installed"`), and every tool's outcome in the job's `params.tools`, in one transaction fenced like
+ * other job writes.
  */
 
 import { type JobRecord, jobs, type ToolRecord, tools, writeTx } from "@/planet/db";
 import type { JobDeps } from "@/planet/jobs/deps";
 import { ProtocolError, type ResultJobMessage, type ResultsDocument, type ToolBundle } from "@/planet/jobs/schemas";
 import { isNotFound } from "@/planet/s3";
-import { isBundleName, isToolBundle } from "@/planet/tools/bundle";
+import { isBundleName, isToolBundle, readBuiltInBundle } from "@/planet/tools/bundle";
 import { sha256Hex } from "@/planet/util/digest";
 
 import { INSTALL_SLOT_COUNT, installSlotKeys } from "./keys";
@@ -28,6 +29,7 @@ const MAX_FIELD_LENGTH = 255;
 const SETTLED_STATES: ReadonlySet<string> = new Set(["ok", "error", "deleted", "deleting"]);
 const WARNING = 2;
 const FATAL = 3;
+const BUILT_IN = "Planet has this tool version built in, so the built-in tool is used.";
 
 interface Digest {
     sha256: string;
@@ -334,22 +336,22 @@ export async function ingestToolInstall(
             refused.push(message(`${entry.path}: ${reason}`, WARNING));
         }
     }
+    for (const [entry, bundle] of verified) {
+        if (await readBuiltInBundle(bundle.id, bundle.version)) {
+            verified.delete(entry);
+            entry.state = "failed";
+            entry.errors = [...entry.errors, BUILT_IN];
+            refused.push(message(`${entry.path}: ${BUILT_IN}`, WARNING));
+        }
+    }
 
     const stored = await writeTx(["tools", "jobs"], async (tx): Promise<number | null> => {
         const current = await jobs.get(job.id, tx);
         if (!current || SETTLED_STATES.has(current.state)) {
             return null;
         }
-        let count = 0;
         for (const [entry, bundle] of verified) {
-            const existing = await tools.get(bundle.id, bundle.version, tx);
-            if (existing && existing.source !== "installed") {
-                entry.state = "failed";
-                entry.errors = [...entry.errors, "A built-in tool has the same id and version."];
-                continue;
-            }
             await tools.put(installedRecord(bundle, entry.warnings), tx);
-            count++;
         }
         const params: InstallParams = {
             ...(current.params as unknown as InstallParams),
@@ -358,7 +360,7 @@ export async function ingestToolInstall(
             tools: entries.map(outcomeOf),
         };
         await jobs.update(job.id, { params: params as unknown as Record<string, unknown> }, tx);
-        return count;
+        return verified.size;
     });
 
     // A settled job keeps its state; applying the results changes nothing either.

@@ -7,8 +7,9 @@
 export const DEFAULT_SLOT_COUNT = 32;
 
 /**
- * Datasets one upload may create in slots (collection elements, plus {@link DEFAULT_SLOT_COUNT} for archives and
- * directories). Each slot adds about 7 KiB of presigned requests to the manifest, which the pod reads up to 64 MiB.
+ * Datasets one upload may create: `hdas` elements, which are declared outputs, and the collection elements and
+ * expanded archives or directories it discovers in slots ({@link uploadSlotCount}). Each adds about 7 KiB of presigned
+ * requests to the manifest, which the pod reads up to 64 MiB.
  */
 export const MAX_UPLOAD_SLOTS = 5000;
 
@@ -28,9 +29,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Datasets an upload discovers: collection elements and expanded archives or directories. */
-export function uploadSlotCount(targets: unknown[]): number {
-    let count = 0;
+/** The datasets of a fetch request's targets: `hdas` elements, and those discovered in slots. */
+function countUploadDatasets(targets: unknown[]): { declared: number; slots: number } {
+    let declared = 0;
+    let discovered = 0;
     let dynamic = false;
     const leaves = (value: unknown): number => {
         if (Array.isArray(value)) {
@@ -49,23 +51,31 @@ export function uploadSlotCount(targets: unknown[]): number {
             continue;
         }
         if (target.destination.type === "hdca") {
-            count += leaves(target.elements ?? []);
+            discovered += leaves(target.elements ?? []);
             dynamic ||= Boolean(target.elements_from);
         } else if (target.elements_from) {
             dynamic = true;
+        } else if (target.destination.type === "hdas") {
+            declared += leaves(target.elements ?? []);
         }
     }
-    return count + (dynamic ? DEFAULT_SLOT_COUNT : 0);
+    return { declared, slots: discovered + (dynamic ? DEFAULT_SLOT_COUNT : 0) };
+}
+
+/** Datasets an upload discovers: collection elements and expanded archives or directories. */
+export function uploadSlotCount(targets: unknown[]): number {
+    return countUploadDatasets(targets).slots;
 }
 
 /** Why a fetch request's targets create more datasets than one upload job can, or null when they do not. */
 export function uploadLimitProblem(targets: unknown): string | null {
-    const slots = Array.isArray(targets) ? uploadSlotCount(targets) : 0;
-    if (slots <= MAX_UPLOAD_SLOTS) {
+    const { declared, slots } = Array.isArray(targets) ? countUploadDatasets(targets) : { declared: 0, slots: 0 };
+    const total = declared + slots;
+    if (total <= MAX_UPLOAD_SLOTS) {
         return null;
     }
     return (
-        `This upload creates ${slots} collection elements; one upload can create at most ${MAX_UPLOAD_SLOTS}. ` +
+        `This upload creates ${total} datasets; one upload can create at most ${MAX_UPLOAD_SLOTS}. ` +
         "Split it into several uploads."
     );
 }

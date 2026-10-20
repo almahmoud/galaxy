@@ -53,6 +53,8 @@ const TABLE_B = "gene\tsample\tcount\ngeneD\ts3\t1\ngeneE\ts3\t2\n";
 
 /** First pull of the runtime and tool images, scheduling and two stage-outs fit well within this. */
 const JOB_TIMEOUT = 5 * 60_000;
+/** A device that took an instance over starts its jobs this long later (`TAKE_OVER_GRACE_MS`, 3.5 minutes). */
+const TAKE_OVER_WAIT = 3.5 * 60_000;
 
 /** An SQLite query that counts to `n` (about 3 million rows a second), for jobs that keep running a while. */
 function countingQuery(n: number): string {
@@ -75,10 +77,14 @@ function kubeHeaders(token: string): Record<string, string> {
     return { Authorization: `Bearer ${token}`, Origin: ORIGIN, Accept: "application/json" };
 }
 
-/** Lists Planet's Kubernetes objects through the gateway, as the leader tab does. */
-async function listPlanetObjects(token: string, resource: "jobs" | "pods"): Promise<string[]> {
+/**
+ * Lists the Kubernetes objects of one Planet instance through the gateway, as the leader tab does. Objects of other
+ * instances, such as those an aborted run left until their TTL, are not listed.
+ */
+async function listPlanetObjects(token: string, resource: "jobs" | "pods", instanceId: string): Promise<string[]> {
     const group = resource === "jobs" ? "apis/batch/v1" : "api/v1";
-    const url = `${GATEWAY}/${group}/namespaces/${NAMESPACE}/${resource}?labelSelector=planet.dev%2Finstance`;
+    const selector = encodeURIComponent(`planet.dev/instance=${instanceId}`);
+    const url = `${GATEWAY}/${group}/namespaces/${NAMESPACE}/${resource}?labelSelector=${selector}`;
     // A dropped port-forward connection is retried, as the leader does at its next reconcile.
     let response: Response | undefined;
     for (let attempt = 1; !response; attempt++) {
@@ -506,6 +512,11 @@ function allowClusterErrors(health: Health): void {
     });
     health.allow({
         text: /^Failed to load resource: the server responded with a status of 404/,
+        url: /^http:\/\/127\.0\.0\.1:8002\/planet\/planet\/state\/[^/]+\/lease\.json$/,
+        reason: "The leader reads its instance's lease.json before it writes the first one.",
+    });
+    health.allow({
+        text: /^Failed to load resource: the server responded with a status of 404/,
         url: /^http:\/\/127\.0\.0\.1:8002\/planet\/planet\/jobs\/[0-9a-f]+\/a\d+\/dispatch\.json$/,
         reason: "The leader reads an attempt's dispatch record before its first dispatch, when it does not exist yet.",
     });
@@ -563,8 +574,8 @@ async function connect(page: Page, secrets: ClusterSecrets): Promise<void> {
 function allowBackupErrors(health: Health): void {
     health.allow({
         text: /^Failed to load resource: the server responded with a status of 404/,
-        url: /^http:\/\/127\.0\.0\.1:8002\/planet\/planet\/state\/[^/]+\/(latest|lease)\.json$/,
-        reason: "Backups read an instance's latest.json and lease.json, which do not exist before its first snapshot.",
+        url: /^http:\/\/127\.0\.0\.1:8002\/planet\/planet\/state\/[^/]+\/latest\.json$/,
+        reason: "Backups read an instance's latest.json, which does not exist before its first snapshot.",
     });
 }
 
@@ -576,7 +587,7 @@ async function restoreElsewhere(
     browser: Browser,
     testInfo: TestInfo,
     secrets: ClusterSecrets,
-    expected: { instanceId: string; historyName: string },
+    expected: { instanceId: string; historyName: string; count: number; running: number; waiting: number },
 ): Promise<void> {
     const context = await browser.newContext({ baseURL: ORIGIN, viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
@@ -621,7 +632,9 @@ async function restoreElsewhere(
 
         await openGalaxy(page);
         const histories = await listHistories(page);
-        expect(histories).toContainEqual(expect.objectContaining({ name: expected.historyName, count: 2 }));
+        expect(histories).toContainEqual(
+            expect.objectContaining({ name: expected.historyName, count: expected.count }),
+        );
         const current = await api<{ name: string }>(page, `/api/histories/${await currentHistoryId(page)}`);
         expect(current.body.name).toBe(expected.historyName);
         await waitForState(page, 1, "ok", 60_000);
@@ -636,30 +649,65 @@ async function restoreElsewhere(
         // The display reads past the end of the dataset once and stops.
         await expect(page.locator("#center").getByText(/Loading more/)).toHaveCount(0);
         await saveScreenshot(page, testInfo, "cluster-29-restored");
-        const backup = await api<{ instance_id: string; restored: { instance_id: string } | null }>(
-            page,
-            "/api/planet/backup",
-        );
+        const backup = await api<{
+            instance_id: string;
+            restored: { instance_id: string } | null;
+            parked_jobs: number;
+        }>(page, "/api/planet/backup");
         expect(backup.body).toMatchObject({
             instance_id: expected.instanceId,
             restored: { instance_id: expected.instanceId },
+            parked_jobs: 1,
         });
 
-        // This browser now leads the restored instance and runs a tool on a restored dataset.
+        // The job that had not reached the cluster is paused until the user resumes it; the running one continues.
+        await waitForState(page, expected.waiting, "paused", 60_000);
+        const parked = await datasetDetails(page, await hdaId(page, expected.waiting));
+        expect(parked.misc_info).toContain("This job was restored from a snapshot.");
+        expect(await historyItem(page, expected.running).getAttribute("data-state")).toMatch(/^(queued|running|ok)$/);
+        await openGalaxy(page);
+        const overview = page.frameLocator("iframe[name=frame]");
+        await expect(overview.getByText(/This device took the instance over\. Its jobs start here at/)).toBeVisible({
+            timeout: 60_000,
+        });
+        const parkedPanel = overview.locator("section", {
+            has: overview.getByRole("heading", { name: "Restored jobs are paused", exact: true }),
+        });
+        await expect(parkedPanel).toContainText("1 job from the snapshot had not reached the cluster");
+        await saveScreenshot(page, testInfo, "cluster-30-restored-parked");
+        await parkedPanel.getByRole("button", { name: "Resume restored jobs" }).click();
+        await expect(parkedPanel).toHaveCount(0, { timeout: 30_000 });
+        await expect(historyItem(page, expected.waiting)).not.toHaveAttribute("data-state", "paused", {
+            timeout: 30_000,
+        });
+
+        // This browser now leads the restored instance and runs a tool on a restored dataset once the take-over's
+        // wait is over.
         await openToolForm(page, DATAMASH);
+        await selectOption(page, "in_file", "1: counts.tsv");
         await expect(page.locator("#form-element-in_file")).toContainText("counts.tsv");
         await page.locator("#form-element-grouping input").fill("1");
         await setSwitch(page, "need_sort", true);
         await setSwitch(page, "header_in", true);
-        await timed("tool run after restore", async () => {
+        const submitted = await timed("restored jobs after take-over", async () => {
             await submitTool(page);
-            await waitForState(page, 3, "ok");
+            const hid = await hidOf(page, /^Datamash on data/);
+            await waitForState(page, expected.running, "ok", TAKE_OVER_WAIT + JOB_TIMEOUT);
+            await waitForState(page, expected.waiting, "ok", TAKE_OVER_WAIT + 2 * JOB_TIMEOUT);
+            await waitForState(page, hid, "ok", TAKE_OVER_WAIT + 2 * JOB_TIMEOUT);
+            return hid;
         });
-        const output = await expandItem(page, 3);
+        const resumed = await expandItem(page, expected.waiting);
+        await expect(resumed.locator(".dataset-peek")).toContainText("600000000");
+        const output = await expandItem(page, submitted);
         await expect(output.locator(".dataset-peek")).toContainText(/geneA\s*2/);
-        await saveScreenshot(page, testInfo, "cluster-30-restored-tool-ok");
-        await expect.poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 }).toEqual([]);
-        await expect.poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 }).toEqual([]);
+        await saveScreenshot(page, testInfo, "cluster-31-restored-tool-ok");
+        await expect
+            .poll(() => listPlanetObjects(secrets.token, "jobs", expected.instanceId), { timeout: 120_000 })
+            .toEqual([]);
+        await expect
+            .poll(() => listPlanetObjects(secrets.token, "pods", expected.instanceId), { timeout: 120_000 })
+            .toEqual([]);
     } finally {
         writeConsole();
         await health.attachSummary(testInfo);
@@ -687,6 +735,14 @@ async function planetStatus(page: Page): Promise<RunnerStatus> {
     return response.body;
 }
 
+/** The id of the Planet instance of the page's browser, which labels its Kubernetes objects. */
+async function instanceOf(page: Page): Promise<string> {
+    const response = await api<{ instance_id: string }>(page, "/api/planet/status");
+    expect(response.status).toBe(200);
+    expect(response.body.instance_id).toMatch(/^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$/);
+    return response.body.instance_id;
+}
+
 test.describe("cluster", () => {
     test.skip(!ENABLED, "set PLANET_E2E_CLUSTER=1 and run planet/scripts/dev-cluster.sh port-forward");
     test.describe.configure({ mode: "serial" });
@@ -704,6 +760,7 @@ test.describe("cluster", () => {
         pods.start();
         try {
             await connect(page, secrets);
+            const instance = await instanceOf(page);
             await saveScreenshot(page, testInfo, "cluster-01-settings");
 
             // The Galaxy tab leads and the overview reports it.
@@ -863,8 +920,12 @@ test.describe("cluster", () => {
             await saveScreenshot(page, testInfo, "cluster-15-purged");
 
             // Finished jobs are removed from the cluster.
-            await expect.poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 }).toEqual([]);
-            await expect.poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 }).toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "jobs", instance), { timeout: 120_000 })
+                .toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "pods", instance), { timeout: 120_000 })
+                .toEqual([]);
         } finally {
             writeConsole();
             await saveTimings(testInfo, await pods.stop());
@@ -880,6 +941,7 @@ test.describe("cluster", () => {
         pods.start();
         try {
             await connect(page, secrets);
+            const instance = await instanceOf(page);
             await openGalaxy(page);
 
             // A query that would run for minutes is stopped by deleting its output.
@@ -888,7 +950,7 @@ test.describe("cluster", () => {
             await waitForState(page, slow, "running");
             const { creating_job: slowJob } = await datasetDetails(page, slowId);
             await expect
-                .poll(() => listPlanetObjects(secrets.token, "pods"))
+                .poll(() => listPlanetObjects(secrets.token, "pods", instance))
                 .toContainEqual(expect.stringContaining(slowJob));
             await saveScreenshot(page, testInfo, "cluster-16-running");
             await timed("stop running job", async () => {
@@ -898,10 +960,10 @@ test.describe("cluster", () => {
                     .poll(async () => (await api<{ state: string }>(page, `/api/jobs/${slowJob}`)).body.state)
                     .toBe("deleted");
                 await expect
-                    .poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 })
+                    .poll(() => listPlanetObjects(secrets.token, "jobs", instance), { timeout: 120_000 })
                     .not.toContainEqual(expect.stringContaining(slowJob));
                 await expect
-                    .poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 })
+                    .poll(() => listPlanetObjects(secrets.token, "pods", instance), { timeout: 120_000 })
                     .not.toContainEqual(expect.stringContaining(slowJob));
             });
             const stopped = await datasetDetails(page, slowId);
@@ -932,8 +994,12 @@ test.describe("cluster", () => {
             await expect(result.locator(".dataset-peek")).toContainText("60000000");
             await saveScreenshot(page, testInfo, "cluster-18-after-reload");
 
-            await expect.poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 }).toEqual([]);
-            await expect.poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 }).toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "jobs", instance), { timeout: 120_000 })
+                .toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "pods", instance), { timeout: 120_000 })
+                .toEqual([]);
         } finally {
             writeConsole();
             await saveTimings(testInfo, await pods.stop());
@@ -949,6 +1015,7 @@ test.describe("cluster", () => {
         pods.start();
         try {
             await connect(page, secrets);
+            const instance = await instanceOf(page);
             await openGalaxy(page);
             await timed("map-over uploads", () =>
                 uploadFiles(page, testInfo, { "first.tsv": TABLE, "second.tsv": TABLE_B }, [1, 2]),
@@ -1057,8 +1124,12 @@ test.describe("cluster", () => {
             await expect(historyItem(page, sorted)).toContainText("a list with 2 tabular datasets");
             await saveScreenshot(page, testInfo, "cluster-22-sorted-list");
 
-            await expect.poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 }).toEqual([]);
-            await expect.poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 }).toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "jobs", instance), { timeout: 120_000 })
+                .toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "pods", instance), { timeout: 120_000 })
+                .toEqual([]);
         } finally {
             writeConsole();
             await saveTimings(testInfo, await pods.stop());
@@ -1074,6 +1145,7 @@ test.describe("cluster", () => {
         pods.start();
         try {
             await connect(page, secrets);
+            const instance = await instanceOf(page);
 
             // Search the main Tool Shed from the overview in Galaxy's center panel, whose tab runs the installation,
             // and install the newest revision.
@@ -1114,6 +1186,25 @@ test.describe("cluster", () => {
                 ),
             );
 
+            // The previous revision adds an older version of the same tool, the same lineage.
+            await timed("second version installation", async () => {
+                await hit.getByRole("combobox").selectOption({ index: 1 });
+                await hit.getByRole("button", { name: "Install", exact: true }).click();
+                await expect(install).toHaveCount(2);
+                await expect(
+                    install.locator(".pw-installs__head", { hasText: /Installed|Partly installed|Failed/ }),
+                ).toHaveCount(2, { timeout: JOB_TIMEOUT });
+            });
+            await expect(install.locator(".pw-installs__head", { hasText: /Installed/ })).toHaveCount(2);
+            await expect(installed).toHaveCount(2);
+            const { body: versions } = await api<{ id: string; version: string; name: string }[]>(
+                page,
+                "/api/planet/tools/installed",
+            );
+            const older = versions.find((each) => each.name === INSTALL_TOOL_NAME && each.version !== tool!.version);
+            const lineage = (id: string) => id.slice(0, id.lastIndexOf("/"));
+            expect(lineage(older!.id)).toBe(lineage(tool!.id));
+
             // The installed tool shows in the tool panel and runs on the cluster.
             await openGalaxy(page);
             const toolbox = page.locator("#toolbox-panel");
@@ -1129,8 +1220,22 @@ test.describe("cluster", () => {
             const section = toolbox.locator(".tool-panel-section", { hasText: "Installed tools" });
             await expect(section).toBeVisible();
             await section.locator(".toolSectionTitle").click();
-            await expect(section.locator(".toolTitle", { hasText: INSTALL_TOOL_NAME })).toBeVisible();
+            // The panel lists the lineage once, at its newest version; the form switches between both versions.
+            const link = section.locator(".toolTitle a.tool-link", { hasText: INSTALL_TOOL_NAME });
+            await expect(link).toHaveCount(1);
+            await expect(link).toHaveAttribute("data-tool-id", tool!.id);
             await saveScreenshot(page, testInfo, "cluster-25-tool-panel");
+            await link.click();
+            await expect(page.locator('[data-description="galaxy tool version"]')).toHaveAttribute(
+                "data-version",
+                tool!.version,
+            );
+            const switcher = page.locator(".tool-versions");
+            await switcher.locator("button").first().click();
+            await expect(switcher).toContainText(`Selected ${tool!.version}`);
+            await expect(switcher).toContainText(`Switch to ${older!.version}`);
+            await saveScreenshot(page, testInfo, "cluster-25-tool-versions");
+            await page.keyboard.press("Escape");
             await uploadFiles(page, testInfo, { "sequences.fasta": FASTA }, [1]);
             await openToolForm(page, tool!.id);
             await expect(page.locator("#form-element-input")).toContainText("sequences.fasta");
@@ -1147,14 +1252,22 @@ test.describe("cluster", () => {
             await expect(output.locator(".dataset-peek")).toContainText(/sequences_fasta\s*FASTA\s*DNA\s*2\s*42/);
             await saveScreenshot(page, testInfo, "cluster-26-installed-tool-ok");
 
-            // Uninstalling removes it from the list of installed tools.
+            // Uninstalling removes each version from the list of installed tools.
             await openGalaxy(page);
-            await installed.getByRole("button", { name: "Uninstall" }).click();
-            await installed.getByRole("button", { name: "Uninstall" }).click();
+            for (const version of [older!.version, tool!.version]) {
+                const item = installed.filter({ hasText: version });
+                await item.getByRole("button", { name: "Uninstall" }).click();
+                await item.getByRole("button", { name: "Uninstall" }).click();
+                await expect(item).toHaveCount(0);
+            }
             await expect(installed).toHaveCount(0);
 
-            await expect.poll(() => listPlanetObjects(secrets.token, "jobs"), { timeout: 120_000 }).toEqual([]);
-            await expect.poll(() => listPlanetObjects(secrets.token, "pods"), { timeout: 120_000 }).toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "jobs", instance), { timeout: 120_000 })
+                .toEqual([]);
+            await expect
+                .poll(() => listPlanetObjects(secrets.token, "pods", instance), { timeout: 120_000 })
+                .toEqual([]);
         } finally {
             writeConsole();
             await saveTimings(testInfo, await pods.stop());
@@ -1162,7 +1275,7 @@ test.describe("cluster", () => {
     });
 
     test("restores a bucket snapshot into an empty browser", async ({ page, health, browser }, testInfo) => {
-        test.setTimeout(15 * 60_000);
+        test.setTimeout(40 * 60_000);
         allowClusterErrors(health);
         allowBackupErrors(health);
         const secrets = readSecrets();
@@ -1178,6 +1291,15 @@ test.describe("cluster", () => {
             expect(
                 (await api(page, `/api/histories/${historyId}`, { method: "PUT", body: { name: historyName } })).status,
             ).toBe(200);
+            // A job runs in the cluster while the snapshot is written (about 3 minutes), and one that needs its output
+            // waits without reaching the cluster.
+            const running = await runQuery(page, countingQuery(600_000_000));
+            await waitForState(page, running, "running");
+            await openToolForm(page, DATAMASH_REVERSE);
+            await expect(page.locator("#form-element-in_file")).toContainText(`${running}: query results`);
+            await submitTool(page);
+            const waiting = await hidOf(page, /^Reverse on data/);
+            const waitingJob = (await datasetDetails(page, await hdaId(page, waiting))).creating_job;
 
             // Set a passphrase and write a snapshot from the overview in Galaxy's center panel, whose tab writes it.
             await openGalaxy(page);
@@ -1209,6 +1331,10 @@ test.describe("cluster", () => {
                     expect.stringMatching(new RegExp(`^state/${instanceId}/snapshots/.+\\.json\\.gz\\.enc$`)),
                 ]),
             );
+            // Both jobs were in the same states when the snapshot was written.
+            expect((await datasetDetails(page, await hdaId(page, running))).state).toBe("running");
+            expect((await api<{ state: string }>(page, `/api/jobs/${waitingJob}`)).body.state).toBe("new");
+            const { count } = (await listHistories(page)).find((history) => history.name === historyName)!;
             await page.reload();
             await expectGalaxy(page);
             await expect(backups).toContainText("Last snapshot");
@@ -1220,7 +1346,7 @@ test.describe("cluster", () => {
             // This browser stops; the snapshot is restored into another one.
             await page.close();
 
-            await restoreElsewhere(browser, testInfo, secrets, { instanceId, historyName });
+            await restoreElsewhere(browser, testInfo, secrets, { instanceId, historyName, count, running, waiting });
         } finally {
             writeConsole();
             await saveTimings(testInfo, await pods.stop());
