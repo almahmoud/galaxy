@@ -1,6 +1,6 @@
 /**
  * Client of the main Tool Shed's search API, used by the welcome page. Only the routes that answer CORS requests
- * are used (notes/reports/review/r6.md section 3): `/api/repositories?q=`, `/api/tools?q=` and
+ * are used: `/api/repositories?q=`, `/api/tools?q=` and
  * `/api/repositories/get_ordered_installable_revisions`. Requests carry no credentials and no referrer; answers are
  * checked and shortened before they are shown, as text only.
  */

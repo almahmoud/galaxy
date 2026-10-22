@@ -1,6 +1,6 @@
 /**
  * Default cluster settings and the storage providers offered by the setup page, with the settings each one
- * implies. The values follow planet/docs/cluster-setup.md, planet/docs/storage-setup.md and planet/deploy.
+ * implies. The values follow planet/deploy and planet/scripts/dev-cluster.sh (see commands.test.ts).
  */
 
 /** Cluster settings for planet/deploy with the gateway port-forwarded to 127.0.0.1:8001. */

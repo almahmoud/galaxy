@@ -45,7 +45,7 @@ function quay(pages: Record<string, { tags: unknown[]; has_additional?: boolean 
 
 describe("mulled-v2 names", () => {
     it("hash sorted package names and versions as Galaxy does", async () => {
-        // notes/reports/review/r6.md section 4: bwa_mem 0.7.19+galaxy1
+        // bwa_mem 0.7.19+galaxy1, checked against the image published on quay.io
         expect(
             await mulledV2Name([
                 { name: "samtools", version: "1.21" },

@@ -7,7 +7,7 @@ import type { PlanetSettings } from "@/planet/db/types";
 
 import type { CheckTarget, PlanetStatus } from "./lib/api";
 import type { ClusterReport, StorageReport } from "./lib/checks";
-import { CLUSTER_GUIDE_URL, REPOSITORY_URL, STORAGE_GUIDE_URL } from "./lib/commands";
+import { REPOSITORY_URL } from "./lib/commands";
 import { type CardState, firstProblem } from "./lib/display";
 import { RUNNER_STATES, runnerView } from "./lib/runner";
 import { useServices } from "./lib/services";
@@ -370,8 +370,6 @@ onBeforeUnmount(() => {
         <footer class="pw-footer">
             <span v-if="status">Build {{ status.build_id }} · Instance {{ status.instance_id }}</span>
             <span class="pw-footer__links">
-                <a :href="CLUSTER_GUIDE_URL" target="_blank" rel="noopener noreferrer">Cluster guide</a>
-                <a :href="STORAGE_GUIDE_URL" target="_blank" rel="noopener noreferrer">Storage guide</a>
                 <a :href="REPOSITORY_URL" target="_blank" rel="noopener noreferrer">Source</a>
             </span>
         </footer>

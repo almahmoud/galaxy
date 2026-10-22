@@ -1,6 +1,6 @@
-# Production example: one HTTPS origin, storage in R2 or S3, base quotas.
-# Exposure over HTTPS (Cloudflare Tunnel or a Gateway API implementation) and job pod egress:
-# see planet/docs/cluster-setup.md.
+# Production example: one HTTPS origin, storage in R2 or S3, base quotas. The commented entries
+# add the Cloudflare Tunnel component and adjust job pod egress (egress-private.yaml,
+# cluster-ranges.yaml).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

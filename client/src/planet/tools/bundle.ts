@@ -1,5 +1,5 @@
 /**
- * Planet tool bundles (`planet/docs/tool-bundle.md`): one Galaxy tool version parsed by Galaxy's own code, as JSON.
+ * Planet tool bundles (planet/toolbox/tool-bundle.schema.json): one Galaxy tool version parsed by Galaxy's own code, as JSON.
  * The types cover the fields the tool form and job submission read; bundles carry many more.
  */
 
@@ -286,7 +286,7 @@ export function bundlePath(toolId: string, version: string): string {
 /** Tool ids and versions use these characters, in `/`-separated segments that are not `.` or `..`. */
 const SEGMENT = /^[A-Za-z0-9._+@~-]+$/;
 
-/** True when `toolId` and `version` name a bundle path (`planet/docs/tool-bundle.md`). */
+/** True when `toolId` and `version` name a bundle path ({@link bundlePath}). */
 export function isBundleName(toolId: string, version: string): boolean {
     return [...toolId.split("/"), ...version.split("/")].every(
         (segment) => SEGMENT.test(segment) && segment !== "." && segment !== "..",

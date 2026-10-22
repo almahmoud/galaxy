@@ -1,5 +1,5 @@
 /**
- * Kubernetes Job specs for Planet job pods (planet/docs/job-protocol.md). Tool jobs run an init container
+ * Kubernetes Job specs for Planet job pods. Tool jobs run an init container
  * `stage-in`, then the tool and `stage-out` side by side; upload and set-metadata jobs run one stager container.
  * Specs satisfy Pod Security `restricted` and the `planet-job-template` admission policy
  * (planet/deploy/base/job-policy.yaml).

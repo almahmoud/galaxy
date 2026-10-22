@@ -1,6 +1,6 @@
 # In-cluster S3 (Garage, single node) in namespace planet-storage, published through a second
-# gateway listener on port 8081. Requires the Secret planet-storage/garage-credentials, see
-# planet/docs/storage-setup.md.
+# gateway listener on port 8081. Requires the Secret planet-storage/garage-credentials with the
+# keys rpc-secret, access-key-id and secret-access-key (garage.yaml); dev-cluster.sh creates it.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 

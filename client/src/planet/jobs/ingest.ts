@@ -1,5 +1,5 @@
 /**
- * Ingest of what a job's pod wrote (leader responsibility 6 of notes/phase34-contracts.md): the output decisions of
+ * Ingest of what a job's pod wrote: the output decisions of
  * `prepare.json`, the datasets, collections and job fields of `results.json`, and failures of pods that left no
  * results, recorded the way Galaxy's job finishing (`JobWrapper.finish`, `_finish_dataset`) and `JobWrapper.fail`
  * record them. Each function writes IndexedDB in one transaction over `JOB_STORES` and may be called again.

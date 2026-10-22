@@ -1,5 +1,5 @@
 /**
- * Where a tool installation reads tools from (`install.source` of a `tool_install` manifest, planet/docs/job-protocol.md):
+ * Where a tool installation reads tools from (`install.source` of a `tool_install` manifest, manifest.schema.json):
  * a Tool Shed changeset, cloned by the install pod with hg, or a GitHub commit, read from its codeload tarball.
  * The browser checks and normalizes sources; it never reads the repositories itself.
  */

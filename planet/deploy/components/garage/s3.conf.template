@@ -12,7 +12,7 @@ server {
     listen 8081;
     client_max_body_size 0;
 
-    # The bucket CORS policy of planet/docs/storage-setup.md and client/src/planet/s3/setup.ts.
+    # The bucket CORS policy of client/src/planet/s3/setup.ts.
     set $planet_cors_methods "GET, PUT, POST, DELETE, HEAD";
     set $planet_cors_headers "authorization, content-type, content-md5, content-disposition, range, if-match, if-none-match, x-amz-date, x-amz-content-sha256, x-amz-security-token, x-amz-copy-source, x-amz-copy-source-range, x-amz-user-agent";
     set $planet_cors_expose "ETag, Content-Length, Content-Range, Accept-Ranges, Date, x-amz-request-id, x-amz-version-id, x-amz-bucket-region";

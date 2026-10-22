@@ -2,7 +2,6 @@
 import {
     faChevronRight,
     faExclamationTriangle,
-    faExternalLinkAlt,
     faInfoCircle,
     faPlug,
     faSave,
@@ -15,7 +14,7 @@ import type { PlanetSettings } from "@/planet/db/types";
 
 import { PlanetApiError, type RuntimeStatus } from "../lib/api";
 import type { ClusterReport } from "../lib/checks";
-import { CLUSTER_GUIDE_URL, clusterCommands, DEFAULT_GATEWAY_URL, localClusterCommands } from "../lib/commands";
+import { clusterCommands, DEFAULT_GATEWAY_URL, localClusterCommands } from "../lib/commands";
 import { testCluster } from "../lib/connection";
 import {
     clusterChange,
@@ -256,12 +255,8 @@ defineExpose({ test, focus });
             </div>
             <CommandSteps :commands="commands" />
             <p class="pw-panel__text mt-3 mb-0">
-                <a :href="CLUSTER_GUIDE_URL" target="_blank" rel="noopener noreferrer" class="pw-link">
-                    Cluster setup guide
-                    <FontAwesomeIcon :icon="faExternalLinkAlt" aria-hidden="true" />
-                    <span class="sr-only">(opens in a new tab)</span>
-                </a>
-                covers HTTPS gateways for Safari and remote access.
+                Safari, and browsers on other computers, need the gateway on an HTTPS hostname with a trusted
+                certificate.
             </p>
         </div>
 

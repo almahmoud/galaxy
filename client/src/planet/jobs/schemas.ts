@@ -1,5 +1,5 @@
 /**
- * Documents of the job protocol (planet/docs/job-protocol.md, planet/runtime/schemas/*.schema.json): the manifest
+ * Documents of the job protocol (planet/runtime/schemas/*.schema.json): the manifest
  * the browser writes, and `prepare.json` and `results.json`, which the pod writes and the browser checks with
  * {@link parsePrepare} and {@link parseResults} before using them.
  */
@@ -12,7 +12,7 @@ export type ProtocolRequest = string | { url: string; headers?: Record<string, s
 export type JobKind = "tool" | "upload" | "set_metadata" | "tool_install";
 
 // ---------------------------------------------------------------------------------------------------------
-// Tool bundles (planet/docs/tool-bundle.md), as far as the job protocol reads them
+// Tool bundles (planet/toolbox/tool-bundle.schema.json), as far as the job protocol reads them
 
 export interface BundleParameter {
     model_class?: string;

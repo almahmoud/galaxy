@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "urn:planet:schema:tool-bundle:1",
     "title": "Planet tool bundle",
-    "description": "A Galaxy tool parsed by Galaxy's tool_util, as served to the Planet form engine and job stage-in. See planet/docs/tool-bundle.md.",
+    "description": "A Galaxy tool parsed by Galaxy's tool_util, as served to the Planet form engine and job stage-in.",
     "type": "object",
     "additionalProperties": false,
     "required": [

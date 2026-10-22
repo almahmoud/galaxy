@@ -8,7 +8,7 @@ import { MAX_PRESIGN_EXPIRES_SECONDS } from "@/planet/s3";
 
 /** Matches the manifest's `job.id` (manifest.schema.json `#/$defs/job`). */
 const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
-/** Characters of tool ids and versions (planet/docs/tool-bundle.md), `/` separating segments. */
+/** Characters of tool ids and versions (`_SAFE_SEGMENT` of planet_runtime.generate), `/` separating segments. */
 const TOOL_SEGMENT_PATTERN = /^[A-Za-z0-9._+@~-]+$/;
 /** Dataset UUIDs as the browser writes them (lowercase, hyphenated). */
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -110,7 +110,7 @@ export function toolArchiveStaticPath(repoTarPath: string): string {
 // ---------------------------------------------------------------------------------------------------------
 // Time limits
 
-/** Presigned requests outlive the Kubernetes deadline by this much (job-protocol.md). */
+/** Presigned requests outlive the Kubernetes deadline by this much (manifest.schema.json `#/$defs/request`). */
 export const REQUEST_EXPIRY_MARGIN_SECONDS = 3600;
 /** The longest deadline whose requests SigV4 can still sign: 7 days minus the margin. */
 export const MAX_DEADLINE_SECONDS = MAX_PRESIGN_EXPIRES_SECONDS - REQUEST_EXPIRY_MARGIN_SECONDS;

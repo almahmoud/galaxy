@@ -1,4 +1,4 @@
-/** Commands shown on the setup page. Each one appears in planet/docs/cluster-setup.md (see commands.test.ts). */
+/** Commands shown on the setup page. commands.test.ts checks them against planet/deploy and dev-cluster.sh. */
 
 import { CLUSTER } from "./presets";
 
@@ -10,8 +10,6 @@ export interface SetupCommand {
 }
 
 export const REPOSITORY_URL = "https://github.com/almahmoud/galaxy/tree/planet";
-export const CLUSTER_GUIDE_URL = "https://github.com/almahmoud/galaxy/blob/planet/planet/docs/cluster-setup.md";
-export const STORAGE_GUIDE_URL = "https://github.com/almahmoud/galaxy/blob/planet/planet/docs/storage-setup.md";
 
 export const DEFAULT_GATEWAY_URL = CLUSTER.gatewayUrl;
 

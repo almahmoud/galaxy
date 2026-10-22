@@ -1,4 +1,4 @@
-"""The manifest's ``tool``: a tool bundle (``planet/docs/tool-bundle.md``) or its flat form.
+"""The manifest's ``tool``: a tool bundle (``planet/toolbox/tool-bundle.schema.json``) or its flat form.
 
 :func:`normalize` returns the flat form the stager uses, keeping Galaxy's
 semantics: config files in ``Tool._parse_config_files`` order (inputs, templates,

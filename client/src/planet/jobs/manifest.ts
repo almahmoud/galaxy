@@ -1,7 +1,7 @@
 /**
- * Dispatch of a job (leader responsibility 3 of notes/phase34-contracts.md): builds the manifest of protocol
- * version 1 (planet/docs/job-protocol.md) from IndexedDB, creates the bucket objects it refers to, writes
- * `jobs/<job>/manifest.json` and returns what the Kubernetes Job needs.
+ * Dispatch of a job: builds the manifest of protocol version 1 (planet/runtime/schemas/manifest.schema.json)
+ * from IndexedDB, creates the bucket objects it refers to, writes `jobs/<job>/manifest.json` and returns what
+ * the Kubernetes Job needs.
  *
  * Expected job records:
  * - tool jobs: `params` holds Galaxy's job state, nested (conditionals as objects, repeats as arrays) or as the flat

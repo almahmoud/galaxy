@@ -1,4 +1,4 @@
-"""Loading and checking the job manifest (see ``planet/docs/job-protocol.md``)."""
+"""Loading and checking the job manifest (``planet/runtime/schemas/manifest.schema.json``)."""
 
 import copy
 import json

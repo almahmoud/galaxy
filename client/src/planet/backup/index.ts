@@ -1,4 +1,4 @@
-/** Encrypted snapshots of Planet's IndexedDB records in the bucket, and restoring them. See README.md. */
+/** Encrypted snapshots of Planet's IndexedDB records in the bucket, and restoring them. */
 
 export * from "./bucket";
 export { BackupError, type BackupErrorCode, isBackupError } from "./errors";

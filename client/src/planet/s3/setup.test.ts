@@ -312,17 +312,7 @@ describe("buildCorsPolicy", () => {
     });
 });
 
-describe("CORS policy in the documentation and the gateway", () => {
-    it("matches storage-setup.md", () => {
-        const doc = readFileSync(resolve(REPOSITORY, "planet/docs/storage-setup.md"), "utf-8");
-        const blocks = [...doc.matchAll(/```json\n([\s\S]*?)```/g)].map((match) => JSON.parse(match[1]!));
-        const policy = buildCorsPolicy("https://planet.mylab.org");
-        expect(blocks).toContainEqual(policy.r2Wrangler);
-        expect(blocks).toContainEqual(policy.awsPutBucketCors);
-        expect(doc).toContain(policy.r2WranglerCommand);
-        expect(doc).toContain(policy.awsCommand);
-    });
-
+describe("CORS policy in the gateway", () => {
     it("matches the gateway's S3 listener", () => {
         const deploy = resolve(REPOSITORY, "planet/deploy");
         const listener = readFileSync(resolve(deploy, "components/garage/s3.conf.template"), "utf-8");

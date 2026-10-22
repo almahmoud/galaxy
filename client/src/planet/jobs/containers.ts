@@ -80,7 +80,7 @@ interface QuayTag {
     start_ts?: number;
 }
 
-/** Reads the container request from a tool bundle (`requirements` and `containers`, see tool-bundle.md). */
+/** Reads the container request from a tool bundle (`requirements` and `containers`, see tool-bundle.schema.json). */
 export function containerRequest(bundle: unknown): ContainerRequest {
     const tool = (bundle ?? {}) as { requirements?: unknown; containers?: unknown };
     const requirements: PackageRequirement[] = [];

@@ -10,7 +10,7 @@ NGINX_IMAGE="$(sed -n 's|^ *image: \(nginxinc/nginx-unprivileged:.*\)$|\1|p' "$D
 GARAGE_IMAGE="$(sed -n 's|^ *image: \(dxflrs/garage:.*\)$|\1|p' "$DEPLOY_DIR/components/garage/garage.yaml")"
 ORIGIN="http://localhost:8787"
 TOKEN="Bearer test-token"
-# The bucket CORS policy of planet/docs/storage-setup.md.
+# The bucket CORS policy of client/src/planet/s3/setup.ts.
 S3_ALLOW_HEADERS="authorization, content-type, content-md5, content-disposition, range, if-match, if-none-match, x-amz-date, x-amz-content-sha256, x-amz-security-token, x-amz-copy-source, x-amz-copy-source-range, x-amz-user-agent"
 S3_EXPOSE_HEADERS="ETag, Content-Length, Content-Range, Accept-Ranges, Date, x-amz-request-id, x-amz-version-id, x-amz-bucket-region"
 

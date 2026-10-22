@@ -3,8 +3,8 @@ import { isS3Error, S3Error } from "./errors";
 import { fullKey, isIpHost, isLoopbackHost, type ResolvedS3Config } from "./url";
 
 /**
- * The bucket CORS policy. planet/docs/storage-setup.md and the gateway's S3 listener
- * (planet/deploy/components/garage/s3.conf.template) use the same lists.
+ * The bucket CORS policy. The gateway's S3 listener (planet/deploy/components/garage/s3.conf.template)
+ * uses the same lists.
  */
 export const CORS_ALLOWED_METHODS = ["GET", "PUT", "POST", "DELETE", "HEAD"];
 

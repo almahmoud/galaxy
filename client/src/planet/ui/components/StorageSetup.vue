@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { faChevronRight, faExternalLinkAlt, faPlug, faSave, faSpinner } from "@fortawesome/free-solid-svg-icons";
+import { faChevronRight, faPlug, faSave, faSpinner } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed, nextTick, ref, shallowRef, watch } from "vue";
 
@@ -8,7 +8,6 @@ import { buildCorsPolicy } from "@/planet/s3";
 
 import { PlanetApiError } from "../lib/api";
 import type { StorageReport } from "../lib/checks";
-import { STORAGE_GUIDE_URL } from "../lib/commands";
 import { testStorage } from "../lib/connection";
 import { needsCorsPolicy } from "../lib/display";
 import {
@@ -477,14 +476,6 @@ defineExpose({ test, focus });
                     <p class="pw-panel__text mt-3">Then apply it:</p>
                     <CopyCommand :text="corsCommand" label="command to apply the CORS policy" />
                 </template>
-                <p class="pw-panel__text mt-3 mb-0">
-                    <a :href="STORAGE_GUIDE_URL" target="_blank" rel="noopener noreferrer" class="pw-link">
-                        Storage setup guide
-                        <FontAwesomeIcon :icon="faExternalLinkAlt" aria-hidden="true" />
-                        <span class="sr-only">(opens in a new tab)</span>
-                    </a>
-                    also sets lifecycle rules that remove old uploads and job files.
-                </p>
             </div>
 
             <div class="pw-actions">
