@@ -108,7 +108,10 @@ if [ "${PLANET_E2E_CLUSTER:-0}" = 1 ]; then
             exit 1
         }
     done
-    cluster_args=(-e PLANET_E2E_CLUSTER=1 -e PLANET_E2E_SECRETS=/secrets -v "$secrets_dir:/secrets:ro")
+    # tests/demo.spec.ts reads the demo data from planet/build/demo and records the tool images there.
+    mkdir -p "$planet_dir/build/demo"
+    cluster_args=(-e PLANET_E2E_CLUSTER=1 -e PLANET_E2E_SECRETS=/secrets -v "$secrets_dir:/secrets:ro"
+        -e PLANET_E2E_DEMO=/demo -v "$planet_dir/build/demo:/demo")
     if [ $# -eq 0 ]; then
         set -- cluster.spec.ts
     fi

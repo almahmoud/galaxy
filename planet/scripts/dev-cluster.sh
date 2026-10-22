@@ -220,14 +220,56 @@ cmd_port_forward() {
             fi
         done
     fi
-    trap 'exit 0' INT TERM
+    require curl "used to check that the port-forward answers"
+    local forward=""
+    # kubectl runs in the background, where a script's children ignore Ctrl-C; stop it on the way out.
+    trap '[[ -z "$forward" ]] || kill "$forward" 2>/dev/null; exit 0' INT TERM
     info "Forwarding 127.0.0.1:${GATEWAY_PORT} -> gateway:8080 and 127.0.0.1:${S3_PORT} -> gateway:8081 (Ctrl-C to stop)"
-    # kubectl port-forward exits when the gateway pod is replaced; reconnect to the new pod.
+    # kubectl port-forward exits when the gateway pod is replaced, and can keep running on a connection to the API
+    # server that no longer opens streams ("error creating error stream ... Timeout occurred"). Either way, start a
+    # new one.
     while true; do
-        kube -n planet port-forward --address 127.0.0.1 service/planet-gateway \
-            "${GATEWAY_PORT}:8080" "${S3_PORT}:8081" || true
+        # Not through kube(): $! must be kubectl itself, not a subshell running the function.
+        kubectl --context "$CONTEXT" -n planet port-forward --address 127.0.0.1 service/planet-gateway \
+            "${GATEWAY_PORT}:8080" "${S3_PORT}:8081" &
+        forward=$!
+        watch_forward "$forward"
+        wait "$forward" 2>/dev/null || true
+        forward=""
         info "port-forward stopped; reconnecting in 2 s"
         sleep 2
+    done
+}
+
+# Any HTTP answer through both forwarded ports, within 5 s each.
+forward_answers() {
+    curl -s -o /dev/null --max-time 5 "http://127.0.0.1:${GATEWAY_PORT}/healthz" &&
+        curl -s -o /dev/null --max-time 5 "http://127.0.0.1:${S3_PORT}/"
+}
+
+# Returns when kubectl port-forward (pid $1) exits, or after stopping it when two of the last three checks failed: a
+# failing port-forward often still answers some requests. The ports are checked every 6 s.
+watch_forward() {
+    local pid="$1" results="" tick=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 2
+        ((++tick % 3 == 0)) || continue
+        if forward_answers; then
+            results+="+"
+        else
+            results+="-"
+        fi
+        ((${#results} <= 3)) || results="${results:1}"
+        if [[ "$results" == *-*-* ]]; then
+            info "port-forward does not answer; restarting it"
+            kill "$pid" 2>/dev/null || true
+            for _ in 1 2 3 4 5; do
+                kill -0 "$pid" 2>/dev/null || return 0
+                sleep 1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+            return
+        fi
     done
 }
 
