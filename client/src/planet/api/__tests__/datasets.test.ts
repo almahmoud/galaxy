@@ -18,6 +18,7 @@ import {
     scanHtml,
     type SubresourceResolver,
     toContentDisposition,
+    withStorageShim,
 } from "../datasets";
 import {
     addDataset,
@@ -409,6 +410,50 @@ describe("gzip data of any datatype", () => {
     });
 });
 
+describe("withStorageShim", () => {
+    const shim = withStorageShim("").replace(/^<script>|<\/script>$/g, "");
+
+    it("goes after <head>, else after the doctype, else first", () => {
+        expect(withStorageShim('<!DOCTYPE html><html><HEAD lang="en"><script>a()</script>')).toMatch(
+            /^<!DOCTYPE html><html><HEAD lang="en"><script>\(\(\) => \{[\s\S]*<\/script><script>a\(\)<\/script>$/,
+        );
+        expect(withStorageShim("<!doctype html>\n<header>x</header>")).toMatch(
+            /^<!doctype html><script>[\s\S]*<header>x/,
+        );
+        expect(withStorageShim("<p>x</p>")).toMatch(/^<script>[\s\S]*<\/script><p>x<\/p>$/);
+    });
+
+    it("replaces storage and cookies that throw, and keeps those that work", () => {
+        const denied = {
+            configurable: true,
+            get() {
+                throw new DOMException("The document is sandboxed", "SecurityError");
+            },
+        };
+        const sandboxed = {} as Record<string, unknown>;
+        Object.defineProperty(sandboxed, "localStorage", denied);
+        const session = { kept: true };
+        sandboxed.sessionStorage = session;
+        const page = Object.defineProperty({} as { cookie: string }, "cookie", denied);
+        new Function("window", "document", shim)(sandboxed, page);
+        expect(page.cookie).toBe("");
+        page.cookie = "a=1";
+        expect(page.cookie).toBe("");
+
+        const storage = sandboxed.localStorage as Storage;
+        storage.setItem("theme", 1 as unknown as string);
+        storage.setItem("zoom", "2");
+        expect(storage.getItem("theme")).toBe("1");
+        expect(storage.getItem("missing")).toBeNull();
+        expect([storage.length, storage.key(1), storage.key(5)]).toEqual([2, "zoom", null]);
+        storage.removeItem("theme");
+        expect(storage.length).toBe(1);
+        storage.clear();
+        expect(storage.length).toBe(0);
+        expect(sandboxed.sessionStorage).toBe(session);
+    });
+});
+
 describe("HTML documents", () => {
     it("serves HTML datasets in a sandbox to frames and tabs, and as text to scripts", async () => {
         const source = "<html><body><script>parent.alert(1)</script></body></html>";
@@ -424,7 +469,9 @@ describe("HTML documents", () => {
         );
         expect(response.headers.get("x-content-type-options")).toBe("nosniff");
         expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-        expect(await response.text()).toContain("<script>parent.alert(1)</script>");
+        const document = await response.text();
+        expect(document).toContain("<script>parent.alert(1)</script>");
+        expect(document.indexOf("localStorage")).toBeLessThan(document.indexOf("parent.alert"));
 
         // A fetched body could become a blob: document in the app's origin.
         const fetched = await send(router, "GET", `/datasets/${hda.id}/display/?preview=True`);
@@ -512,7 +559,7 @@ describe("HTML documents", () => {
         index.entries[0].key = "state/instance/snapshot";
         bucket.put(`datasets/${dataset.uuid}/extra.json`, JSON.stringify(index));
         const body = await (await navigate(makeRouter(), `/datasets/${hda.id}/display/?preview=True`)).text();
-        expect(body).toBe('<img src="data:image/png;base64,AQ==">');
+        expect(body).toBe(withStorageShim('<img src="data:image/png;base64,AQ==">'));
     });
 
     it("serves extra files by name: documents sandboxed, images as images, directories as listings", async () => {
@@ -525,7 +572,7 @@ describe("HTML documents", () => {
         const router = makeRouter();
         const page = await navigate(router, `/datasets/${hda.id}/display/sub/page.html`);
         expect(page.headers.get("content-security-policy")).toBe(DATASET_DOCUMENT_CSP);
-        expect(await page.text()).toBe('<img src="data:image/png;base64,CQk=">');
+        expect(await page.text()).toBe(withStorageShim('<img src="data:image/png;base64,CQk=">'));
         const pageSource = await send(router, "GET", `/datasets/${hda.id}/display/sub/page.html`);
         expect(pageSource.headers.get("content-type")).toBe("text/plain; charset=utf-8");
         expect(pageSource.headers.get("content-security-policy")).toBeNull();

@@ -161,6 +161,18 @@ def collection_elements(collection, slot_of: Mapping[int, int], output_of: Mappi
     return elements
 
 
+def collection_result(hdca, slot_of: Mapping[int, int], output_of: Mapping[int, str]) -> dict[str, Any]:
+    collection = hdca.collection
+    return {
+        "name": hdca.name,
+        "collection_type": collection.collection_type,
+        # Unset until something marks it; Galaxy's populated_state column defaults to "ok".
+        "populated_state": collection.populated_state or "ok",
+        "populated_state_message": collection.populated_state_message,
+        "elements": collection_elements(collection, slot_of, output_of),
+    }
+
+
 def publish_datasets(
     manifest: Mapping[str, Any],
     uploader: DatasetUploader,
@@ -205,16 +217,7 @@ def publish_datasets(
         )
         discovered.append(record)
 
-    collections = {}
-    for name, hdca in result.collections.items():
-        collection = hdca.collection
-        collections[name] = {
-            "name": hdca.name,
-            "collection_type": collection.collection_type,
-            "populated_state": collection.populated_state,
-            "populated_state_message": collection.populated_state_message,
-            "elements": collection_elements(collection, slot_of, output_of),
-        }
+    collections = {name: collection_result(hdca, slot_of, output_of) for name, hdca in result.collections.items()}
     return outputs, discovered, collections
 
 

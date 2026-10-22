@@ -290,11 +290,13 @@ class JobEvaluator:
             value = values.get(parameter.name)
             if isinstance(value, list) or isinstance(value, model.HistoryDatasetCollectionAssociation):
                 for i, item in enumerate(DatasetListWrapper.to_dataset_instances(value)):
+                    # Collection elements stand for their datasets, as in ``process_dataset``.
+                    item = getattr(item, "hda", item)
                     if i == 0:
                         input_datasets[prefixed_name] = item
                     input_datasets[f"{prefixed_name}{i + 1}"] = item
             else:
-                input_datasets[prefixed_name] = value
+                input_datasets[prefixed_name] = getattr(value, "hda", value)
 
         visit_inputs(self.inputs, self.incoming, visitor)
         return input_datasets

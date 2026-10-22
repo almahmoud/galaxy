@@ -16,6 +16,7 @@ from conftest import (
 )
 
 from planet_runtime import (
+    datasets,
     stage_in,
     stage_out,
 )
@@ -305,3 +306,23 @@ def test_templates_cannot_see_presigned_requests(s3, layout, transfers, tmp_path
     assert stage_in.run(layout, transfers) == 0
     prepare = s3.json("jobs/secret1/prepare.json")
     assert prepare["command_line"].startswith("echo none 0 > ")
+
+
+def test_static_output_collection_is_reported_populated():
+    import galaxy.model as model
+
+    # A paired output with declared elements, as for fastp's "Paired-end output"; nothing marks it populated.
+    forward, reverse = model.HistoryDatasetAssociation(), model.HistoryDatasetAssociation()
+    outputs = {"coll|__part__|forward": forward, "coll|__part__|reverse": reverse}
+    definition = {
+        "name": "fastp on data 1: Paired-end output",
+        "collection_type": "paired",
+        "elements": [
+            {"element_identifier": "forward", "output": "coll|__part__|forward"},
+            {"element_identifier": "reverse", "output": "coll|__part__|reverse"},
+        ],
+    }
+    hdca = datasets.make_hdca(definition, lambda key: outputs[key], key="output")
+    entry = stage_out.collection_result(hdca, {}, {id(value): key for key, value in outputs.items()})
+    assert entry["populated_state"] == "ok"
+    assert [element["output"] for element in entry["elements"]] == list(outputs)

@@ -252,6 +252,36 @@ def test_collection_input(layout):
     )
 
 
+def test_collection_in_multiple_data_input(layout):
+    first = add_input(layout, "e1", "a\n", ext="json", hid=5, dbkey="hg38")
+    second = add_input(layout, "e2", "b\n", ext="json", hid=6, dbkey="hg38")
+    manifest = tool_manifest(
+        "#for $f in $reports\ncat '$f' > '${f.element_identifier}';\n#end for",
+        inputs=[{"name": "reports", "type": "data", "formats": ["json"], "multiple": True}],
+        params={"reports": {"src": "hdca", "key": "c1"}},
+        datasets={"e1": first, "e2": second},
+        collections={
+            "c1": {
+                "name": "reports",
+                "hid": 7,
+                "collection_type": "list",
+                "elements": [
+                    {"element_identifier": "s1", "input": "e1"},
+                    {"element_identifier": "s2", "input": "e2"},
+                ],
+            }
+        },
+        tool_outputs={"o": {"model_class": "ToolOutput", "name": "o", "format": "txt", "label": "${on_string}"}},
+    )
+    evaluator, result = evaluate(layout, manifest)
+    assert result.command_line == (
+        f"cat '{layout.input_path(first['uuid'])}' > 's1'; cat '{layout.input_path(second['uuid'])}' > 's2';"
+    )
+    assert sorted(evaluator.input_datasets) == ["reports", "reports1", "reports2"]
+    assert evaluator.incoming["dbkey"] == "hg38"
+    assert result.outputs["o"].label == "dataset 5 and 6"
+
+
 def test_template_error_is_reported(layout):
     manifest = tool_manifest("echo $missing_variable")
     with pytest.raises(EvaluationError) as error:

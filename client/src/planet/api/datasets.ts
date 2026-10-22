@@ -1552,6 +1552,44 @@ function quoteAttribute(value: string): string {
 }
 
 /**
+ * Gives a sandboxed document in-memory `localStorage` and `sessionStorage` and an empty `document.cookie`. In its
+ * opaque origin all three throw a SecurityError, which stops reports that read saved settings before they render,
+ * such as MultiQC's.
+ */
+const STORAGE_SHIM = `<script>(() => {
+    const memory = () => {
+        const items = new Map();
+        return {
+            get length() { return items.size; },
+            key: (index) => [...items.keys()][index] ?? null,
+            getItem: (key) => items.get(String(key)) ?? null,
+            setItem: (key, value) => { items.set(String(key), String(value)); },
+            removeItem: (key) => { items.delete(String(key)); },
+            clear: () => { items.clear(); },
+        };
+    };
+    for (const name of ["localStorage", "sessionStorage"]) {
+        try {
+            window[name];
+        } catch {
+            Object.defineProperty(window, name, { value: memory(), configurable: true });
+        }
+    }
+    try {
+        document.cookie;
+    } catch {
+        Object.defineProperty(document, "cookie", { get: () => "", set: () => {}, configurable: true });
+    }
+})();</script>`;
+
+/** Adds {@link STORAGE_SHIM} to an HTML document before its own scripts: after `<head>`, or else the doctype. */
+export function withStorageShim(source: string): string {
+    const anchor = /<head(?:\s[^>]*)?>/i.exec(source) ?? /^\s*<!doctype[^>]*>/i.exec(source);
+    const at = anchor ? anchor.index + anchor[0].length : 0;
+    return source.slice(0, at) + STORAGE_SHIM + source.slice(at);
+}
+
+/**
  * Rewrites the relative subresources of an HTML document stored in a dataset's extra files: `src`, `srcset`,
  * `poster`, `background`, stylesheet and icon `href`, and CSS in `<style>` elements and `style` attributes. Links
  * (`<a>`, `<area>`, `<form>`) stay relative; they navigate to the dataset's display route.
@@ -1852,7 +1890,7 @@ async function sandboxedDocument(
     const body = index
         ? await rewriteHtml(source, memberPath ? dirname(memberPath) : "", archiveResolver(client, row.dataset, index))
         : source;
-    return html(body, { csp, headers });
+    return html(withStorageShim(body), { csp, headers });
 }
 
 // ---------------------------------------------------------------------------------------------------------
